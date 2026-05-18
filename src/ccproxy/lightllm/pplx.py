@@ -53,9 +53,7 @@ PERPLEXITY_URL_BASE = "https://www.perplexity.ai"
 PERPLEXITY_URL = f"{PERPLEXITY_URL_BASE}/rest/sse/perplexity_ask"
 PERPLEXITY_PREFLIGHT_URL = f"{PERPLEXITY_URL_BASE}/search/new"
 PERPLEXITY_API_VERSION = "2.18"
-PERPLEXITY_BROWSER_UA = (
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
-)
+PERPLEXITY_BROWSER_UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 PERPLEXITY_SESSION_COOKIE = "__Secure-next-auth.session-token"
 PERPLEXITY_PROVIDER_NAME = "perplexity_pro"
 
@@ -96,14 +94,14 @@ PERPLEXITY_BLOCK_USE_CASES: list[str] = [
 _CITATION_PATTERN = re.compile(r"\[(\d+)\]")
 
 
-def _load_models() -> dict[str, dict[str, str]]:
+def load_pplx_models() -> dict[str, dict[str, str]]:
     """Load the vendored Perplexity model catalog keyed by public model id."""
     raw: bytes = files("ccproxy.specs").joinpath("perplexity_models.json").read_bytes()  # type: ignore[arg-type]
     data: list[dict[str, str]] = json.loads(raw)
     return {m["id"]: {"identifier": m["identifier"], "mode": m["mode"]} for m in data}
 
 
-PERPLEXITY_MODELS: dict[str, dict[str, str]] = _load_models()
+PERPLEXITY_MODELS: dict[str, dict[str, str]] = load_pplx_models()
 
 
 _SOURCE_MAP: dict[str, str] = {
@@ -133,7 +131,11 @@ def _flatten_messages(messages: list[Any]) -> str:
     parts: list[str] = []
     for msg in messages:
         role = msg.get("role") if isinstance(msg, dict) else getattr(msg, "role", None)
-        content = msg.get("content") if isinstance(msg, dict) else getattr(msg, "content", None)
+        content = (
+            msg.get("content")
+            if isinstance(msg, dict)
+            else getattr(msg, "content", None)
+        )
 
         text = ""
         if isinstance(content, str):
@@ -157,6 +159,36 @@ def _flatten_messages(messages: list[Any]) -> str:
     return "\n\n".join(parts)
 
 
+def _flatten_last_user_turn(messages: list[Any]) -> str:
+    """Extract text from the last ``role == "user"`` message.
+
+    Followup requests identify the thread via ``last_backend_uuid``; the
+    Perplexity server already holds the full conversation, so ``dsl_query``
+    must carry only the new user turn — not the flattened history.
+    """
+    for msg in reversed(messages):
+        role = msg.get("role") if isinstance(msg, dict) else getattr(msg, "role", None)
+        if role != "user":
+            continue
+        content = (
+            msg.get("content")
+            if isinstance(msg, dict)
+            else getattr(msg, "content", None)
+        )
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            text_parts: list[str] = []
+            for part in content:
+                if isinstance(part, dict) and part.get("type") == "text":
+                    t = part.get("text")
+                    if isinstance(t, str):
+                        text_parts.append(t)
+            return "\n".join(text_parts)
+        return ""
+    return ""
+
+
 def _build_pplx_payload(
     query: str,
     model_id: str,
@@ -172,7 +204,9 @@ def _build_pplx_payload(
     meta = PERPLEXITY_MODELS.get(model_id)
     if meta is None:
         available = ", ".join(sorted(PERPLEXITY_MODELS))
-        raise ValueError(f"Unknown Perplexity model {model_id!r}. Available: {available}")
+        raise ValueError(
+            f"Unknown Perplexity model {model_id!r}. Available: {available}"
+        )
 
     raw_sources = extras.get("source_focus", "web")
     if not isinstance(raw_sources, list):
@@ -188,7 +222,7 @@ def _build_pplx_payload(
             "name": "",
         }
 
-    save_to_library = bool(extras.get("save_to_library", False))
+    save_to_library = bool(extras.get("save_to_library", True))
 
     last_backend_uuid = extras.get("last_backend_uuid") or extras.get("thread_uuid")
     is_followup = last_backend_uuid is not None
@@ -196,6 +230,7 @@ def _build_pplx_payload(
     frontend_uuid = str(uuid.uuid4())
     frontend_context_uuid = extras.get("frontend_context_uuid") or str(uuid.uuid4())
 
+    # TODO: determine field requirements/usage, then properly parameterize.
     params: dict[str, Any] = {
         "version": PERPLEXITY_API_VERSION,
         "source": "default",
@@ -203,7 +238,8 @@ def _build_pplx_payload(
         "timezone": extras.get("timezone", "America/Los_Angeles"),
         "search_focus": _SEARCH_MAP.get(extras.get("search_focus", "web"), "internet"),
         "sources": sources,
-        "search_recency_filter": _TIME_MAP.get(extras.get("time_range", "all"), "") or None,
+        "search_recency_filter": _TIME_MAP.get(extras.get("time_range", "all"), "")
+        or None,
         "mode": meta["mode"],
         "model_preference": meta["identifier"],
         "frontend_uuid": frontend_uuid,
@@ -292,7 +328,9 @@ def _parse_sse_line(line: str | bytes) -> dict[str, Any] | None:
         return None
 
 
-def _extract_deltas(event: dict[str, Any], state: StreamState) -> tuple[str | None, str | None]:
+def _extract_deltas(
+    event: dict[str, Any], state: StreamState
+) -> tuple[str | None, str | None]:
     """Apply one SSE event to ``state``; return new (answer_delta, reasoning_delta).
 
     Walks ``event["blocks"][*]``:
@@ -330,8 +368,13 @@ def _extract_deltas(event: dict[str, Any], state: StreamState) -> tuple[str | No
             parsed = None
         if isinstance(parsed, list):
             for step in parsed:
-                if isinstance(step, dict) and step.get("step_type") == "RESEARCH_CLARIFYING_QUESTIONS":
-                    raise PerplexityClarifyingQuestionsError(_extract_clarifying_questions(step))
+                if (
+                    isinstance(step, dict)
+                    and step.get("step_type") == "RESEARCH_CLARIFYING_QUESTIONS"
+                ):
+                    raise PerplexityClarifyingQuestionsError(
+                        _extract_clarifying_questions(step)
+                    )
 
     answer_delta: str | None = None
     reasoning_delta: str | None = None
@@ -555,7 +598,9 @@ def _extract_final_answer(
             except json.JSONDecodeError:
                 pass
         raw_text = answer_data.get("answer") if isinstance(answer_data, dict) else None
-        web_results = answer_data.get("web_results") if isinstance(answer_data, dict) else None
+        web_results = (
+            answer_data.get("web_results") if isinstance(answer_data, dict) else None
+        )
         if not isinstance(web_results, list):
             web_results = []
         text = _format_citations(
@@ -613,7 +658,10 @@ def _thread_to_openai_messages(
                             if isinstance(d, str) and d:
                                 reasoning_lines.append(d)
             if reasoning_lines:
-                answer_text = f"{answer_text}\n\n---\n**Reasoning:**\n\n- " + "\n- ".join(reasoning_lines)
+                answer_text = (
+                    f"{answer_text}\n\n---\n**Reasoning:**\n\n- "
+                    + "\n- ".join(reasoning_lines)
+                )
 
         out.append({"role": "assistant", "content": answer_text})
     return out
@@ -631,7 +679,9 @@ class PerplexityClarifyingQuestionsError(PerplexityException):
     """Deep Research returned clarifying questions instead of an answer."""
 
     def __init__(self, questions: list[str]) -> None:
-        message = "Perplexity Deep Research requires clarification: " + "; ".join(questions)
+        message = "Perplexity Deep Research requires clarification: " + "; ".join(
+            questions
+        )
         super().__init__(status_code=400, message=message, headers=None)
         self.questions = questions
 
@@ -669,7 +719,9 @@ class PerplexityProConfig(BaseConfig):
         api_base: str | None = None,
     ) -> dict[str, str]:
         if not api_key:
-            raise ValueError("Perplexity Pro requires the session-token cookie value as api_key")
+            raise ValueError(
+                "Perplexity Pro requires the session-token cookie value as api_key"
+            )
         out = dict(headers)
         out["Cookie"] = f"{PERPLEXITY_SESSION_COOKIE}={api_key}"
         out["User-Agent"] = PERPLEXITY_BROWSER_UA
@@ -707,8 +759,16 @@ class PerplexityProConfig(BaseConfig):
     ) -> dict[str, Any]:
         raw_extras = optional_params.get("pplx") or {}
         extras: dict[str, Any] = raw_extras if isinstance(raw_extras, dict) else {}
+        is_followup = bool(
+            extras.get("last_backend_uuid") or extras.get("thread_uuid")
+        )
+        query = (
+            _flatten_last_user_turn(messages)
+            if is_followup
+            else _flatten_messages(messages)
+        )
         return _build_pplx_payload(
-            query=_flatten_messages(messages),
+            query=query,
             model_id=model,
             extras=extras,
         )
@@ -748,7 +808,9 @@ class PerplexityProConfig(BaseConfig):
 
         model_response.id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
         model_response.model = model
-        model_response.choices = [Choices(index=0, message=message, finish_reason="stop")]
+        model_response.choices = [
+            Choices(index=0, message=message, finish_reason="stop")
+        ]
 
         slug = state.ids.get("thread_url_slug")
         if slug:
@@ -764,7 +826,9 @@ class PerplexityProConfig(BaseConfig):
         status_code: int,
         headers: Any,
     ) -> BaseLLMException:
-        return PerplexityException(status_code=status_code, message=error_message, headers=headers)
+        return PerplexityException(
+            status_code=status_code, message=error_message, headers=headers
+        )
 
     def get_model_response_iterator(
         self,

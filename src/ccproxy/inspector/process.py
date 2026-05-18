@@ -114,6 +114,7 @@ def _make_transform_router() -> Any:
     from ccproxy.inspector.router import InspectorRouter
     from ccproxy.inspector.routes.health import register_health_routes
     from ccproxy.inspector.routes.models import register_models_routes
+    from ccproxy.inspector.routes.pplx import register_pplx_routes
     from ccproxy.inspector.routes.transform import register_transform_routes
 
     router = InspectorRouter(
@@ -121,10 +122,11 @@ def _make_transform_router() -> Any:
         request_passthrough=True,
         response_passthrough=True,
     )
-    # /v1/models and /health register first so their specific matches win
-    # over the transform router's /{path} catch-all.
+    # Specific-path synthetic routes register before the transform /{path}
+    # catch-all so they win on exact match.
     register_models_routes(router)
     register_health_routes(router)
+    register_pplx_routes(router)
     register_transform_routes(router)
     return router
 

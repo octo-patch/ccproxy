@@ -12,12 +12,14 @@ from ccproxy.config import PplxConfig, PplxThreadConfig
 from ccproxy.lightllm.pplx import (
     PERPLEXITY_BLOCK_USE_CASES,
     PERPLEXITY_MODELS,
+    PerplexityClarifyingQuestionsError,
+    PerplexityProConfig,
+    StreamState,
     _build_pplx_payload,
     _extract_deltas,
+    _flatten_last_user_turn,
     _flatten_messages,
     _parse_sse_line,
-    PerplexityClarifyingQuestionsError,
-    StreamState,
     _thread_to_openai_messages,
 )
 from ccproxy.lightllm.pplx_threads import (
@@ -110,6 +112,89 @@ def test_flatten_messages_drops_image_url_parts() -> None:
     assert out.startswith("[System]: you are helpful")
     assert "what is in this image?" in out
     assert "image_url" not in out
+
+
+def test_flatten_last_user_turn_extracts_only_new_turn() -> None:
+    assert (
+        _flatten_last_user_turn(
+            [
+                {"role": "user", "content": "a"},
+                {"role": "assistant", "content": "b"},
+                {"role": "user", "content": "c"},
+            ]
+        )
+        == "c"
+    )
+
+    assert (
+        _flatten_last_user_turn(
+            [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "hi"},
+                        {"type": "image_url", "image_url": {"url": "http://x/img.png"}},
+                    ],
+                }
+            ]
+        )
+        == "hi"
+    )
+
+    assert (
+        _flatten_last_user_turn(
+            [
+                {"role": "user", "content": "a"},
+                {"role": "tool", "content": "result"},
+                {"role": "user", "content": "b"},
+            ]
+        )
+        == "b"
+    )
+
+    assert _flatten_last_user_turn([]) == ""
+    assert (
+        _flatten_last_user_turn(
+            [{"role": "system", "content": "s"}, {"role": "assistant", "content": "a"}]
+        )
+        == ""
+    )
+
+
+def test_transform_request_followup_sends_only_new_turn() -> None:
+    config = PerplexityProConfig()
+    payload = config.transform_request(
+        model="perplexity/best",
+        messages=[
+            {"role": "user", "content": "Name a fruit"},
+            {"role": "assistant", "content": "Apple"},
+            {"role": "user", "content": "Name a vegetable"},
+        ],
+        optional_params={"pplx": {"last_backend_uuid": "B1"}},
+        litellm_params={},
+        headers={},
+    )
+    assert payload["query_str"] == "Name a vegetable"
+    assert payload["params"]["dsl_query"] == "Name a vegetable"
+    assert payload["params"]["query_source"] == "followup"
+    assert payload["params"]["last_backend_uuid"] == "B1"
+
+
+def test_transform_request_first_turn_still_flattens_full_history() -> None:
+    config = PerplexityProConfig()
+    payload = config.transform_request(
+        model="perplexity/best",
+        messages=[
+            {"role": "system", "content": "helpful"},
+            {"role": "user", "content": "what is quantum?"},
+        ],
+        optional_params={},
+        litellm_params={},
+        headers={},
+    )
+    assert payload["query_str"].startswith("[System]: helpful")
+    assert "what is quantum?" in payload["query_str"]
+    assert payload["params"]["query_source"] == "home"
 
 
 def test_parse_sse_line_basic() -> None:
