@@ -196,19 +196,17 @@ class GeminiAddon:
         }
         profile = flow.metadata.get("ccproxy.fingerprint_profile") or transport.DEFAULT_PROFILE
         try:
-            # timeout=None: ccproxy does not enforce per-request timeouts on LLM
-            # calls (slow inference is the norm). Matches OAuthAddon retry.
             client = await transport.get_client(host=flow.request.pretty_host, profile=profile)
             response = await client.request(
                 method=flow.request.method,
                 url=flow.request.pretty_url,
                 headers=retry_headers,
                 content=new_body,
-                timeout=None,
+                timeout=get_config().provider_timeout or 300.0,
             )
-        except httpx.HTTPError:
+        except Exception:
             logger.warning(
-                "gemini_capacity_fallback: %s network error",
+                "gemini_capacity_fallback: %s retry failed",
                 model,
                 exc_info=True,
             )

@@ -756,3 +756,47 @@ class TestTransportDispatchIntegration:
             profile="firefox133",
         )
         assert flow.metadata["ccproxy.retry_profile"] == "firefox133"
+
+
+class TestAttemptRequestRegression:
+    """Regression tests for ``_attempt_request`` edge cases that would crash the addon."""
+
+    @pytest.mark.asyncio
+    async def test_catches_non_http_error_returns_none(self) -> None:
+        """TypeError from curl-cffi (None + None timeout) must not crash the fallback."""
+        _set_capacity(fallback_models=["gemini-2.5-pro"], sticky_retry_attempts=0)
+        flow = _make_flow()
+        addon = GeminiAddon()
+
+        request_mock = AsyncMock(
+            side_effect=TypeError("unsupported operand type(s) for +: 'NoneType' and 'NoneType'")
+        )
+        mock_get_client = _make_transport_patch(request_mock)
+        with patch("ccproxy.inspector.gemini_addon.transport.get_client", new=mock_get_client):
+            result = await addon._try_fallback_models(flow)
+
+        assert result is False
+        assert flow.response.status_code == 429
+
+    @pytest.mark.asyncio
+    async def test_passes_non_none_timeout_to_client_request(self) -> None:
+        """The timeout passed to client.request must never be None.
+
+        curl-cffi's set_curl_options does ``connect_timeout + read_timeout``;
+        when both are None this produces ``TypeError``. A non-None timeout
+        (explicit or defaulted) prevents the crash.
+        """
+        _set_capacity(fallback_models=["gemini-2.5-pro"], sticky_retry_attempts=0)
+        flow = _make_flow()
+        addon = GeminiAddon()
+
+        success = _success_response()
+        request_mock = AsyncMock(return_value=success)
+        mock_get_client = _make_transport_patch(request_mock)
+        with patch("ccproxy.inspector.gemini_addon.transport.get_client", new=mock_get_client):
+            await addon._try_fallback_models(flow)
+
+        assert request_mock.call_count == 1
+        timeout = request_mock.call_args.kwargs.get("timeout")
+        assert timeout is not None
+        assert timeout > 0
