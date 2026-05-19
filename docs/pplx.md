@@ -27,6 +27,7 @@ layer — just clean format translation.
 - [Thread continuation — internals](#thread-continuation--internals)
 - [The `/search/new` preflight](#the-searchnew-preflight)
 - [Multimodal file uploads](#multimodal-file-uploads)
+- [Step rendering & MCP connectors](#step-rendering--mcp-connectors)
 - [Fingerprint impersonation](#fingerprint-impersonation)
 - [Headers and the `x-perplexity-request-reason` family](#headers-and-the-x-perplexity-request-reason-family)
 - [Code layout](#code-layout)
@@ -1126,6 +1127,174 @@ The main `/rest/sse/perplexity_ask` call is NOT attempted if uploads fail
 — if you asked the model to analyze an image and ccproxy couldn't upload
 the image, sending the query without the attachment would yield a wrong
 answer. Fail loudly.
+
+---
+
+## Step rendering & MCP connectors
+
+### Why this exists
+
+Perplexity's `/rest/sse/perplexity_ask` stream carries far more than the
+answer text. Each event's `blocks[].plan_block.steps[]` array — and the
+parallel `event.text` JSON-encoded mirror — describes the model's
+internal actions: web searches, page reads, **MCP tool invocations and
+results from server-side connectors** (GitHub, Slack, Gmail, etc.), image
+generation, browser-agent steps, and 60+ other action types. ccproxy
+surfaces this trail as Claude-style `reasoning_content` (thinking blocks)
+plus non-spec response fields, so OpenAI clients can see what the model
+actually did instead of just the final answer.
+
+### What we do NOT do
+
+ccproxy **does not accept** OpenAI `tools=[...]` parameters. Perplexity's
+API has no native tool-calling field, and the model has no way to call a
+client-side tool through ccproxy regardless. Earlier experiments with
+prompt-injecting tool definitions into `query_str` (the FreeAI-Gateway /
+Chat2API pattern) were defeated by every frontier model tested in 2026 —
+Claude, GPT-5, DeepSeek, Grok all explicitly detected and refused the
+injection. That code was removed. The real "tool calling" on Perplexity
+is the **MCP connectors** path described below, configured by the user
+on perplexity.ai (Settings → Connectors → enable GitHub/Slack/etc. via
+OAuth) and invoked by Perplexity's backend on the model's behalf.
+
+### What we surface to the client
+
+For every Perplexity response:
+
+| Channel | What it carries |
+|---|---|
+| `choices[0].message.content` (non-streaming) / `delta.content` (streaming) | The final answer text (existing behavior) |
+| `choices[0].message.reasoning_content` / `delta.reasoning_content` | Per-step "thinking" lines: `→ [GitHub] get_me({}): Getting authenticated user info`, `← get_me (success)`, `→ Web search: ...`, `→ Browser navigate: https://...`, etc. |
+| `response.model` | The upstream `display_model` (e.g. `claude46sonnet`) — the actual model that fired, not the requested alias |
+| `response.pplx_thread_url_slug` | The Perplexity thread slug for followup queries (existing) |
+| `response.pplx_thread_title` | Server-generated thread title |
+| `response.pplx_mcp_steps` | Structured list of MCP tool calls (input + output pairs) with `tool_name`, `tool_args`, `app`, `status`, parsed result `content`, `goal_id`, `needs_user_approval`, etc. |
+| `response.pplx_steps` | All rendered steps (MCP + non-MCP) with `step_type` + per-renderer structured fields. The complete trail. |
+| `response.pplx_goals` | The plan_block.goals[] snapshot (high-level milestones) |
+| `response.pplx_pending_followups` | Server-suggested followup questions |
+
+Non-spec fields are best-effort attached via Pydantic dynamic attribute
+assignment; standard OpenAI clients ignore unknown fields, agentic
+clients can introspect.
+
+### The step renderer
+
+Lives in `src/ccproxy/lightllm/pplx_steps.py`. Two architectural choices:
+
+1. **Naming convention dispatch** (reverse-engineered from the SPA bundle's
+   `ThreadEntryContext-hgdcVwpW.js` `??` content-field chain): every
+   `step_type` like `MCP_TOOL_INPUT` has a typed payload at the matching
+   `mcp_tool_input_content` field. The dispatcher synthesizes the key via
+   `step_type.lower() + "_content"`. Falls back to the generic `content`
+   key for the `event.text` JSON-mirror shape. This is what lets us
+   support the entire 65+ step_type enum without a hardcoded table for
+   each one.
+
+2. **Specialized renderer per common category, generic catch-all for
+   unknowns.** The full SPA enum (`STEP_TYPE_ENUM.md` in the research
+   tree) defines 68 step types; we ship specialized renderers for ~15 of
+   the most common (MCP, web search, browser agent, image generation,
+   calendar/email connectors, code execution, etc.) and a generic
+   fallback (`_render_generic`) that captures the full content dict as
+   structured data plus logs at DEBUG. Nothing is silently dropped:
+   unknown step types appear in `response.pplx_steps` with `phase:
+   "unmapped"` and a debug log fires once per stream.
+
+### The two channels for steps
+
+Perplexity emits step data in two places:
+
+- **Structured** (canonical, preferred): inside
+  `blocks[].plan_block.steps[]` with typed `*_content` fields.
+- **Text-field mirror** (fallback): the top-level `event.text` field
+  contains a JSON-encoded array of step objects with a generic `content`
+  key. Some events ship only one or the other.
+
+`_extract_deltas` reads structured first. The text-field mirror is
+walked only when the same event has **no** `plan_block` blocks, to avoid
+double-emission. The one exception is `RESEARCH_CLARIFYING_QUESTIONS` —
+that always raises (Deep Research clarification → 400 to client),
+regardless of channel.
+
+Step uuids are deduplicated via `state.seen_step_uuids`: server sends
+cumulative events, so the same `MCP_TOOL_INPUT` step appears across
+multiple SSE events as the plan grows. We render it once.
+
+### MCP_TOOL_INPUT / MCP_TOOL_OUTPUT wire shape
+
+From `~/dev/scratch/research/pplx/sse-research/STEP_TYPE_ENUM.md` (SPA
+bundle extraction) + live capture against a connected GitHub MCP server:
+
+```json
+{
+  "step_type": "MCP_TOOL_INPUT",
+  "uuid": "975899ad-...",
+  "mcp_tool_input_content": {
+    "goal_id": "0",                  // pairs with MCP_TOOL_OUTPUT
+    "tool_name": "get_me",
+    "tool_args": {},
+    "app": "GitHub",
+    "mcp_server_type": "MCP_SERVER_TYPE_REMOTE",
+    "source_type": "github_mcp_direct",
+    "tool_input_summary": "Getting authenticated user info",
+    "request_user_approval": {"request_user_approval": false},
+    "approval_result": null,
+    "logo_url": "https://frontend-cdn.perplexity.ai/.../source-icons/github.webp"
+  }
+}
+```
+
+```json
+{
+  "step_type": "MCP_TOOL_OUTPUT",
+  "uuid": "d2f7ccf4-...",
+  "tool_name": "github_mcp_direct_get_me",
+  "mcp_tool_output_content": {
+    "goal_id": "0",
+    "status": "success",
+    "content": "{\"login\":\"starbaser\",...}",  // JSON-encoded result
+    "should_rerun_query": false,
+    "app": "GitHub",
+    "authenticated": true
+  }
+}
+```
+
+We parse the JSON-encoded `content` and surface it as a typed dict on
+`pplx_mcp_steps[i].content`. When parsing fails, the raw string is kept.
+
+### `should_ask_for_mcp_tool_confirmation`
+
+Always `True` on the wire (matches SPA traffic). For read-only tools on
+already-authorized connectors (e.g. GitHub `get_me`), Perplexity
+auto-approves and `request_user_approval.request_user_approval` returns
+`false` regardless. For write actions (e.g. GitHub `create_branch`), the
+approval flow may activate via the secondary SSE channel
+`/rest/sse/handle_tool_user_approval_response` — wire format not yet
+captured. See `pplx-plan.md` Phase E for the planned probe.
+
+### What we deliberately drop
+
+Top-level event fields that are pure browser-UI control flow:
+`cursor`, `message_mode`, `reconnectable`, `text_completed`,
+`frontend_uuid`, `frontend_context_uuid`, `entry_*_datetime`,
+`bookmark_state`, `thread_access`, `privacy_state`, `s3_social_preview_url`,
+`author_*`, `_extras`, `gpt4`, request echoes (`mode`, `search_focus`,
+`prompt_source`, `query_str`, etc.), telemetry. These are SPA state that
+client-side OpenAI consumers don't need.
+
+### Test coverage
+
+- `tests/test_pplx_steps.py`: 22 renderer tests covering the dispatch
+  convention, unknown-step-type fallback, MCP tool input/output (full
+  structured + text-field shapes), web search, browser agent, image
+  generation, calendar/email, code execution, clarifying questions.
+- `tests/test_lightllm_pplx.py`: integration tests for
+  `_extract_deltas` walking `plan_block.steps[]`, dedup across events,
+  bare `markdown_block` handling, unknown-`intended_usage` DEBUG logging
+  (with dedup), the text-field vs structured-channel double-emit
+  prevention, and the non-spec field attachment on both streaming and
+  non-streaming responses.
 
 ---
 

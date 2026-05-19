@@ -453,3 +453,250 @@ def test_iterator_emits_content_and_reasoning_deltas() -> None:
     c3 = iterator.chunk_parser(e3)
     assert c3.choices[0].finish_reason == "stop"
     assert getattr(c3, "pplx_thread_url_slug", None) == "slug-final"
+
+
+# --- Step rendering integration tests (plan_block.steps[] + non-spec fields) ---
+
+
+def _mcp_event(step_type: str, *, uuid: str, content: dict[str, Any]) -> dict[str, Any]:
+    """Synthesize a pro_search_steps event carrying one plan_block step."""
+    return {
+        "blocks": [
+            {
+                "intended_usage": "pro_search_steps",
+                "plan_block": {
+                    "progress": "IN_PROGRESS",
+                    "goals": [],
+                    "steps": [
+                        {
+                            "uuid": uuid,
+                            "step_type": step_type,
+                            f"{step_type.lower()}_content": content,
+                        }
+                    ],
+                    "final": False,
+                },
+            }
+        ],
+        "display_model": "claude46sonnet",
+    }
+
+
+def test_extract_deltas_walks_plan_block_steps_for_mcp() -> None:
+    from ccproxy.lightllm.pplx import StreamState, _extract_deltas
+
+    state = StreamState()
+    event = _mcp_event(
+        "MCP_TOOL_INPUT",
+        uuid="step-1",
+        content={
+            "goal_id": "0",
+            "tool_name": "get_me",
+            "tool_args": {},
+            "app": "GitHub",
+            "tool_input_summary": "Getting user info",
+            "request_user_approval": {"request_user_approval": False},
+            "mcp_server_type": "MCP_SERVER_TYPE_REMOTE",
+            "source_type": "github_mcp_direct",
+        },
+    )
+    _, reasoning = _extract_deltas(event, state)
+    assert reasoning is not None
+    assert "[GitHub] get_me" in reasoning
+    assert len(state.mcp_steps) == 1
+    assert state.mcp_steps[0]["tool_name"] == "get_me"
+    assert state.mcp_steps[0]["app"] == "GitHub"
+    assert len(state.all_steps) == 1
+    assert state.all_steps[0]["step_type"] == "MCP_TOOL_INPUT"
+    assert "step-1" in state.seen_step_uuids
+
+
+def test_extract_deltas_dedups_step_uuid_across_events() -> None:
+    from ccproxy.lightllm.pplx import StreamState, _extract_deltas
+
+    state = StreamState()
+    event = _mcp_event(
+        "MCP_TOOL_INPUT",
+        uuid="dup-1",
+        content={"tool_name": "x", "tool_args": {}, "app": "GitHub"},
+    )
+    _extract_deltas(event, state)
+    _extract_deltas(event, state)
+    _extract_deltas(event, state)
+    assert len(state.mcp_steps) == 1  # only once across 3 cumulative events
+    assert len(state.all_steps) == 1
+
+
+def test_extract_deltas_captures_goals_snapshot() -> None:
+    from ccproxy.lightllm.pplx import StreamState, _extract_deltas
+
+    state = StreamState()
+    event = {
+        "blocks": [
+            {
+                "intended_usage": "plan",
+                "plan_block": {
+                    "progress": "DONE",
+                    "goals": [
+                        {"id": "0", "description": "Opening GitHub", "final": True},
+                        {"id": "1", "description": "Searching PRs", "final": True},
+                    ],
+                    "steps": [],
+                    "final": True,
+                },
+            }
+        ]
+    }
+    _extract_deltas(event, state)
+    assert len(state.goals) == 2
+    assert state.goals[0]["description"] == "Opening GitHub"
+
+
+def test_extract_deltas_handles_bare_markdown_block() -> None:
+    """Terminal event ships markdown_block directly under the block (no diff_block)."""
+    from ccproxy.lightllm.pplx import StreamState, _extract_deltas
+
+    state = StreamState()
+    state.answer_seen = "Hello"  # simulate diff_block already accumulated this
+    event = {
+        "blocks": [
+            {
+                "intended_usage": "ask_text_0_markdown",
+                "markdown_block": {
+                    "progress": "DONE",
+                    "answer": "Hello, world!",
+                    "chunks": [],
+                },
+            }
+        ]
+    }
+    answer_delta, _ = _extract_deltas(event, state)
+    assert answer_delta == ", world!"
+    assert state.answer_seen == "Hello, world!"
+
+
+def test_extract_deltas_logs_unknown_intended_usage(caplog) -> None:
+    import logging
+
+    from ccproxy.lightllm.pplx import StreamState, _extract_deltas
+
+    state = StreamState()
+    event = {"blocks": [{"intended_usage": "totally_new_block_type", "totally_new_block": {}}]}
+    with caplog.at_level(logging.DEBUG, logger="ccproxy.lightllm.pplx"):
+        _extract_deltas(event, state)
+    assert "totally_new_block_type" in state.logged_unknown_intended_usages
+    assert any("totally_new_block_type" in r.message for r in caplog.records)
+    # Re-fire — should NOT log again (dedup).
+    caplog.clear()
+    with caplog.at_level(logging.DEBUG, logger="ccproxy.lightllm.pplx"):
+        _extract_deltas(event, state)
+    assert not any("totally_new_block_type" in r.message for r in caplog.records)
+
+
+def test_text_field_steps_skipped_when_plan_block_present() -> None:
+    """Avoid double-emit: the structured channel wins when both exist in one event."""
+    from ccproxy.lightllm.pplx import StreamState, _extract_deltas
+
+    state = StreamState()
+    event = {
+        "text": json.dumps(
+            [{"step_type": "MCP_TOOL_INPUT", "uuid": "from-text", "content": {"tool_name": "x", "app": "A"}}]
+        ),
+        "blocks": [
+            {
+                "intended_usage": "pro_search_steps",
+                "plan_block": {
+                    "steps": [
+                        {
+                            "step_type": "MCP_TOOL_INPUT",
+                            "uuid": "from-structured",
+                            "mcp_tool_input_content": {"tool_name": "y", "app": "B"},
+                        }
+                    ],
+                    "goals": [],
+                }
+            }
+        ],
+    }
+    _extract_deltas(event, state)
+    # Only the structured channel step was consumed
+    assert len(state.mcp_steps) == 1
+    assert state.mcp_steps[0]["tool_name"] == "y"
+
+
+def test_text_field_steps_processed_when_no_plan_block() -> None:
+    from ccproxy.lightllm.pplx import StreamState, _extract_deltas
+
+    state = StreamState()
+    event = {
+        "text": json.dumps(
+            [{"step_type": "MCP_TOOL_INPUT", "uuid": "text-only", "content": {"tool_name": "z", "app": "C"}}]
+        ),
+        "blocks": [],
+    }
+    _, reasoning = _extract_deltas(event, state)
+    assert reasoning is not None
+    assert "[C] z" in reasoning
+    assert len(state.mcp_steps) == 1
+
+
+def test_transform_response_attaches_pplx_mcp_steps_and_uses_display_model() -> None:
+    """Non-streaming: response carries display_model + mcp_steps non-spec field."""
+    from unittest.mock import MagicMock
+
+    import httpx
+    from litellm.types.utils import ModelResponse
+
+    from ccproxy.lightllm.pplx import PerplexityProConfig
+
+    config = PerplexityProConfig()
+    # Build a synthetic SSE body with one MCP_TOOL_INPUT step + terminator
+    event1 = _mcp_event(
+        "MCP_TOOL_INPUT",
+        uuid="resp-1",
+        content={"tool_name": "get_me", "tool_args": {}, "app": "GitHub"},
+    )
+    event2 = {"final_sse_message": True}
+    sse_body = (
+        f"data: {json.dumps(event1)}\n\n"
+        f"data: {json.dumps(event2)}\n\n"
+    )
+    fake_response = MagicMock(spec=httpx.Response)
+    fake_response.text = sse_body
+
+    result = config.transform_response(
+        model="perplexity/best",
+        raw_response=fake_response,
+        model_response=ModelResponse(),
+        logging_obj=MagicMock(),
+        request_data={},
+        messages=[],
+        optional_params={},
+        litellm_params={},
+        encoding=None,
+    )
+    assert result.model == "claude46sonnet"  # display_model wins over requested alias
+    assert getattr(result, "pplx_mcp_steps", None) is not None
+    assert len(result.pplx_mcp_steps) == 1
+    assert result.pplx_mcp_steps[0]["tool_name"] == "get_me"
+    assert getattr(result, "pplx_steps", None) is not None
+
+
+def test_iterator_attaches_non_spec_fields_on_terminal_chunk() -> None:
+    from ccproxy.lightllm.pplx import PerplexityProIterator
+
+    iterator = PerplexityProIterator(streaming_response=iter([]), sync_stream=True)
+    iterator.chunk_parser(
+        _mcp_event(
+            "MCP_TOOL_INPUT",
+            uuid="stream-1",
+            content={"tool_name": "get_me", "tool_args": {}, "app": "GitHub"},
+        )
+    )
+    terminal = iterator.chunk_parser({"final_sse_message": True, "thread_url_slug": "slug-x"})
+    assert terminal is not None
+    assert terminal.choices[0].finish_reason == "stop"
+    assert getattr(terminal, "pplx_thread_url_slug", None) == "slug-x"
+    assert getattr(terminal, "pplx_mcp_steps", None) is not None
+    assert len(terminal.pplx_mcp_steps) == 1
+    assert getattr(terminal, "pplx_steps", None) is not None

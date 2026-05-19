@@ -41,6 +41,8 @@ from litellm.llms.base_llm.base_model_iterator import BaseModelResponseIterator
 from litellm.llms.base_llm.chat.transformation import BaseConfig, BaseLLMException
 from litellm.types.utils import ModelResponse, ModelResponseStream
 
+from ccproxy.lightllm.pplx_steps import _KNOWN_INTENDED_USAGES, render_step
+
 if TYPE_CHECKING:
     import httpx
     from litellm.litellm_core_utils.litellm_logging import Logging as LiteLLMLoggingObj
@@ -62,31 +64,8 @@ PERPLEXITY_FEATURES: list[str] = ["browser_agent_permission_banner_v1.1"]
 PERPLEXITY_BLOCK_USE_CASES: list[str] = [
     "answer_modes",
     "media_items",
-    "knowledge_cards",
-    "inline_entity_cards",
-    "place_widgets",
-    "finance_widgets",
-    "prediction_market_widgets",
-    "sports_widgets",
-    "flight_status_widgets",
-    "news_widgets",
-    "shopping_widgets",
-    "jobs_widgets",
-    "search_result_widgets",
-    "inline_images",
-    "inline_assets",
-    "placeholder_cards",
     "diff_blocks",
-    "inline_knowledge_cards",
-    "entity_group_v2",
-    "refinement_filters",
-    "canvas_mode",
-    "maps_preview",
-    "answer_tabs",
-    "price_comparison_widgets",
     "preserve_latex",
-    "generic_onboarding_widgets",
-    "in_context_suggestions",
     "inline_claims",
 ]
 
@@ -257,7 +236,7 @@ def _build_pplx_payload(
         "mentions": extras.get("mentions", []),
         "attachments": extras.get("attachments", []),
         "skip_search_enabled": True,
-        "is_nav_suggestions_disabled": False,
+        "is_nav_suggestions_disabled": True,
         "always_search_override": False,
         "override_no_search": False,
         "should_ask_for_mcp_tool_confirmation": True,
@@ -295,6 +274,17 @@ class StreamState:
     ids: dict[str, str] = field(default_factory=dict)
     followups: list[str] = field(default_factory=list)
     final: bool = False
+    # Step rendering — populated by `render_step` via `_extract_deltas`.
+    # See `pplx_steps.py` for the renderer dispatch.
+    mcp_steps: list[dict[str, Any]] = field(default_factory=list)
+    all_steps: list[dict[str, Any]] = field(default_factory=list)
+    goals: list[dict[str, Any]] = field(default_factory=list)
+    seen_step_uuids: set[str] = field(default_factory=set)
+    logged_unknown_intended_usages: set[str] = field(default_factory=set)
+    # Per-step reasoning accumulator (separate from `reasoning_seen` which
+    # tracks cumulative goal description text). Streaming path emits via
+    # `reasoning_delta`; non-streaming reads this accumulator at finalize.
+    step_reasoning: str = ""
 
 
 _PPLX_ID_FIELDS: tuple[str, ...] = (
@@ -326,6 +316,88 @@ def _parse_sse_line(line: str | bytes) -> dict[str, Any] | None:
         return json.loads(payload)
     except json.JSONDecodeError:
         return None
+
+
+def _attach_non_spec_fields(response: Any, state: StreamState) -> None:
+    """Stamp Perplexity-only fields onto the OpenAI response object.
+
+    Mirrors how ``pplx_thread_url_slug`` was previously attached: best-effort
+    setattr on a Pydantic model that doesn't declare the field. LiteLLM
+    serialises unknown attrs into the response JSON; standard OpenAI clients
+    ignore them.
+    """
+    slug = state.ids.get("thread_url_slug")
+    if slug:
+        try:
+            response.pplx_thread_url_slug = slug
+        except Exception:
+            pass
+    if state.ids.get("thread_title"):
+        try:
+            response.pplx_thread_title = state.ids["thread_title"]
+        except Exception:
+            pass
+    if state.mcp_steps:
+        try:
+            response.pplx_mcp_steps = state.mcp_steps
+        except Exception:
+            pass
+    if state.all_steps:
+        try:
+            response.pplx_steps = state.all_steps
+        except Exception:
+            pass
+    if state.goals:
+        try:
+            response.pplx_goals = state.goals
+        except Exception:
+            pass
+    if state.followups:
+        try:
+            response.pplx_pending_followups = state.followups
+        except Exception:
+            pass
+
+
+def _consume_step(step: dict[str, Any], state: StreamState) -> str:
+    """Render one step and route into StreamState. Returns reasoning text to emit.
+
+    Dedups across SSE events via ``state.seen_step_uuids``. Pushes structured
+    data into ``state.all_steps`` (every step), ``state.mcp_steps`` (MCP only),
+    and accumulates rendered text into ``state.step_reasoning`` for the
+    non-streaming finalize path.
+
+    Pre-rendering, MCP_TOOL_OUTPUT steps borrow ``tool_name`` from the
+    matching MCP_TOOL_INPUT by ``goal_id`` — the structured channel omits
+    tool_name on outputs, so without this pairing the renderer would fall
+    back to the generic "tool" placeholder.
+    """
+    uuid_ = step.get("uuid") or ""
+    if uuid_ and uuid_ in state.seen_step_uuids:
+        return ""
+    if uuid_:
+        state.seen_step_uuids.add(uuid_)
+
+    if step.get("step_type") == "MCP_TOOL_OUTPUT":
+        content = step.get("mcp_tool_output_content") or step.get("content") or {}
+        if isinstance(content, dict) and not content.get("tool_name"):
+            goal_id = content.get("goal_id")
+            if goal_id is not None:
+                for prior in reversed(state.mcp_steps):
+                    if prior.get("phase") == "input" and prior.get("goal_id") == goal_id:
+                        # Mutate a copy of step so render_step sees tool_name
+                        step = {**step, "tool_name": prior.get("tool_name")}
+                        break
+
+    result = render_step(step)
+    if result.structured:
+        step_type = step.get("step_type") or "UNKNOWN"
+        state.all_steps.append({"step_type": step_type, **result.structured})
+        if "mcp_step" in result.structured:
+            state.mcp_steps.append(result.structured["mcp_step"])
+    if result.reasoning_text:
+        state.step_reasoning += result.reasoning_text
+    return result.reasoning_text
 
 
 def _extract_deltas(
@@ -360,7 +432,23 @@ def _extract_deltas(
     if event.get("final_sse_message"):
         state.final = True
 
+    answer_delta: str | None = None
+    reasoning_delta: str | None = None
+
+    blocks = event.get("blocks") or []
+    if not isinstance(blocks, list):
+        blocks = []
+
+    # The top-level ``text`` field carries the same step list as
+    # ``plan_block.steps[]``, but JSON-encoded. We always raise on
+    # RESEARCH_CLARIFYING_QUESTIONS (it surfaces as a 400 to the client),
+    # but for other step types we only walk this fallback channel when the
+    # event has no ``plan_block`` blocks — otherwise we'd double-emit
+    # whatever the structured channel will also emit below.
     text = event.get("text")
+    has_plan_block_this_event = any(
+        isinstance(b, dict) and isinstance(b.get("plan_block"), dict) for b in blocks
+    )
     if isinstance(text, str):
         try:
             parsed = json.loads(text)
@@ -368,20 +456,18 @@ def _extract_deltas(
             parsed = None
         if isinstance(parsed, list):
             for step in parsed:
-                if (
-                    isinstance(step, dict)
-                    and step.get("step_type") == "RESEARCH_CLARIFYING_QUESTIONS"
-                ):
+                if not isinstance(step, dict):
+                    continue
+                st = step.get("step_type")
+                if st == "RESEARCH_CLARIFYING_QUESTIONS":
                     raise PerplexityClarifyingQuestionsError(
                         _extract_clarifying_questions(step)
                     )
-
-    answer_delta: str | None = None
-    reasoning_delta: str | None = None
-
-    blocks = event.get("blocks") or []
-    if not isinstance(blocks, list):
-        return None, None
+                if has_plan_block_this_event:
+                    continue
+                rendered = _consume_step(step, state)
+                if rendered:
+                    reasoning_delta = (reasoning_delta or "") + rendered
 
     for block in blocks:
         if not isinstance(block, dict):
@@ -393,15 +479,31 @@ def _extract_deltas(
             plan_block = block.get("plan_block") or {}
             goals = plan_block.get("goals") or []
             if isinstance(goals, list):
+                # Snapshot the latest goals[] for the non-spec response field
+                # (server sends cumulative; last write wins).
+                cleaned: list[dict[str, Any]] = []
                 for goal in goals:
                     if not isinstance(goal, dict):
                         continue
+                    cleaned.append(goal)
                     desc = goal.get("description")
                     if isinstance(desc, str) and desc.startswith(state.reasoning_seen):
                         new = desc[len(state.reasoning_seen) :]
                         if new:
                             reasoning_delta = (reasoning_delta or "") + new
                             state.reasoning_seen = desc
+                if cleaned:
+                    state.goals = cleaned
+
+            # Walk plan_block.steps[] for the full step inventory: MCP tool
+            # calls, web searches, browser-agent actions, image generation, etc.
+            # See pplx_steps.py for renderer dispatch.
+            for step in (plan_block.get("steps") or []):
+                if not isinstance(step, dict):
+                    continue
+                rendered = _consume_step(step, state)
+                if rendered:
+                    reasoning_delta = (reasoning_delta or "") + rendered
 
         if intended_usage == "pending_followups":
             fb = block.get("pending_followups_block") or {}
@@ -416,8 +518,33 @@ def _extract_deltas(
                 if captured:
                     state.followups = captured
 
+        # Bare ``markdown_block`` (no ``diff_block`` wrapper) — the terminal
+        # event re-sends the full answer this way. Usually redundant because
+        # the diff_block stream has already accumulated the same content,
+        # but Mode A-style prefix-diff keeps it safe and surfaces any tail
+        # text we'd otherwise drop.
+        mb = block.get("markdown_block")
+        if isinstance(mb, dict) and not block.get("diff_block") and intended_usage != "ask_text":
+            answer_str = mb.get("answer")
+            if isinstance(answer_str, str) and answer_str:
+                if answer_str.startswith(state.answer_seen):
+                    bare_delta = answer_str[len(state.answer_seen) :]
+                    if bare_delta:
+                        answer_delta = (answer_delta or "") + bare_delta
+                    state.answer_seen = answer_str
+
         diff_block = block.get("diff_block")
         if not isinstance(diff_block, dict):
+            # No diff_block on this block — log unknown intended_usage so we
+            # discover new block types instead of silently dropping them.
+            if intended_usage and intended_usage not in _KNOWN_INTENDED_USAGES:
+                if intended_usage not in state.logged_unknown_intended_usages:
+                    state.logged_unknown_intended_usages.add(intended_usage)
+                    logger.debug(
+                        "pplx: unhandled intended_usage=%s keys=%s",
+                        intended_usage,
+                        list(block.keys()),
+                    )
             continue
 
         # Perplexity sends the answer in two parallel blocks: ``ask_text_0_markdown``
@@ -800,24 +927,24 @@ class PerplexityProConfig(BaseConfig):
         from litellm.types.utils import Choices, Message
 
         message = Message(role="assistant", content=state.answer_seen)
-        if state.reasoning_seen:
+        combined_reasoning = "\n".join(
+            part for part in (state.reasoning_seen, state.step_reasoning.strip()) if part
+        )
+        if combined_reasoning:
             try:
-                message.reasoning_content = state.reasoning_seen  # type: ignore[attr-defined]
+                message.reasoning_content = combined_reasoning  # type: ignore[attr-defined]
             except Exception:
                 pass
 
         model_response.id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
-        model_response.model = model
+        # Use the upstream-reported `display_model` so clients see which actual
+        # model fired (e.g. "claude46sonnet") instead of the requested alias.
+        model_response.model = state.ids.get("display_model") or model
         model_response.choices = [
             Choices(index=0, message=message, finish_reason="stop")
         ]
 
-        slug = state.ids.get("thread_url_slug")
-        if slug:
-            try:
-                model_response.pplx_thread_url_slug = slug  # type: ignore[attr-defined]
-            except Exception:
-                pass
+        _attach_non_spec_fields(model_response, state)
         return model_response
 
     def get_error_class(
@@ -904,10 +1031,12 @@ class PerplexityProIterator(BaseModelResponseIterator):
         response = ModelResponseStream(choices=[choice])
 
         if self._state.final:
-            slug = self._state.ids.get("thread_url_slug")
-            if slug:
+            # Stamp the upstream-reported model so clients see what actually fired
+            display_model = self._state.ids.get("display_model")
+            if display_model:
                 try:
-                    response.pplx_thread_url_slug = slug  # type: ignore[attr-defined]
+                    response.model = display_model  # type: ignore[assignment]
                 except Exception:
                     pass
+            _attach_non_spec_fields(response, self._state)
         return response
