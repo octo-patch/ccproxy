@@ -117,6 +117,9 @@
         };
       };
     };
+    "lib/pydantic-ai" = {
+      url = "https://github.com/pydantic/pydantic-ai";
+    };
     "lib/tyro" = {
       url = "https://github.com/brentyi/tyro";
       kits = {

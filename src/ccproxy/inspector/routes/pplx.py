@@ -45,7 +45,7 @@ def register_pplx_routes(router: InspectorRouter) -> None:
         else:
             expected_token = mcp_auth.resolve("pplx messages endpoint bearer token")
 
-    @router.route("/pplx/messages/<session_id>", rtype=RouteType.REQUEST, catch_error=False)
+    @router.route("/pplx/messages/{session_id}", rtype=RouteType.REQUEST, catch_error=False)
     def handle_pplx_messages(flow: HTTPFlow, session_id: str, **_kwargs: object) -> None:  # pyright: ignore[reportUnusedFunction]
         if not isinstance(flow.client_conn.proxy_mode, ReverseMode):
             return

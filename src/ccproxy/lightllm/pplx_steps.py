@@ -2,8 +2,7 @@
 
 Perplexity's `plan_block.steps[]` and the parallel top-level `text`-field
 JSON channel both carry the same `step_type`-tagged step objects with
-typed `*_content` fields. There are 65+ step_type values in the SPA bundle
-(see `~/dev/scratch/research/pplx/sse-research/STEP_TYPE_ENUM.md`); we
+typed `*_content` fields. There are 65+ step_type values in the SPA bundle (see `docs/pplx/step_types.md`); we
 ship specialized renderers for the common categories (MCP tool calls,
 web search, browser agent, calendar/email, image generation, etc.) and
 a generic fallback that captures unknown step types as structured data
@@ -99,7 +98,9 @@ def render_step(step: dict[str, Any]) -> StepRenderResult:
 # ---- Suppressed (redundant with other channels) -------------------------
 
 
-def _render_suppressed(_step_type: str, _content: dict[str, Any], _uuid: str) -> StepRenderResult:
+def _render_suppressed(
+    _step_type: str, _content: dict[str, Any], _uuid: str
+) -> StepRenderResult:
     """INITIAL_QUERY (already in user msg) and FINAL (already in markdown_block)."""
     return StepRenderResult()
 
@@ -107,50 +108,74 @@ def _render_suppressed(_step_type: str, _content: dict[str, Any], _uuid: str) ->
 # ---- Core / control ----------------------------------------------------
 
 
-def _render_terminate(_step_type: str, content: dict[str, Any], uuid: str) -> StepRenderResult:
+def _render_terminate(
+    _step_type: str, content: dict[str, Any], uuid: str
+) -> StepRenderResult:
     reason = content.get("reason") or content.get("message") or ""
     text = "✓ Done" + (f" — {reason}" if reason else "") + "\n"
-    return StepRenderResult(text, {"phase": "terminate", "step_uuid": uuid, "reason": reason})
+    return StepRenderResult(
+        text, {"phase": "terminate", "step_uuid": uuid, "reason": reason}
+    )
 
 
-def _render_attachment(_step_type: str, content: dict[str, Any], uuid: str) -> StepRenderResult:
+def _render_attachment(
+    _step_type: str, content: dict[str, Any], uuid: str
+) -> StepRenderResult:
     name = content.get("name") or content.get("filename") or "attachment"
     text = f"📎 Processing attachment: {name}\n"
-    return StepRenderResult(text, {"phase": "attachment", "step_uuid": uuid, "name": name})
+    return StepRenderResult(
+        text, {"phase": "attachment", "step_uuid": uuid, "name": name}
+    )
 
 
 # ---- Web search --------------------------------------------------------
 
 
-def _render_search_web(_step_type: str, content: dict[str, Any], uuid: str) -> StepRenderResult:
+def _render_search_web(
+    _step_type: str, content: dict[str, Any], uuid: str
+) -> StepRenderResult:
     queries = content.get("queries") or []
     if isinstance(queries, list) and queries:
         q_str = " · ".join(str(q) for q in queries if q)
     else:
         q_str = str(content.get("query") or "")
     text = f"→ Web search: {q_str}\n" if q_str else "→ Web search\n"
-    return StepRenderResult(text, {"phase": "search", "step_uuid": uuid, "queries": queries or [q_str]})
+    return StepRenderResult(
+        text, {"phase": "search", "step_uuid": uuid, "queries": queries or [q_str]}
+    )
 
 
-def _render_web_results(_step_type: str, content: dict[str, Any], uuid: str) -> StepRenderResult:
+def _render_web_results(
+    _step_type: str, content: dict[str, Any], uuid: str
+) -> StepRenderResult:
     results = content.get("web_results") or content.get("results") or []
     n = len(results) if isinstance(results, list) else 0
     text = f"← {n} web result{'s' if n != 1 else ''}\n"
-    return StepRenderResult(text, {"phase": "web_results", "step_uuid": uuid, "count": n})
+    return StepRenderResult(
+        text, {"phase": "web_results", "step_uuid": uuid, "count": n}
+    )
 
 
-def _render_read_results(_step_type: str, content: dict[str, Any], uuid: str) -> StepRenderResult:
+def _render_read_results(
+    _step_type: str, content: dict[str, Any], uuid: str
+) -> StepRenderResult:
     urls = content.get("urls") or []
     n = len(urls) if isinstance(urls, list) else 0
     sample = urls[:3] if isinstance(urls, list) else []
     text = f"← Read {n} result{'s' if n != 1 else ''}"
     if sample:
-        text += " (" + ", ".join(str(u) for u in sample) + (", …" if n > 3 else "") + ")"
+        text += (
+            " (" + ", ".join(str(u) for u in sample) + (", …" if n > 3 else "") + ")"
+        )
     text += "\n"
-    return StepRenderResult(text, {"phase": "read_results", "step_uuid": uuid, "urls": urls or []})
+    return StepRenderResult(
+        text, {"phase": "read_results", "step_uuid": uuid, "urls": urls or []}
+    )
 
 
-def _render_get_url_content(_step_type: str, content: dict[str, Any], uuid: str) -> StepRenderResult:
+def _render_get_url_content(
+    _step_type: str, content: dict[str, Any], uuid: str
+) -> StepRenderResult:
     url = content.get("url") or ""
     text = f"→ Fetch URL: {url}\n"
     return StepRenderResult(text, {"phase": "fetch_url", "step_uuid": uuid, "url": url})
@@ -159,10 +184,14 @@ def _render_get_url_content(_step_type: str, content: dict[str, Any], uuid: str)
 # ---- MCP tool calls ----------------------------------------------------
 
 
-def _render_mcp_tool_input(_step_type: str, content: dict[str, Any], uuid: str) -> StepRenderResult:
+def _render_mcp_tool_input(
+    _step_type: str, content: dict[str, Any], uuid: str
+) -> StepRenderResult:
     app = content.get("app") or "unknown"
     tool_name = content.get("tool_name") or content.get("tool_id") or "unknown"
-    tool_args = content.get("tool_args") if isinstance(content.get("tool_args"), dict) else {}
+    tool_args = (
+        content.get("tool_args") if isinstance(content.get("tool_args"), dict) else {}
+    )
     summary = content.get("tool_input_summary") or ""
     args_repr = json.dumps(tool_args, separators=(",", ":")) if tool_args else "{}"
     text = f"→ [{app}] {tool_name}({args_repr})"
@@ -191,7 +220,9 @@ def _render_mcp_tool_input(_step_type: str, content: dict[str, Any], uuid: str) 
     return StepRenderResult(text, {"mcp_step": structured})
 
 
-def _render_mcp_tool_output(_step_type: str, content: dict[str, Any], uuid: str) -> StepRenderResult:
+def _render_mcp_tool_output(
+    _step_type: str, content: dict[str, Any], uuid: str
+) -> StepRenderResult:
     tool_name = content.get("tool_name") or content.get("tool_id") or "tool"
     status = content.get("status") or "unknown"
     text = f"← {tool_name} ({status})\n"
@@ -220,112 +251,176 @@ def _render_mcp_tool_output(_step_type: str, content: dict[str, Any], uuid: str)
 # ---- Comet agent (Perplexity browser agent) ----------------------------
 
 
-def _render_comet_agent_input(_step_type: str, content: dict[str, Any], uuid: str) -> StepRenderResult:
+def _render_comet_agent_input(
+    _step_type: str, content: dict[str, Any], uuid: str
+) -> StepRenderResult:
     task = content.get("task_uuid") or content.get("task") or ""
     text = f"→ Comet agent: {task}\n" if task else "→ Comet agent\n"
-    return StepRenderResult(text, {"phase": "comet_input", "step_uuid": uuid, "task": task})
+    return StepRenderResult(
+        text, {"phase": "comet_input", "step_uuid": uuid, "task": task}
+    )
 
 
-def _render_comet_agent_output(_step_type: str, content: dict[str, Any], uuid: str) -> StepRenderResult:
+def _render_comet_agent_output(
+    _step_type: str, content: dict[str, Any], uuid: str
+) -> StepRenderResult:
     status = content.get("status") or "done"
     text = f"← Comet agent ({status})\n"
-    return StepRenderResult(text, {"phase": "comet_output", "step_uuid": uuid, "status": status})
+    return StepRenderResult(
+        text, {"phase": "comet_output", "step_uuid": uuid, "status": status}
+    )
 
 
 # ---- Browser agent (Deep Research browser mode) ------------------------
 
 
-def _render_browser_search(_step_type: str, content: dict[str, Any], uuid: str) -> StepRenderResult:
+def _render_browser_search(
+    _step_type: str, content: dict[str, Any], uuid: str
+) -> StepRenderResult:
     q = content.get("query") or content.get("queries") or ""
     text = f"→ Browser search: {q}\n" if q else "→ Browser search\n"
-    return StepRenderResult(text, {"phase": "browser_search", "step_uuid": uuid, "query": q})
+    return StepRenderResult(
+        text, {"phase": "browser_search", "step_uuid": uuid, "query": q}
+    )
 
 
-def _render_url_navigate(_step_type: str, content: dict[str, Any], uuid: str) -> StepRenderResult:
+def _render_url_navigate(
+    _step_type: str, content: dict[str, Any], uuid: str
+) -> StepRenderResult:
     url = content.get("url") or ""
     text = f"→ Browser navigate: {url}\n"
-    return StepRenderResult(text, {"phase": "browser_navigate", "step_uuid": uuid, "url": url})
+    return StepRenderResult(
+        text, {"phase": "browser_navigate", "step_uuid": uuid, "url": url}
+    )
 
 
-def _render_browser_open_tab(_step_type: str, content: dict[str, Any], uuid: str) -> StepRenderResult:
+def _render_browser_open_tab(
+    _step_type: str, content: dict[str, Any], uuid: str
+) -> StepRenderResult:
     url = content.get("url") or ""
     text = f"→ Browser open tab: {url}\n"
-    return StepRenderResult(text, {"phase": "browser_open_tab", "step_uuid": uuid, "url": url})
+    return StepRenderResult(
+        text, {"phase": "browser_open_tab", "step_uuid": uuid, "url": url}
+    )
 
 
-def _render_browser_get_site_content(_step_type: str, content: dict[str, Any], uuid: str) -> StepRenderResult:
+def _render_browser_get_site_content(
+    _step_type: str, content: dict[str, Any], uuid: str
+) -> StepRenderResult:
     url = content.get("url") or ""
     text = f"← Read page: {url}\n" if url else "← Read page\n"
-    return StepRenderResult(text, {"phase": "browser_get_content", "step_uuid": uuid, "url": url})
+    return StepRenderResult(
+        text, {"phase": "browser_get_content", "step_uuid": uuid, "url": url}
+    )
 
 
 # ---- Productivity / agent steps ----------------------------------------
 
 
-def _render_code(_step_type: str, content: dict[str, Any], uuid: str) -> StepRenderResult:
+def _render_code(
+    _step_type: str, content: dict[str, Any], uuid: str
+) -> StepRenderResult:
     lang = content.get("language") or ""
     text = f"💻 Code execution{f' ({lang})' if lang else ''}\n"
-    return StepRenderResult(text, {"phase": "code", "step_uuid": uuid, "language": lang, "content": content})
+    return StepRenderResult(
+        text, {"phase": "code", "step_uuid": uuid, "language": lang, "content": content}
+    )
 
 
-def _render_generate_image(_step_type: str, content: dict[str, Any], uuid: str) -> StepRenderResult:
+def _render_generate_image(
+    _step_type: str, content: dict[str, Any], uuid: str
+) -> StepRenderResult:
     prompt = content.get("prompt") or ""
     text = f"🎨 Generating image: {prompt}\n" if prompt else "🎨 Generating image\n"
-    return StepRenderResult(text, {"phase": "image_gen", "step_uuid": uuid, "prompt": prompt})
+    return StepRenderResult(
+        text, {"phase": "image_gen", "step_uuid": uuid, "prompt": prompt}
+    )
 
 
-def _render_generate_image_results(_step_type: str, content: dict[str, Any], uuid: str) -> StepRenderResult:
+def _render_generate_image_results(
+    _step_type: str, content: dict[str, Any], uuid: str
+) -> StepRenderResult:
     results = content.get("image_results") or content.get("images") or []
     n = len(results) if isinstance(results, list) else 0
     text = f"← {n} image{'s' if n != 1 else ''} generated\n"
-    return StepRenderResult(text, {"phase": "image_results", "step_uuid": uuid, "results": results or []})
+    return StepRenderResult(
+        text, {"phase": "image_results", "step_uuid": uuid, "results": results or []}
+    )
 
 
-def _render_create_chart(_step_type: str, _content: dict[str, Any], uuid: str) -> StepRenderResult:
+def _render_create_chart(
+    _step_type: str, _content: dict[str, Any], uuid: str
+) -> StepRenderResult:
     text = "📊 Creating chart\n"
     return StepRenderResult(text, {"phase": "create_chart", "step_uuid": uuid})
 
 
-def _render_create_tasks(_step_type: str, content: dict[str, Any], uuid: str) -> StepRenderResult:
+def _render_create_tasks(
+    _step_type: str, content: dict[str, Any], uuid: str
+) -> StepRenderResult:
     tasks = content.get("tasks") or []
     n = len(tasks) if isinstance(tasks, list) else 0
     text = f"📋 Creating {n} task{'s' if n != 1 else ''}\n"
-    return StepRenderResult(text, {"phase": "create_tasks", "step_uuid": uuid, "tasks": tasks or []})
+    return StepRenderResult(
+        text, {"phase": "create_tasks", "step_uuid": uuid, "tasks": tasks or []}
+    )
 
 
 # ---- Calendar / Email agent (legacy connectors) ------------------------
 
 
-def _render_read_calendar(_step_type: str, _content: dict[str, Any], uuid: str) -> StepRenderResult:
-    return StepRenderResult("→ Calendar: read\n", {"phase": "calendar_read", "step_uuid": uuid})
+def _render_read_calendar(
+    _step_type: str, _content: dict[str, Any], uuid: str
+) -> StepRenderResult:
+    return StepRenderResult(
+        "→ Calendar: read\n", {"phase": "calendar_read", "step_uuid": uuid}
+    )
 
 
-def _render_update_calendar(_step_type: str, _content: dict[str, Any], uuid: str) -> StepRenderResult:
-    return StepRenderResult("→ Calendar: update\n", {"phase": "calendar_update", "step_uuid": uuid})
+def _render_update_calendar(
+    _step_type: str, _content: dict[str, Any], uuid: str
+) -> StepRenderResult:
+    return StepRenderResult(
+        "→ Calendar: update\n", {"phase": "calendar_update", "step_uuid": uuid}
+    )
 
 
-def _render_read_email(_step_type: str, _content: dict[str, Any], uuid: str) -> StepRenderResult:
-    return StepRenderResult("→ Email: read\n", {"phase": "email_read", "step_uuid": uuid})
+def _render_read_email(
+    _step_type: str, _content: dict[str, Any], uuid: str
+) -> StepRenderResult:
+    return StepRenderResult(
+        "→ Email: read\n", {"phase": "email_read", "step_uuid": uuid}
+    )
 
 
-def _render_send_email(_step_type: str, _content: dict[str, Any], uuid: str) -> StepRenderResult:
-    return StepRenderResult("→ Email: send\n", {"phase": "email_send", "step_uuid": uuid})
+def _render_send_email(
+    _step_type: str, _content: dict[str, Any], uuid: str
+) -> StepRenderResult:
+    return StepRenderResult(
+        "→ Email: send\n", {"phase": "email_send", "step_uuid": uuid}
+    )
 
 
 # ---- Clarifying questions ----------------------------------------------
 
 
-def _render_clarifying_questions(_step_type: str, content: dict[str, Any], uuid: str) -> StepRenderResult:
+def _render_clarifying_questions(
+    _step_type: str, content: dict[str, Any], uuid: str
+) -> StepRenderResult:
     qs = content.get("questions") or []
     n = len(qs) if isinstance(qs, list) else 0
     text = f"❓ Clarifying questions ({n})\n"
-    return StepRenderResult(text, {"phase": "clarifying", "step_uuid": uuid, "questions": qs or []})
+    return StepRenderResult(
+        text, {"phase": "clarifying", "step_uuid": uuid, "questions": qs or []}
+    )
 
 
 # ---- Generic fallback (DEBUG-logs unknowns) ----------------------------
 
 
-def _render_generic(step_type: str, content: dict[str, Any], uuid: str) -> StepRenderResult:
+def _render_generic(
+    step_type: str, content: dict[str, Any], uuid: str
+) -> StepRenderResult:
     """Catch-all for unmapped step types.
 
     Renders a minimal `[STEP_TYPE]` line + any obvious summary field, and

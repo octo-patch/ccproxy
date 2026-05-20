@@ -268,38 +268,41 @@ def test_extract_deltas_raises_on_clarifying_questions() -> None:
 
 
 def test_thread_to_openai_messages_round_trip() -> None:
+    """Convert a thread (real ``GET /rest/thread/<slug>`` shape) to OpenAI messages.
+
+    Each entry has ``blocks[]`` keyed by ``intended_usage``; the
+    ``ask_text_0_markdown`` block carries the answer markdown, the
+    ``web_results`` block carries citation sources.
+    """
     thread = {
         "entries": [
             {
                 "query_str": "what is quantum computing?",
-                "structured_answer": [
+                "structured_answer_block_usages": ["ask_text_0_markdown"],
+                "blocks": [
                     {
-                        "step_type": "FINAL",
-                        "content": {
-                            "answer": json.dumps(
-                                {
-                                    "answer": "Quantum [1] computing [2].",
-                                    "web_results": [
-                                        {"url": "http://a"},
-                                        {"url": "http://b"},
-                                    ],
-                                }
-                            ),
+                        "intended_usage": "ask_text_0_markdown",
+                        "markdown_block": {"answer": "Quantum [1] computing [2]."},
+                    },
+                    {
+                        "intended_usage": "web_results",
+                        "web_result_block": {
                             "web_results": [
                                 {"url": "http://a"},
                                 {"url": "http://b"},
-                            ],
+                            ]
                         },
-                    }
+                    },
                 ],
             },
             {
                 "query_str": "follow up",
-                "structured_answer": [
+                "structured_answer_block_usages": ["ask_text_0_markdown"],
+                "blocks": [
                     {
-                        "step_type": "FINAL",
-                        "content": {"answer": "Plain answer."},
-                    }
+                        "intended_usage": "ask_text_0_markdown",
+                        "markdown_block": {"answer": "Plain answer."},
+                    },
                 ],
             },
         ]
@@ -312,6 +315,91 @@ def test_thread_to_openai_messages_round_trip() -> None:
     assert "[2](http://b)" in msgs[1]["content"]
     assert msgs[2] == {"role": "user", "content": "follow up"}
     assert msgs[3] == {"role": "assistant", "content": "Plain answer."}
+
+
+def test_thread_to_openai_messages_include_reasoning() -> None:
+    """When ``include_reasoning=True``, plan_block.goals descriptions are appended."""
+    thread = {
+        "entries": [
+            {
+                "query_str": "q",
+                "structured_answer_block_usages": ["ask_text_0_markdown"],
+                "blocks": [
+                    {
+                        "intended_usage": "ask_text_0_markdown",
+                        "markdown_block": {"answer": "answer text"},
+                    },
+                    {
+                        "intended_usage": "pro_search_steps",
+                        "plan_block": {
+                            "goals": [
+                                {"description": "Looking up X"},
+                                {"description": "Comparing Y"},
+                            ]
+                        },
+                    },
+                ],
+            }
+        ]
+    }
+    msgs = _thread_to_openai_messages(thread, include_reasoning=True)
+    assert msgs[1]["role"] == "assistant"
+    content = msgs[1]["content"]
+    assert "answer text" in content
+    assert "**Reasoning:**" in content
+    assert "- Looking up X" in content
+    assert "- Comparing Y" in content
+
+
+def test_thread_to_openai_messages_uses_structured_answer_block_usages_hint() -> None:
+    """When the hint names a non-default block, the helper follows it."""
+    thread = {
+        "entries": [
+            {
+                "query_str": "q",
+                "structured_answer_block_usages": ["alternate_answer_iu"],
+                "blocks": [
+                    {
+                        "intended_usage": "ask_text_0_markdown",
+                        "markdown_block": {"answer": "WRONG"},
+                    },
+                    {
+                        "intended_usage": "alternate_answer_iu",
+                        "markdown_block": {"answer": "RIGHT"},
+                    },
+                ],
+            }
+        ]
+    }
+    msgs = _thread_to_openai_messages(thread)
+    assert msgs[1]["content"] == "RIGHT"
+
+
+def test_thread_to_openai_messages_real_fixture_news_claude() -> None:
+    """Regression: real Perplexity thread shape from a 2026-05-18 capture.
+
+    Fixture: ``research/pplx/response-content/threads/raw/upstream-news-claude-*.json``
+    A query about the latest Claude model; verifies the parser produces a
+    user/assistant pair with markdown-formatted citations.
+    """
+    from pathlib import Path
+
+    fixture_dir = (
+        Path(__file__).parent / "fixtures" / "pplx_threads"
+    )
+    fixture = fixture_dir / "upstream-news-claude.json"
+    if not fixture.exists():
+        pytest.skip(f"missing fixture {fixture}")
+    thread = json.loads(fixture.read_text(encoding="utf-8"))
+    msgs = _thread_to_openai_messages(thread, citation_mode="markdown")
+    assert len(msgs) == 2
+    assert msgs[0]["role"] == "user"
+    assert "latest Anthropic Claude model" in msgs[0]["content"]
+    assert msgs[1]["role"] == "assistant"
+    answer = msgs[1]["content"]
+    # The answer talks about Claude Opus 4.7 and has markdown citations.
+    assert "Claude Opus 4.7" in answer
+    assert "[1](http" in answer  # citation reformatted as markdown link
 
 
 def test_thread_store_save_get_lifecycle() -> None:

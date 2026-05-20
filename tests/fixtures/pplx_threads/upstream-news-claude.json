@@ -1,0 +1,1961 @@
+{
+  "background_entries": [],
+  "entries": [
+    {
+      "backend_uuid": "434bba61-5cdc-48a1-92c1-9c469cf1c038",
+      "context_uuid": "cfe74717-72ae-4b9d-b6b4-817bf9527869",
+      "uuid": "6945cc5d-ce9a-4066-b8e8-06a7b3b857a5",
+      "frontend_context_uuid": "998e2ab0-6e5c-4dab-9b31-cdfd672e5fc0",
+      "frontend_uuid": "6945cc5d-ce9a-4066-b8e8-06a7b3b857a5",
+      "status": "COMPLETED",
+      "thread_title": "[probe-news-claude-db625886] What is the latest Anthropic Claude model release as of May 2026, and what are its key new features and capabilities?",
+      "related_queries": [
+        "Build a sortable comparison dashboard for Claude Opus 4.7, GPT-5, and Gemini 2.0 Ultra including pricing, inference latency, context window size, agentic coding performance on SWE-bench, and reasoning scores. Add a toggle to filter by specific capabilities like mathematical logic, creative writing, and data extraction, and include a real-time table of recent benchmark results from public testing platforms like LMSYS Chatbot Arena to show relative ranking and Elo shifts over the last 90 days",
+        "Create an audit report of all 30+ Anthropic updates and Skills released in Q1-Q2 2026. Include a structured checklist categorized by task type (e.g., Excel/PowerPoint automation, script execution, agent planning, file generation), identify which specific Anthropic-built tools are now available for each, and map them to their primary use case (coding vs business analysis vs creative). Build a sortable tracking table that shows the feature, its release date, and a productivity-gain estimate for common knowledge-work workflows",
+        "How does Claude Opus 4.7 compare with Sonnet 4.6",
+        "What benchmarks show Opus 4.7 improvements in coding",
+        "Which Claude model is best for agent planning"
+      ],
+      "display_model": "claude46sonnet",
+      "user_selected_model": "claude46sonnet",
+      "personalized": true,
+      "mode": "COPILOT",
+      "query_str": "[probe-news-claude-db625886] What is the latest Anthropic Claude model release as of May 2026, and what are its key new features and capabilities?",
+      "search_focus": "internet",
+      "source": "default",
+      "attachments": [],
+      "updated_datetime": "2026-05-19T05:19:35.139009",
+      "read_write_token": "05034219-5ba1-49d5-86e6-eaf1e49cab69",
+      "step_type": "FINAL",
+      "author_id": "25d0214d-673f-4a54-a000-86da2b2debec",
+      "author_username": "starbased",
+      "author_image": "https://imagedelivery.net/MPdwyYSWT8IY7lxgN3x3Uw/16611cbb-922c-4c18-7dcc-83807cddc200/thumbnail",
+      "bookmark_state": "NOT_BOOKMARKED",
+      "s3_social_preview_url": "https://ppl-ai-public.s3.amazonaws.com/static/img/pplx-default-preview.png",
+      "thread_access": 1,
+      "thread_url_slug": "434bba61-5cdc-48a1-92c1-9c469cf1c038",
+      "query_source": "default",
+      "privacy_state": "NONE",
+      "gpt4": false,
+      "sources": {
+        "sources": [
+          "web"
+        ]
+      },
+      "entry_created_datetime": "2026-05-19T05:19:12.735812+00:00",
+      "entry_updated_datetime": "2026-05-19T05:19:34.985121+00:00",
+      "blocks": [
+        {
+          "intended_usage": "plan",
+          "plan_block": {
+            "progress": "DONE",
+            "goals": [
+              {
+                "id": "0",
+                "description": "Searching the web",
+                "final": true,
+                "todo_task_status": "INCOMPLETE"
+              },
+              {
+                "id": "1",
+                "description": "Looking up the latest Claude model release and features",
+                "final": true,
+                "todo_task_status": "INCOMPLETE"
+              }
+            ],
+            "final": true
+          }
+        },
+        {
+          "intended_usage": "ask_text_0_markdown",
+          "markdown_block": {
+            "progress": "DONE",
+            "chunks": [
+              "As of May 2026, the latest generally available Anthropic Claude model is **Claude Opus 4.7**, released on April 16, 2026. Here's a full breakdown of its key capabilities and launch details.[1]\n\n## What Is Claude Opus 4.7?\n\nClaude Opus 4.7 is Anthropic's most capable publicly available model, described as a **hybrid reasoning large language model** with a knowledge cutoff of January 2026. It is a direct upgrade over Opus 4.6, with particular strength in advanced software engineering and long-horizon agentic tasks. Pricing remains the same as Opus 4.6 at **$5/million input tokens and $25/million output tokens**, and it's available via the Claude API (`claude-opus-4-7`), Amazon Bedrock, Google Cloud Vertex AI, and Microsoft Foundry.[2][1]\n\n## Key New Features & Capabilities\n\n**Software Engineering & Agentic Work**\n- Significantly better at complex, long-running coding tasks — early testers report a **13% lift in coding benchmark resolution** over Opus 4.6, and up to **3x more production task resolution** on some SWE-bench variants[1]\n- Catches its own logical faults during planning, verifies outputs before reporting back, and pushes through hard problems without giving up mid-task[1]\n\n**Improved Vision / Multimodal**\n- Now accepts images up to **2,576 pixels on the long edge (~3.75 megapixels)** — more than 3× the resolution of prior Claude models[1]\n- Substantially better at reading dense screenshots, extracting from complex diagrams, and pixel-precise computer-use tasks (one tester reported a jump from 54.5% to **98.5% on a visual-acuity benchmark**)[1]\n\n**Instruction Following & Reasoning**\n- More literal and precise instruction following — Anthropic notes that prompts tuned for older models may need adjustment[1]\n- Better memory across multi-session work using file system-based memory[1]\n- New **`xhigh` effort level** added between `high` and `max` for finer control over reasoning depth vs. latency[1]\n\n**New API & Developer Features**\n- **Task budgets (public beta)**: lets developers guide Claude's token spend across longer runs[1]\n- **`/ultrareview` in Claude Code**: a dedicated review session that flags bugs and design issues a careful human reviewer would catch[1]\n- **Auto mode** extended to Max users in Claude Code, allowing longer tasks with fewer interruptions[1]\n\n## Safety & Cybersecurity Notes\n\nOpus 4.7 is the first model to carry Anthropic's new **cybersecurity safeguards** — it automatically detects and blocks prohibited or high-risk cybersecurity use attempts. Legitimate security professionals (pen testers, red teamers) can apply to Anthropic's new **Cyber Verification Program** for access. This is part of Anthropic's \"Project Glasswing\" initiative, with the more powerful **Claude Mythos Preview** (their most powerful model at this time) still in limited access.[1]\n\n## Model Lineup Context\n\n| Model | Release | Role |\n|---|---|---|\n| Claude Mythos Preview | 2026 | Most powerful; limited access [1] |\n| **Claude Opus 4.7** | **Apr 2026** | **Latest GA model; best public option** [3] |\n| Claude Sonnet 4.6 | Feb 2026 | Fast, full-featured mid-tier [2] |\n| Claude Opus 4.6 | Feb 2026 | Previous top GA model (deprecated) [4] |\n\nFor your use case in LLM deployment and API integration, Opus 4.7 with the new `xhigh` effort level and task budgets API would be the most impactful upgrade to evaluate."
+            ],
+            "chunk_starting_offset": 0,
+            "answer": "As of May 2026, the latest generally available Anthropic Claude model is **Claude Opus 4.7**, released on April 16, 2026. Here's a full breakdown of its key capabilities and launch details.[1]\n\n## What Is Claude Opus 4.7?\n\nClaude Opus 4.7 is Anthropic's most capable publicly available model, described as a **hybrid reasoning large language model** with a knowledge cutoff of January 2026. It is a direct upgrade over Opus 4.6, with particular strength in advanced software engineering and long-horizon agentic tasks. Pricing remains the same as Opus 4.6 at **$5/million input tokens and $25/million output tokens**, and it's available via the Claude API (`claude-opus-4-7`), Amazon Bedrock, Google Cloud Vertex AI, and Microsoft Foundry.[2][1]\n\n## Key New Features & Capabilities\n\n**Software Engineering & Agentic Work**\n- Significantly better at complex, long-running coding tasks — early testers report a **13% lift in coding benchmark resolution** over Opus 4.6, and up to **3x more production task resolution** on some SWE-bench variants[1]\n- Catches its own logical faults during planning, verifies outputs before reporting back, and pushes through hard problems without giving up mid-task[1]\n\n**Improved Vision / Multimodal**\n- Now accepts images up to **2,576 pixels on the long edge (~3.75 megapixels)** — more than 3× the resolution of prior Claude models[1]\n- Substantially better at reading dense screenshots, extracting from complex diagrams, and pixel-precise computer-use tasks (one tester reported a jump from 54.5% to **98.5% on a visual-acuity benchmark**)[1]\n\n**Instruction Following & Reasoning**\n- More literal and precise instruction following — Anthropic notes that prompts tuned for older models may need adjustment[1]\n- Better memory across multi-session work using file system-based memory[1]\n- New **`xhigh` effort level** added between `high` and `max` for finer control over reasoning depth vs. latency[1]\n\n**New API & Developer Features**\n- **Task budgets (public beta)**: lets developers guide Claude's token spend across longer runs[1]\n- **`/ultrareview` in Claude Code**: a dedicated review session that flags bugs and design issues a careful human reviewer would catch[1]\n- **Auto mode** extended to Max users in Claude Code, allowing longer tasks with fewer interruptions[1]\n\n## Safety & Cybersecurity Notes\n\nOpus 4.7 is the first model to carry Anthropic's new **cybersecurity safeguards** — it automatically detects and blocks prohibited or high-risk cybersecurity use attempts. Legitimate security professionals (pen testers, red teamers) can apply to Anthropic's new **Cyber Verification Program** for access. This is part of Anthropic's \"Project Glasswing\" initiative, with the more powerful **Claude Mythos Preview** (their most powerful model at this time) still in limited access.[1]\n\n## Model Lineup Context\n\n| Model | Release | Role |\n|---|---|---|\n| Claude Mythos Preview | 2026 | Most powerful; limited access [1] |\n| **Claude Opus 4.7** | **Apr 2026** | **Latest GA model; best public option** [3] |\n| Claude Sonnet 4.6 | Feb 2026 | Fast, full-featured mid-tier [2] |\n| Claude Opus 4.6 | Feb 2026 | Previous top GA model (deprecated) [4] |\n\nFor your use case in LLM deployment and API integration, Opus 4.7 with the new `xhigh` effort level and task budgets API would be the most impactful upgrade to evaluate.",
+            "inline_token_annotations": []
+          }
+        },
+        {
+          "intended_usage": "ask_text",
+          "markdown_block": {
+            "progress": "DONE",
+            "chunks": [
+              "As of May ",
+              "2026, the latest gener",
+              "ally available Ant",
+              "hropic Claude model i",
+              "s **Claude Opus 4.7**, release",
+              "d on April 16, ",
+              "2",
+              "026. Here's a ",
+              "full breakdown of its key capabili",
+              "ties and launch deta",
+              "ils.[1]\n\n## What Is Claude Opus ",
+              "4.7?\n\nClaude Opus",
+              " 4.7 is Anthropic's most cap",
+              "able publicly avail",
+              "able model, descr",
+              "ibed as a **hy",
+              "brid reasoning l",
+              "arge language model** wi",
+              "th a knowledge",
+              " cutoff of Jan",
+              "uary 2026. I",
+              "t is a direct upgrade ",
+              "over Opus 4.6, ",
+              "with particular stre",
+              "ngth in advanced soft",
+              "ware engineering and ",
+              "long-horizon agentic t",
+              "a",
+              "sks. Pricing rem",
+              "ains the same as Opus 4.",
+              "6 at **$5/mil",
+              "lion input tokens",
+              " and $25/million output token",
+              "s**, and it's available",
+              " via the Claude",
+              " API (`claude-opus-4-7`), Amazon Bedrock, Google Cloud Vertex AI, and Micro",
+              "soft Foun",
+              "dry.[2][1]\n\n## Key New Featur",
+              "es & Capabiliti",
+              "es\n\n**Software Engineeri",
+              "ng & Agentic ",
+              "Work**\n- Significa",
+              "ntly better at com",
+              "plex, long-run",
+              "ning coding tas",
+              "ks — early testers repo",
+              "rt a **13% lif",
+              "t in coding bench",
+              "mark resolution** ",
+              "over Opus 4.6, an",
+              "d up to **3x ",
+              "more production ",
+              "task resolution",
+              "** on some SWE-bench vari",
+              "ants",
+              "[1]\n- Catches its own log",
+              "ical faults du",
+              "ring planning,",
+              " verifies out",
+              "puts before repor",
+              "ting back, and ",
+              "pushes through ",
+              "hard problems wit",
+              "hout giving up",
+              " mid-",
+              "task[1]\n\n**Improved Vi",
+              "sion / Multimodal**\n-",
+              " Now accepts images up t",
+              "o **2,576 pixels on the ",
+              "long edge (~3.75 megapi",
+              "xels)** — more ",
+              "than 3× the resolu",
+              "tion of prior Claude models[1]\n- Substanti",
+              "ally better at rea",
+              "ding dense screenshots, extracting ",
+              "from complex diagrams, and p",
+              "ixel-precise comp",
+              "uter-use tasks ",
+              "(one tester reported a ",
+              "jump from 54.5% t",
+              "o **98.5% on a vi",
+              "sual-acuity bench",
+              "mar",
+              "k**)[1]\n\n**Instruction Following & Reasoning**\n- ",
+              "More literal and precise instruc",
+              "tion following — Ant",
+              "hropic notes that ",
+              "prompts tuned for o",
+              "lder models may ",
+              "need adjust",
+              "ment[1]\n- Better me",
+              "mory across m",
+              "ulti-session work u",
+              "sing file system-based me",
+              "mory[1]\n- New **`xhigh` effort level** added between `high` and `max` for finer control over reasoning d",
+              "epth vs. latency[1]\n\n*",
+              "*New API & Devel",
+              "oper Features**\n",
+              "- **Task budge",
+              "ts (public beta)**: lets developers guide Claude's token spend ac",
+              "ross longer runs[1]\n- **`/ultrareview` in Claude Code**: a dedicated review session that f",
+              "lags bugs and design issues a careful h",
+              "uman reviewer would c",
+              "atch[1]\n- **Auto mo",
+              "de** extended to",
+              " Max users in Cl",
+              "aude Code, allo",
+              "wing longer tasks with fewer interrupt",
+              "ions[1]\n\n## Safety &",
+              " Cybersecurity N",
+              "otes\n\nOpus 4.7 is",
+              " the first model to c",
+              "arry Anthropic's",
+              " new **cybersecurity",
+              " safeguards** ",
+              "— it automatic",
+              "ally detects and bl",
+              "ocks prohibite",
+              "d or high-risk",
+              " cybersecurity",
+              " use attem",
+              "pts. Legitimate secu",
+              "rity professio",
+              "nals (pen testers,",
+              " red teamers) can a",
+              "pply to Anthropic's",
+              " new **Cyber Verifica",
+              "tion Program**",
+              " for acc",
+              "ess. This is ",
+              "part of Anthropic",
+              "'s \"Project Gl",
+              "asswing\" initiative, ",
+              "with the more powe",
+              "rful **Claude",
+              " Mythos Preview** (t",
+              "heir most powe",
+              "rful model at ",
+              "this time) stil",
+              "l in limited access.",
+              "[1]\n\n## Model Li",
+              "neup Context\n\n| Model | Rel",
+              "ease | Role |\n|",
+              "---|---|---|\n| Cl",
+              "aude Mythos Previ",
+              "ew | 2026 | Most power",
+              "ful; limited access [1] |\n",
+              "| **Claude Opus 4",
+              ".7** | **Apr 2026** ",
+              "| **Latest GA mo",
+              "del; best public op",
+              "tion** [3] |\n| Claude",
+              " Sonnet 4.6 |",
+              " Feb 2026 | Fast, ",
+              "full-featured",
+              " mid-tier [2] |\n| Claude ",
+              "Opus 4.6 | Feb 2026 | Prev",
+              "ious top GA mod",
+              "el (deprecated)",
+              " [4] |\n\nFor your use cas",
+              "e in LLM deploy",
+              "ment and API integra",
+              "tion, Opus 4.7 ",
+              "with the new `xhigh` effort level and task budgets API would be the ",
+              "most impactful upg",
+              "rade to evalu",
+              "ate."
+            ],
+            "chunk_starting_offset": 0,
+            "answer": "As of May 2026, the latest generally available Anthropic Claude model is **Claude Opus 4.7**, released on April 16, 2026. Here's a full breakdown of its key capabilities and launch details.[1]\n\n## What Is Claude Opus 4.7?\n\nClaude Opus 4.7 is Anthropic's most capable publicly available model, described as a **hybrid reasoning large language model** with a knowledge cutoff of January 2026. It is a direct upgrade over Opus 4.6, with particular strength in advanced software engineering and long-horizon agentic tasks. Pricing remains the same as Opus 4.6 at **$5/million input tokens and $25/million output tokens**, and it's available via the Claude API (`claude-opus-4-7`), Amazon Bedrock, Google Cloud Vertex AI, and Microsoft Foundry.[2][1]\n\n## Key New Features & Capabilities\n\n**Software Engineering & Agentic Work**\n- Significantly better at complex, long-running coding tasks — early testers report a **13% lift in coding benchmark resolution** over Opus 4.6, and up to **3x more production task resolution** on some SWE-bench variants[1]\n- Catches its own logical faults during planning, verifies outputs before reporting back, and pushes through hard problems without giving up mid-task[1]\n\n**Improved Vision / Multimodal**\n- Now accepts images up to **2,576 pixels on the long edge (~3.75 megapixels)** — more than 3× the resolution of prior Claude models[1]\n- Substantially better at reading dense screenshots, extracting from complex diagrams, and pixel-precise computer-use tasks (one tester reported a jump from 54.5% to **98.5% on a visual-acuity benchmark**)[1]\n\n**Instruction Following & Reasoning**\n- More literal and precise instruction following — Anthropic notes that prompts tuned for older models may need adjustment[1]\n- Better memory across multi-session work using file system-based memory[1]\n- New **`xhigh` effort level** added between `high` and `max` for finer control over reasoning depth vs. latency[1]\n\n**New API & Developer Features**\n- **Task budgets (public beta)**: lets developers guide Claude's token spend across longer runs[1]\n- **`/ultrareview` in Claude Code**: a dedicated review session that flags bugs and design issues a careful human reviewer would catch[1]\n- **Auto mode** extended to Max users in Claude Code, allowing longer tasks with fewer interruptions[1]\n\n## Safety & Cybersecurity Notes\n\nOpus 4.7 is the first model to carry Anthropic's new **cybersecurity safeguards** — it automatically detects and blocks prohibited or high-risk cybersecurity use attempts. Legitimate security professionals (pen testers, red teamers) can apply to Anthropic's new **Cyber Verification Program** for access. This is part of Anthropic's \"Project Glasswing\" initiative, with the more powerful **Claude Mythos Preview** (their most powerful model at this time) still in limited access.[1]\n\n## Model Lineup Context\n\n| Model | Release | Role |\n|---|---|---|\n| Claude Mythos Preview | 2026 | Most powerful; limited access [1] |\n| **Claude Opus 4.7** | **Apr 2026** | **Latest GA model; best public option** [3] |\n| Claude Sonnet 4.6 | Feb 2026 | Fast, full-featured mid-tier [2] |\n| Claude Opus 4.6 | Feb 2026 | Previous top GA model (deprecated) [4] |\n\nFor your use case in LLM deployment and API integration, Opus 4.7 with the new `xhigh` effort level and task budgets API would be the most impactful upgrade to evaluate."
+          }
+        },
+        {
+          "intended_usage": "pro_search_steps",
+          "plan_block": {
+            "progress": "DONE",
+            "goals": [],
+            "steps": [
+              {
+                "uuid": "",
+                "step_type": "INITIAL_QUERY",
+                "initial_query_content": {
+                  "query": "[probe-news-claude-db625886] What is the latest Anthropic Claude model release as of May 2026, and what are its key new features and capabilities?"
+                }
+              },
+              {
+                "uuid": "65e1722b-b425-4045-82dd-b373b6113679",
+                "step_type": "SEARCH_WEB",
+                "search_web_content": {
+                  "goal_id": "0",
+                  "queries": [
+                    {
+                      "engine": "web",
+                      "query": "latest Anthropic Claude model May 2026",
+                      "limit": 8
+                    },
+                    {
+                      "engine": "web",
+                      "query": "Anthropic Claude model new features May 2026",
+                      "limit": 8
+                    }
+                  ]
+                }
+              },
+              {
+                "uuid": "ea0e2de7-9c20-4fb7-ba93-cf010fba856d",
+                "step_type": "SEARCH_RESULTS",
+                "web_results_content": {
+                  "goal_id": "0",
+                  "web_results": [
+                    {
+                      "name": "Model deprecations - Claude API Docs",
+                      "url": "https://platform.claude.com/docs/en/about-claude/model-deprecations",
+                      "snippet": "On April 14, 2026, Anthropic notified developers using Claude Sonnet 4 and Claude Opus 4 models of their upcoming retirement on the Claude API. Retirement date ...",
+                      "is_attachment": false,
+                      "meta_data": {
+                        "client": "web",
+                        "citation_domain_name": "platform.claude",
+                        "suffix": "com",
+                        "domain_name": "Claude API Docs",
+                        "description": "Claude API Documentation"
+                      },
+                      "is_memory": false,
+                      "is_conversation_history": false,
+                      "is_conversation_summary": false,
+                      "is_navigational": false,
+                      "is_focused_web": false
+                    },
+                    {
+                      "name": "Anthropic's Transparency Hub",
+                      "url": "https://www.anthropic.com/transparency",
+                      "snippet": "Claude Opus 4.7 is our new hybrid reasoning large language model. It ... Claude Opus 4.7 has a knowledge cutoff date of January 2026.",
+                      "is_attachment": false,
+                      "meta_data": {
+                        "client": "web",
+                        "date": "2026-02-20T00:00:00",
+                        "citation_domain_name": "anthropic",
+                        "suffix": "com",
+                        "domain_name": "anthropic.com",
+                        "published_date": "2024-12-19T00:00:00"
+                      },
+                      "is_memory": false,
+                      "is_conversation_history": false,
+                      "is_conversation_summary": false,
+                      "is_navigational": false,
+                      "is_focused_web": false
+                    },
+                    {
+                      "name": "New Claude & GPT Models Just Dropped (It's War!) - YouTube",
+                      "url": "https://www.youtube.com/watch?v=9f2egsZZjnw",
+                      "snippet": "Here's the latest on the beef between Anthropic and OpenAI (including 2 new ... SNL Weekend Update Trump 5/16/2026 |Saturday Night Live MAY 16, ...",
+                      "is_attachment": false,
+                      "meta_data": {
+                        "client": "web",
+                        "date": "2026-02-05T00:00:00",
+                        "citation_domain_name": "youtube",
+                        "suffix": "com",
+                        "domain_name": "youtube",
+                        "description": "Here's the latest on the beef between Anthropic and OpenAI (including 2 new models).\n\nDiscover More:\n🛠️ Explore AI Tools & News: https://futuretools.io/\n📰 Weekly Newsletter: https://futuretools.io/newsletter\n🎙️ The Next Wave Podcast: https://youtube.com/@TheNextWavePod\n\nSocials:\n❌ Twiter/X: https://x.com/mreflow\n🖼️ Instagram: https://instagram.com/mr.eflow\n🧵 Threads: https://www.threads.net/@mr.eflow\n🟦 LinkedIn: https://www.linkedin.com/in/matt-wolfe-30841712/\n👍 Facebook: https://www.facebook.com/mattrwolfe\n\nLet’s work together!\n- Brand, sponsorship & business inquiries: mattwolfe@smoothmedia.co\n\n#AINews #AITools #ArtificialIntelligence",
+                        "published_date": "2026-02-05T00:00:00"
+                      },
+                      "is_memory": false,
+                      "is_conversation_history": false,
+                      "is_conversation_summary": false,
+                      "is_navigational": false,
+                      "is_focused_web": false
+                    },
+                    {
+                      "name": "Claude's new constitution - Anthropic",
+                      "url": "https://www.anthropic.com/news/claude-new-constitution",
+                      "snippet": "We're publishing a new constitution for our AI model, Claude. It's a detailed description of Anthropic's vision for Claude's values and ...",
+                      "is_attachment": false,
+                      "meta_data": {
+                        "client": "web",
+                        "date": "2026-01-22T00:00:00",
+                        "citation_domain_name": "anthropic",
+                        "suffix": "com",
+                        "domain_name": "AnthropicAI",
+                        "description": "A new approach to a foundational document that expresses and shapes who Claude is",
+                        "published_date": "2023-11-03T00:00:00"
+                      },
+                      "is_memory": false,
+                      "is_conversation_history": false,
+                      "is_conversation_summary": false,
+                      "is_navigational": false,
+                      "is_focused_web": false
+                    },
+                    {
+                      "name": "Anthropic Claude AI Models List (2026): All Versions Compared",
+                      "url": "https://www.lorka.ai/ai-models/anthropic",
+                      "snippet": "As of April 2026, the latest version of Claude is Opus 4.7. Claude AI version release timeline: Apr 2026 - Opus 4.7; Feb 2026 - Sonnet 4.6; Feb 2026 - Opus 4.6 ...",
+                      "is_attachment": false,
+                      "meta_data": {
+                        "client": "web",
+                        "citation_domain_name": "lorka",
+                        "suffix": "ai",
+                        "domain_name": "Lorka AI",
+                        "description": "Compare Anthropic Claude models fast. Learn the strengths of Opus, Sonnet, and Haiku and switch between them in one Lorka AI chat."
+                      },
+                      "is_memory": false,
+                      "is_conversation_history": false,
+                      "is_conversation_summary": false,
+                      "is_navigational": false,
+                      "is_focused_web": false
+                    },
+                    {
+                      "name": "The Complete Guide to Every Claude Update in Q1 2026 (Tested by ...",
+                      "url": "https://aimaker.substack.com/p/anthropic-claude-updates-q1-2026-guide",
+                      "snippet": "In the last three months alone, they've shipped over 30 new features. New model, new integrations, new tools, new capabilities... almost ...",
+                      "is_attachment": false,
+                      "meta_data": {
+                        "client": "web",
+                        "date": "2026-04-07T00:00:00",
+                        "citation_domain_name": "aimaker.substack",
+                        "suffix": "com",
+                        "domain_name": "The AI Maker",
+                        "description": "What changed how we work, what we skip, and where you should start.",
+                        "published_date": "2026-04-07T00:00:00"
+                      },
+                      "is_memory": false,
+                      "is_conversation_history": false,
+                      "is_conversation_summary": false,
+                      "is_navigational": false,
+                      "is_focused_web": false
+                    },
+                    {
+                      "name": "Claude AI Updates 2026: Features and Models - Times Of AI",
+                      "url": "https://www.timesofai.com/brand-insights/claude-ai-versions/",
+                      "snippet": "The Claude 4 model family represents Anthropic's most advanced lineup to date, offering tiered performance based on user needs.",
+                      "is_attachment": false,
+                      "meta_data": {
+                        "client": "web",
+                        "date": "2026-04-20T00:00:00",
+                        "citation_domain_name": "timesofai",
+                        "suffix": "com",
+                        "domain_name": "Times Of AI",
+                        "description": "Explore Claude AI updates in 2026, including Claude ai pricing, models, capabilities, more. Learn how it compares to other AI models.",
+                        "published_date": "2026-04-20T00:00:00"
+                      },
+                      "is_memory": false,
+                      "is_conversation_history": false,
+                      "is_conversation_summary": false,
+                      "is_navigational": false,
+                      "is_focused_web": false
+                    },
+                    {
+                      "name": "Anthropic Claude 4: Evolution of a Large Language Model",
+                      "url": "https://intuitionlabs.ai/articles/anthropic-claude-4-llm-evolution",
+                      "snippet": "Claude 4 is the latest generation of Anthropic's large language model (LLM) family, released on May 22, 2025.",
+                      "is_attachment": false,
+                      "meta_data": {
+                        "client": "web",
+                        "date": "2026-01-25T00:00:00",
+                        "citation_domain_name": "intuitionlabs",
+                        "suffix": "ai",
+                        "domain_name": "IntuitionLabs",
+                        "description": "Explore the history and development of Anthropic's Claude 4 large language model, covering its evolution to Claude 4.5, key features, benchmarks, and advancements through January 2026.",
+                        "published_date": "2025-06-06T00:00:00"
+                      },
+                      "is_memory": false,
+                      "is_conversation_history": false,
+                      "is_conversation_summary": false,
+                      "is_navigational": false,
+                      "is_focused_web": false
+                    },
+                    {
+                      "name": "Leaks suggest Anthropic is working on a new model branded ...",
+                      "url": "https://www.facebook.com/TLDRTech1/posts/leaks-suggest-anthropic-is-working-on-a-new-model-branded-claude-sonnet-5-with-a/1405203314977987/",
+                      "snippet": "Leaks suggest Anthropic is working on a new model branded Claude Sonnet 5, with an internal date string of February 3, 2026.",
+                      "is_attachment": false,
+                      "meta_data": {
+                        "client": "web",
+                        "date": "2026-02-03T00:00:00",
+                        "citation_domain_name": "facebook",
+                        "suffix": "com",
+                        "domain_name": "Facebookapp",
+                        "description": "Leaks suggest Anthropic is working on a new model branded Claude Sonnet 5, with an internal date string of February 3, 2026. It’s unclear if that marks a public launch or an internal milestone, but...",
+                        "published_date": "2026-02-03T00:00:00"
+                      },
+                      "is_memory": false,
+                      "is_conversation_history": false,
+                      "is_conversation_summary": false,
+                      "is_navigational": false,
+                      "is_focused_web": false
+                    },
+                    {
+                      "name": "Introducing Claude Opus 4.7 - Anthropic",
+                      "url": "https://www.anthropic.com/news/claude-opus-4-7",
+                      "snippet": "Our latest model, Claude Opus 4.7, is now generally available. Opus 4.7 is a notable improvement on Opus 4.6 in advanced software ...",
+                      "is_attachment": false,
+                      "meta_data": {
+                        "client": "web",
+                        "date": "2026-04-16T00:00:00",
+                        "citation_domain_name": "anthropic",
+                        "suffix": "com",
+                        "published_date": "2026-04-16T00:00:00"
+                      },
+                      "is_memory": false,
+                      "is_conversation_history": false,
+                      "is_conversation_summary": false,
+                      "is_navigational": false,
+                      "is_focused_web": false
+                    },
+                    {
+                      "name": "Why Anthropic Is Taking SO Long (2026 Update) - YouTube",
+                      "url": "https://www.youtube.com/watch?v=pBxCLoFVtKE",
+                      "snippet": "Try Anijam AI: https://www.anijam.ai/?src=/youtube/fiBitBiasedAI Everyone's been waiting for Claude 5 — so where is it?",
+                      "is_attachment": false,
+                      "meta_data": {
+                        "client": "web",
+                        "date": "2026-05-06T00:00:00",
+                        "citation_domain_name": "youtube",
+                        "suffix": "com",
+                        "domain_name": "youtube",
+                        "description": "🔗 Try Anijam AI: https://www.anijam.ai/?src=/youtube/fiBitBiasedAI\n\nEveryone's been waiting for Claude 5 — so where is it? In this video, I break down exactly why Anthropic has been dropping Claude 4.5, 4.6, and now Opus 4.7 instead of the generational leap we've all been expecting. From the $30B Series G funding round to the Vercept acquisition to the mysterious \"Mythos\" internal models, here's everything you need to know about Claude 5's release timeline, expected specs, and how it's likely to stack up against GPT-5 and Gemini 3.\n\nBy the end of this video, you'll know more about Claude 5 than 99% of people online — including the one strategic move Anthropic is making behind the scenes that almost nobody is talking about.\n\n⏱️ TIMESTAMPS\n00:00 Intro\n00:56 The Timeline Nobody Saw Coming\n02:19 What Claude 5 Will Actually Do\n04:16 Anijam\n06:07 Where Claude Is Already Crushing It\n07:13 The Elephant in the Room\n08:23 Claude 5 vs GPT-5 vs Gemini — The Real Battle\n09:35 What This Means For You\n\n📌 WHAT WE COVER\n✅ Claude 5 expected release date (late Q3 / Q4 2026)\n✅ Predicted specs: 2M token context window, multi-modal upgrades, agentic capabilities\n✅ Why Anthropic's $30B funding round changes everything\n✅ The Vercept acquisition and what it means for \"computer use\" AI\n✅ Claude 5 vs GPT-5 vs Gemini 3 — who actually wins?\n✅ The user backlash Anthropic doesn't want you to notice\n✅ What developers, enterprises, and everyday users should do RIGHT NOW\n\n💬 Drop a comment: What feature do YOU most want in Claude 5? Bigger context? Voice? Full computer use? I read every comment.\n\n👍 If this helped, smash that LIKE button and SUBSCRIBE — the moment Claude 5 drops, you'll want to be the first to know.\n\n🔔 Hit the bell so you don't miss the launch coverage.\n\n#Claude5 #anthropic  #ai #claudeai #claude",
+                        "published_date": "2026-05-06T00:00:00"
+                      },
+                      "is_memory": false,
+                      "is_conversation_history": false,
+                      "is_conversation_summary": false,
+                      "is_navigational": false,
+                      "is_focused_web": false
+                    },
+                    {
+                      "name": "Claude AI in 2026: Complete Guide to Anthropic's Models, Pricing ...",
+                      "url": "https://www.startuphub.ai/ai-news/reviews/2026/claude-ai-complete-guide-2026",
+                      "snippet": "Key Features (2026) · 1M token context: understands tens of thousands of lines at once · Computer Use: Claude can point, click, and navigate your ...",
+                      "is_attachment": false,
+                      "meta_data": {
+                        "client": "web",
+                        "date": "2026-04-12T00:00:00",
+                        "citation_domain_name": "startuphub",
+                        "suffix": "ai",
+                        "domain_name": "StartupHub.ai",
+                        "description": "Complete guide to Claude AI in 2026. Covers every Anthropic model (Opus, Sonnet, Haiku), pricing, Claude Code features, free access, desktop apps, and how Claud",
+                        "published_date": "2026-04-12T00:00:00"
+                      },
+                      "is_memory": false,
+                      "is_conversation_history": false,
+                      "is_conversation_summary": false,
+                      "is_navigational": false,
+                      "is_focused_web": false
+                    },
+                    {
+                      "name": "Anthropic Updates Its AI Model, Claude Opus 4.6 - YouTube",
+                      "url": "https://www.youtube.com/watch?v=WsqotomF2Dw",
+                      "snippet": "Anthropic is updating its AI model, Claude Opus 4.6, to carry out financial research, days after the company's push into legal services ...",
+                      "is_attachment": false,
+                      "meta_data": {
+                        "client": "web",
+                        "date": "2026-02-05T00:00:00",
+                        "citation_domain_name": "youtube",
+                        "suffix": "com",
+                        "domain_name": "youtube",
+                        "description": "Anthropic is updating its AI model, Claude Opus 4.6, to carry out financial research, days after the company's push into legal services rattled the stocks of legacy software makers. Bloomberg's Shirin Ghaffary reports.\r\n--------\r\nMore on Bloomberg Television and Markets\r\n \r\nLike this video? Subscribe and turn on notifications so you don't miss any videos from Bloomberg Markets & Finance: https://tinyurl.com/ysu5b8a9\r\nVisit http://www.bloomberg.com for business news & analysis, up-to-the-minute market data, features, profiles and more.\r\n \r\nConnect with Bloomberg Television on:\r\nX: https://twitter.com/BloombergTV\r\nFacebook: https://www.facebook.com/BloombergTelevision\r\nInstagram: https://www.instagram.com/bloombergtv/\r\n \r\nConnect with Bloomberg Business on:\r\nX: https://twitter.com/business\r\nFacebook: https://www.facebook.com/bloombergbusiness\r\nInstagram: https://www.instagram.com/bloombergbusiness/\r\nTikTok: https://www.tiktok.com/@bloombergbusiness?lang=en\r\nReddit: https://www.reddit.com/r/bloomberg/\r\nLinkedIn: https://www.linkedin.com/company/bloomberg-news/\r\n \r\nMore from Bloomberg:\r\nBloomberg Radio: https://twitter.com/BloombergRadio\r\n\r\nBloomberg Surveillance: https://twitter.com/bsurveillance\r\nBloomberg Politics: https://twitter.com/bpolitics\r\nBloomberg Originals: https://twitter.com/bbgoriginals\r\n \r\nWatch more on YouTube:\r\nBloomberg Technology: https://www.youtube.com/@BloombergTechnology\r\nBloomberg Originals: https://www.youtube.com/@business\r\nBloomberg Quicktake: https://www.youtube.com/@BloombergQuicktake\r\nBloomberg Espanol: https://www.youtube.com/@bloomberg_espanol\r\nBloomberg Podcasts: https://www.youtube.com/@BloombergPodcasts",
+                        "published_date": "2026-02-05T00:00:00"
+                      },
+                      "is_memory": false,
+                      "is_conversation_history": false,
+                      "is_conversation_summary": false,
+                      "is_navigational": false,
+                      "is_focused_web": false
+                    },
+                    {
+                      "name": "Release of Claude 5 imminent: Anthropic aims to score with lower ...",
+                      "url": "https://www.trendingtopics.eu/release-of-claude-5-imminent-anthropic-aims-to-score-with-lower-inference-costs/",
+                      "snippet": "The company could soon introduce Claude Sonnet 5, a language model that, according to current rumors, is supposed to set new standards in both ...",
+                      "is_attachment": false,
+                      "meta_data": {
+                        "client": "web",
+                        "date": "2026-02-03T00:00:00",
+                        "citation_domain_name": "trendingtopics",
+                        "suffix": "eu",
+                        "domain_name": "Trending Topics",
+                        "description": "In the AI industry, there is currently speculation about an upcoming release from Anthropic. The company could soon introduce Claude Sonnet 5, a language",
+                        "published_date": "2026-02-03T00:00:00"
+                      },
+                      "is_memory": false,
+                      "is_conversation_history": false,
+                      "is_conversation_summary": false,
+                      "is_navigational": false,
+                      "is_focused_web": false
+                    },
+                    {
+                      "name": "What major developments do you expect from Claude in 2026, and ...",
+                      "url": "https://www.reddit.com/r/Anthropic/comments/1q22zjq/what_major_developments_do_you_expect_from_claude/",
+                      "snippet": "Improved searching for all chats, not just chat titles, would reduce the need to prompt a new chat to find relevant past chats.",
+                      "is_attachment": false,
+                      "meta_data": {
+                        "client": "web",
+                        "date": "2026-01-02T00:00:00",
+                        "citation_domain_name": "reddit",
+                        "suffix": "com",
+                        "domain_name": "reddit",
+                        "description": "What major developments do you expect from Claude in 2026, and how might they reshape social platforms, work, and everyday life?",
+                        "published_date": "2026-01-02T16:24:27"
+                      },
+                      "is_memory": false,
+                      "is_conversation_history": false,
+                      "is_conversation_summary": false,
+                      "is_navigational": false,
+                      "is_focused_web": false
+                    }
+                  ]
+                }
+              },
+              {
+                "uuid": "683a524d-3f6b-4224-b69d-13282c157423",
+                "step_type": "URL_NAVIGATE",
+                "url_navigate_content": {
+                  "goal_id": "1",
+                  "urls": [
+                    "https://www.anthropic.com/news/claude-opus-4-7"
+                  ]
+                }
+              },
+              {
+                "uuid": "53c0da40-afb4-4e92-acd3-7dcf8d3d4364",
+                "step_type": "SEARCH_RESULTS",
+                "web_results_content": {
+                  "goal_id": "1",
+                  "web_results": [
+                    {
+                      "name": "Introducing Claude Opus 4.7 - Anthropic",
+                      "url": "https://www.anthropic.com/news/claude-opus-4-7",
+                      "snippet": "ProductAnnouncements\n\n# Introducing Claude Opus 4.7\n\nApr 16, 2026\n\nOur latest model, Claude Opus 4.7",
+                      "is_attachment": false,
+                      "is_memory": false,
+                      "is_conversation_history": false,
+                      "is_conversation_summary": false,
+                      "is_navigational": false,
+                      "is_focused_web": false
+                    }
+                  ]
+                }
+              }
+            ],
+            "final": true
+          }
+        },
+        {
+          "intended_usage": "web_results",
+          "web_result_block": {
+            "progress": "DONE",
+            "web_results": [
+              {
+                "name": "Introducing Claude Opus 4.7 - Anthropic",
+                "snippet": "Apr 16, 2026 Our latest model, Claude Opus 4.7, is now generally available. Opus 4.7 is a notable improvement on Opus 4.6 in advanced software engineering, with particular gains on the most difficult tasks. Users report being able to hand off their hardest coding work—the kind that previously needed close supervision—to Opus 4.7 with confidence. Opus 4.7 handles complex, long-running tasks with rigor and consistency, pays precise attention to instructions, and devises ways to verify its own...",
+                "timestamp": "2026-04-16T00:00:00",
+                "url": "https://www.anthropic.com/news/claude-opus-4-7",
+                "meta_data": {
+                  "citation_domain_name": "anthropic",
+                  "client": "web",
+                  "images": [
+                    "https://d2u1z1lopyfwlx.cloudfront.net/thumbnails/cda0caff-a3aa-5842-9d80-1b997f1ba188/8d01f69d-0fab-563d-a7fa-2c09fb1e3645.jpg"
+                  ]
+                },
+                "is_attachment": false,
+                "is_image": false,
+                "is_code_interpreter": false,
+                "is_knowledge_card": false,
+                "is_navigational": false,
+                "is_widget": false,
+                "is_focused_web": false,
+                "is_client_context": false,
+                "is_memory": false,
+                "is_conversation_history": false,
+                "is_conversation_summary": false
+              },
+              {
+                "name": "Anthropic's Transparency Hub",
+                "snippet": "Model descriptionClaude Opus 4.7 is our new hybrid reasoning large language model. It has notable improvement in advanced software engineering, with particular gains on the most difficult tasks. Knowledge Cutoff DateClaude Opus 4.7 has a knowledge cutoff date of January 2026. This means the models’ knowledge base is most extensive and reliable on information and events up to January 2026. Software and Hardware Used in DevelopmentCloud computing resources from Amazon Web Services and Google...",
+                "timestamp": "2024-12-19T00:00:00",
+                "url": "https://www.anthropic.com/transparency",
+                "meta_data": {
+                  "citation_domain_name": "anthropic",
+                  "client": "web",
+                  "images": [
+                    "https://d2u1z1lopyfwlx.cloudfront.net/thumbnails/8d912fb7-b40e-57ab-bf6c-313d97c628e7/8d01f69d-0fab-563d-a7fa-2c09fb1e3645.jpg"
+                  ]
+                },
+                "is_attachment": false,
+                "is_image": false,
+                "is_code_interpreter": false,
+                "is_knowledge_card": false,
+                "is_navigational": false,
+                "is_widget": false,
+                "is_focused_web": false,
+                "is_client_context": false,
+                "is_memory": false,
+                "is_conversation_history": false,
+                "is_conversation_summary": false
+              },
+              {
+                "name": "Anthropic Claude AI Models List (2026): All Versions Compared",
+                "snippet": "Compare Anthropic Claude models fast. Learn the strengths of Opus, Sonnet, and Haiku and switch between them in one Lorka AI chat.",
+                "timestamp": "",
+                "url": "https://www.lorka.ai/ai-models/anthropic",
+                "meta_data": {
+                  "citation_domain_name": "lorka",
+                  "client": "web",
+                  "images": [
+                    "https://d2u1z1lopyfwlx.cloudfront.net/thumbnails/a3df774c-69d9-59b1-9e3e-38aa6cead7a7/1c71062c-5cde-54af-8ddd-ec471a899e78.jpg"
+                  ]
+                },
+                "is_attachment": false,
+                "is_image": false,
+                "is_code_interpreter": false,
+                "is_knowledge_card": false,
+                "is_navigational": false,
+                "is_widget": false,
+                "is_focused_web": false,
+                "is_client_context": false,
+                "is_memory": false,
+                "is_conversation_history": false,
+                "is_conversation_summary": false
+              },
+              {
+                "name": "Model deprecations - Claude API Docs",
+                "snippet": "Claude API Documentation",
+                "timestamp": "",
+                "url": "https://platform.claude.com/docs/en/about-claude/model-deprecations",
+                "meta_data": {
+                  "citation_domain_name": "platform.claude",
+                  "client": "web",
+                  "images": [
+                    "https://d2u1z1lopyfwlx.cloudfront.net/thumbnails/cbd7aa9d-fe25-5686-a1f7-e5f4a117c8d7/f0550f2f-758c-5445-8c4d-3d256bad115f.jpg"
+                  ]
+                },
+                "is_attachment": false,
+                "is_image": false,
+                "is_code_interpreter": false,
+                "is_knowledge_card": false,
+                "is_navigational": false,
+                "is_widget": false,
+                "is_focused_web": false,
+                "is_client_context": false,
+                "is_memory": false,
+                "is_conversation_history": false,
+                "is_conversation_summary": false
+              },
+              {
+                "name": "New Claude & GPT Models Just Dropped (It's War!) - YouTube",
+                "snippet": "Here's the latest on the beef between Anthropic and OpenAI (including 2 new models). Discover More: 🛠️ Explore AI Tools & News: https://futuretools.io/ 📰 Weekly Newsletter: https://futuretools.io/newsletter 🎙️ The Next Wave Podcast: https://youtube.com/@TheNextWavePod Socials: ❌ Twiter/X: https://x.com/mreflow 🖼️ Instagram: https://instagram.com/mr.eflow 🧵 Threads: https://www.threads.net/@mr.eflow 🟦 LinkedIn: https://www.linkedin.com/in/matt-wolfe-30841712/ 👍 Facebook:...",
+                "timestamp": "2026-02-05T00:00:00",
+                "url": "https://www.youtube.com/watch?v=9f2egsZZjnw",
+                "meta_data": {
+                  "citation_domain_name": "youtube",
+                  "client": "web",
+                  "images": [
+                    "https://d2u1z1lopyfwlx.cloudfront.net/thumbnails/225bcf4a-3aa5-58ec-9b48-9c10c01cd17b/0af98422-8d5d-5204-9f00-361f34eddb23.jpg"
+                  ]
+                },
+                "is_attachment": false,
+                "is_image": false,
+                "is_code_interpreter": false,
+                "is_knowledge_card": false,
+                "is_navigational": false,
+                "is_widget": false,
+                "is_focused_web": false,
+                "is_client_context": false,
+                "is_memory": false,
+                "is_conversation_history": false,
+                "is_conversation_summary": false
+              },
+              {
+                "name": "Claude's new constitution - Anthropic",
+                "snippet": "A new approach to a foundational document that expresses and shapes who Claude is",
+                "timestamp": "2023-11-03T00:00:00",
+                "url": "https://www.anthropic.com/news/claude-new-constitution",
+                "meta_data": {
+                  "citation_domain_name": "anthropic",
+                  "client": "web",
+                  "images": [
+                    "https://d2u1z1lopyfwlx.cloudfront.net/thumbnails/5fa2962a-81f9-542d-aee9-3ce14bbc0caf/f0dbb6f2-a184-549f-b84c-dfbe7bec5f31.jpg"
+                  ]
+                },
+                "is_attachment": false,
+                "is_image": false,
+                "is_code_interpreter": false,
+                "is_knowledge_card": false,
+                "is_navigational": false,
+                "is_widget": false,
+                "is_focused_web": false,
+                "is_client_context": false,
+                "is_memory": false,
+                "is_conversation_history": false,
+                "is_conversation_summary": false
+              },
+              {
+                "name": "The Complete Guide to Every Claude Update in Q1 2026 (Tested by ...",
+                "snippet": "What changed how we work, what we skip, and where you should start.",
+                "timestamp": "2026-04-07T00:00:00",
+                "url": "https://aimaker.substack.com/p/anthropic-claude-updates-q1-2026-guide",
+                "meta_data": {
+                  "citation_domain_name": "aimaker.substack",
+                  "client": "web",
+                  "images": [
+                    "https://substackcdn.com/image/fetch/$s_!0RGW!,w_1200,h_675,c_fill,f_jpg,q_auto:good,fl_progressive:steep,g_auto/https%3A%2F%2Fsubstack-post-media.s3.amazonaws.com%2Fpublic%2Fimages%2F0e5f4ddb-0145-468d-9901-617393ad5b22_2752x1536.jpeg"
+                  ]
+                },
+                "is_attachment": false,
+                "is_image": false,
+                "is_code_interpreter": false,
+                "is_knowledge_card": false,
+                "is_navigational": false,
+                "is_widget": false,
+                "is_focused_web": false,
+                "is_client_context": false,
+                "is_memory": false,
+                "is_conversation_history": false,
+                "is_conversation_summary": false
+              },
+              {
+                "name": "Claude AI Updates 2026: Features and Models - Times Of AI",
+                "snippet": "Explore Claude AI updates in 2026, including Claude ai pricing, models, capabilities, more. Learn how it compares to other AI models.",
+                "timestamp": "2026-04-20T00:00:00",
+                "url": "https://www.timesofai.com/brand-insights/claude-ai-versions/",
+                "meta_data": {
+                  "citation_domain_name": "timesofai",
+                  "client": "web",
+                  "images": [
+                    "https://d2u1z1lopyfwlx.cloudfront.net/thumbnails/29211a80-1adb-5187-9155-9e8d920d37d7/54403dee-d02f-5943-bd43-3d848692ad38.jpg"
+                  ]
+                },
+                "is_attachment": false,
+                "is_image": false,
+                "is_code_interpreter": false,
+                "is_knowledge_card": false,
+                "is_navigational": false,
+                "is_widget": false,
+                "is_focused_web": false,
+                "is_client_context": false,
+                "is_memory": false,
+                "is_conversation_history": false,
+                "is_conversation_summary": false
+              },
+              {
+                "name": "Anthropic Claude 4: Evolution of a Large Language Model",
+                "snippet": "Explore the history and development of Anthropic's Claude 4 large language model, covering its evolution to Claude 4.5, key features, benchmarks, and advancements through January 2026.",
+                "timestamp": "2025-06-06T00:00:00",
+                "url": "https://intuitionlabs.ai/articles/anthropic-claude-4-llm-evolution",
+                "meta_data": {
+                  "citation_domain_name": "intuitionlabs",
+                  "client": "web",
+                  "images": [
+                    "https://d2u1z1lopyfwlx.cloudfront.net/thumbnails/74b589b8-dcbd-5475-b63e-8d0af17ef749/6ea35085-572b-5897-9243-0375d1247897.jpg"
+                  ]
+                },
+                "is_attachment": false,
+                "is_image": false,
+                "is_code_interpreter": false,
+                "is_knowledge_card": false,
+                "is_navigational": false,
+                "is_widget": false,
+                "is_focused_web": false,
+                "is_client_context": false,
+                "is_memory": false,
+                "is_conversation_history": false,
+                "is_conversation_summary": false
+              },
+              {
+                "name": "Leaks suggest Anthropic is working on a new model branded ...",
+                "snippet": "Leaks suggest Anthropic is working on a new model branded Claude Sonnet 5, with an internal date string of February 3, 2026. It’s unclear if that marks a public launch or an internal milestone, but...",
+                "timestamp": "2026-02-03T00:00:00",
+                "url": "https://www.facebook.com/TLDRTech1/posts/leaks-suggest-anthropic-is-working-on-a-new-model-branded-claude-sonnet-5-with-a/1405203314977987/",
+                "meta_data": {
+                  "citation_domain_name": "facebook",
+                  "client": "web",
+                  "images": [
+                    "https://scontent-atl3-1.xx.fbcdn.net/v/t39.30808-6/626630481_1405203294977989_4807049763779551166_n.jpg?stp=dst-jpg_tt6&cstp=mx1638x2048&ctp=p600x600&_nc_cat=106&ccb=1-7&_nc_sid=cae128&_nc_ohc=G9DN-Cpgay0Q7kNvwEBSOJw&_nc_oc=AdkfwHJKZmnQQqO_GlvPPWEAA9CUYNo07lTAw7E1FTaPFVTLItFWXZtWzDcviyVGRSA&_nc_zt=23&_nc_ht=scontent-atl3-1.xx&_nc_gid=RAXk0xvYP5vP6Q1S8K3-rg&oh=00_Aft5mDB8SParRRUdL4cy3-ZonBaKVu1v7jqU7wlrLX5Vwg&oe=69884FE5"
+                  ]
+                },
+                "is_attachment": false,
+                "is_image": false,
+                "is_code_interpreter": false,
+                "is_knowledge_card": false,
+                "is_navigational": false,
+                "is_widget": false,
+                "is_focused_web": false,
+                "is_client_context": false,
+                "is_memory": false,
+                "is_conversation_history": false,
+                "is_conversation_summary": false
+              },
+              {
+                "name": "Why Anthropic Is Taking SO Long (2026 Update) - YouTube",
+                "snippet": "🔗 Try Anijam AI: https://www.anijam.ai/?src=/youtube/fiBitBiasedAI Everyone's been waiting for Claude 5 — so where is it? In this video, I break down exactly why Anthropic has been dropping Claude 4.5, 4.6, and now Opus 4.7 instead of the generational leap we've all been expecting. From the $30B Series G funding round to the Vercept acquisition to the mysterious \"Mythos\" internal models, here's everything you need to know about Claude 5's release timeline, expected specs, and how it's likely...",
+                "timestamp": "2026-05-06T00:00:00",
+                "url": "https://www.youtube.com/watch?v=pBxCLoFVtKE",
+                "meta_data": {
+                  "citation_domain_name": "youtube",
+                  "client": "web",
+                  "images": [
+                    "https://d2u1z1lopyfwlx.cloudfront.net/thumbnails/774d46cf-0589-5152-9d6e-0af0056957a7/0af98422-8d5d-5204-9f00-361f34eddb23.jpg"
+                  ]
+                },
+                "is_attachment": false,
+                "is_image": false,
+                "is_code_interpreter": false,
+                "is_knowledge_card": false,
+                "is_navigational": false,
+                "is_widget": false,
+                "is_focused_web": false,
+                "is_client_context": false,
+                "is_memory": false,
+                "is_conversation_history": false,
+                "is_conversation_summary": false
+              },
+              {
+                "name": "Claude AI in 2026: Complete Guide to Anthropic's Models, Pricing ...",
+                "snippet": "Complete guide to Claude AI in 2026. Covers every Anthropic model (Opus, Sonnet, Haiku), pricing, Claude Code features, free access, desktop apps, and how Claud",
+                "timestamp": "2026-04-12T00:00:00",
+                "url": "https://www.startuphub.ai/ai-news/reviews/2026/claude-ai-complete-guide-2026",
+                "meta_data": {
+                  "citation_domain_name": "startuphub",
+                  "client": "web",
+                  "images": [
+                    "https://cdn.startuphub.ai/storage/v1/object/public/images/articles/claude-ai-complete-guide-2026.png"
+                  ]
+                },
+                "is_attachment": false,
+                "is_image": false,
+                "is_code_interpreter": false,
+                "is_knowledge_card": false,
+                "is_navigational": false,
+                "is_widget": false,
+                "is_focused_web": false,
+                "is_client_context": false,
+                "is_memory": false,
+                "is_conversation_history": false,
+                "is_conversation_summary": false
+              },
+              {
+                "name": "Anthropic Updates Its AI Model, Claude Opus 4.6 - YouTube",
+                "snippet": "Anthropic is updating its AI model, Claude Opus 4.6, to carry out financial research, days after the company's push into legal services rattled the stocks of legacy software makers. Bloomberg's Shirin Ghaffary reports. More on Bloomberg Television and Markets Like this video? Subscribe and turn on notifications so you don't miss any videos from Bloomberg Markets & Finance: https://tinyurl.com/ysu5b8a9 Visit http://www.bloomberg.com for business news & analysis, up-to-the-minute market data,...",
+                "timestamp": "2026-02-05T00:00:00",
+                "url": "https://www.youtube.com/watch?v=WsqotomF2Dw",
+                "meta_data": {
+                  "citation_domain_name": "youtube",
+                  "client": "web",
+                  "images": [
+                    "https://d2u1z1lopyfwlx.cloudfront.net/thumbnails/1ce3d8b2-b652-5524-af91-10ea0e70a358/0af98422-8d5d-5204-9f00-361f34eddb23.jpg"
+                  ]
+                },
+                "is_attachment": false,
+                "is_image": false,
+                "is_code_interpreter": false,
+                "is_knowledge_card": false,
+                "is_navigational": false,
+                "is_widget": false,
+                "is_focused_web": false,
+                "is_client_context": false,
+                "is_memory": false,
+                "is_conversation_history": false,
+                "is_conversation_summary": false
+              },
+              {
+                "name": "Release of Claude 5 imminent: Anthropic aims to score with lower ...",
+                "snippet": "In the AI industry, there is currently speculation about an upcoming release from Anthropic. The company could soon introduce Claude Sonnet 5, a language",
+                "timestamp": "2026-02-03T00:00:00",
+                "url": "https://www.trendingtopics.eu/release-of-claude-5-imminent-anthropic-aims-to-score-with-lower-inference-costs/",
+                "meta_data": {
+                  "citation_domain_name": "trendingtopics",
+                  "client": "web",
+                  "images": [
+                    "https://d2u1z1lopyfwlx.cloudfront.net/thumbnails/5e9451f5-4da8-54d7-81ba-67d6bae1b592/ad2a08ad-80bc-58c7-b478-daeeab6859f5.jpg"
+                  ]
+                },
+                "is_attachment": false,
+                "is_image": false,
+                "is_code_interpreter": false,
+                "is_knowledge_card": false,
+                "is_navigational": false,
+                "is_widget": false,
+                "is_focused_web": false,
+                "is_client_context": false,
+                "is_memory": false,
+                "is_conversation_history": false,
+                "is_conversation_summary": false
+              },
+              {
+                "name": "What major developments do you expect from Claude in 2026, and ...",
+                "snippet": "What major developments do you expect from Claude in 2026, and how might they reshape social platforms, work, and everyday life?",
+                "timestamp": "2026-01-02T16:24:27",
+                "url": "https://www.reddit.com/r/Anthropic/comments/1q22zjq/what_major_developments_do_you_expect_from_claude/",
+                "meta_data": {
+                  "citation_domain_name": "reddit",
+                  "client": "web",
+                  "images": []
+                },
+                "is_attachment": false,
+                "is_image": false,
+                "is_code_interpreter": false,
+                "is_knowledge_card": false,
+                "is_navigational": false,
+                "is_widget": false,
+                "is_focused_web": false,
+                "is_client_context": false,
+                "is_memory": false,
+                "is_conversation_history": false,
+                "is_conversation_summary": false
+              }
+            ]
+          }
+        },
+        {
+          "intended_usage": "sources_answer_mode",
+          "sources_mode_block": {
+            "answer_mode_type": "SOURCES",
+            "progress": "DONE",
+            "web_results": [
+              {
+                "name": "Introducing Claude Opus 4.7 - Anthropic",
+                "snippet": "Apr 16, 2026 Our latest model, Claude Opus 4.7, is now generally available. Opus 4.7 is a notable improvement on Opus 4.6 in advanced software engineering, with particular gains on the most difficult tasks. Users report being able to hand off their hardest coding work—the kind that previously needed close supervision—to Opus 4.7 with confidence. Opus 4.7 handles complex, long-running tasks with rigor and consistency, pays precise attention to instructions, and devises ways to verify its own...",
+                "timestamp": "2026-04-16T00:00:00",
+                "url": "https://www.anthropic.com/news/claude-opus-4-7",
+                "meta_data": {
+                  "citation_domain_name": "anthropic",
+                  "client": "web",
+                  "images": [
+                    "https://d2u1z1lopyfwlx.cloudfront.net/thumbnails/cda0caff-a3aa-5842-9d80-1b997f1ba188/8d01f69d-0fab-563d-a7fa-2c09fb1e3645.jpg"
+                  ]
+                },
+                "is_attachment": false,
+                "is_image": false,
+                "is_code_interpreter": false,
+                "is_knowledge_card": false,
+                "is_navigational": false,
+                "is_widget": false,
+                "is_focused_web": false,
+                "is_client_context": false,
+                "is_memory": false,
+                "is_conversation_history": false,
+                "is_conversation_summary": false
+              },
+              {
+                "name": "Anthropic's Transparency Hub",
+                "snippet": "Model descriptionClaude Opus 4.7 is our new hybrid reasoning large language model. It has notable improvement in advanced software engineering, with particular gains on the most difficult tasks. Knowledge Cutoff DateClaude Opus 4.7 has a knowledge cutoff date of January 2026. This means the models’ knowledge base is most extensive and reliable on information and events up to January 2026. Software and Hardware Used in DevelopmentCloud computing resources from Amazon Web Services and Google...",
+                "timestamp": "2024-12-19T00:00:00",
+                "url": "https://www.anthropic.com/transparency",
+                "meta_data": {
+                  "citation_domain_name": "anthropic",
+                  "client": "web",
+                  "images": [
+                    "https://d2u1z1lopyfwlx.cloudfront.net/thumbnails/8d912fb7-b40e-57ab-bf6c-313d97c628e7/8d01f69d-0fab-563d-a7fa-2c09fb1e3645.jpg"
+                  ]
+                },
+                "is_attachment": false,
+                "is_image": false,
+                "is_code_interpreter": false,
+                "is_knowledge_card": false,
+                "is_navigational": false,
+                "is_widget": false,
+                "is_focused_web": false,
+                "is_client_context": false,
+                "is_memory": false,
+                "is_conversation_history": false,
+                "is_conversation_summary": false
+              },
+              {
+                "name": "Anthropic Claude AI Models List (2026): All Versions Compared",
+                "snippet": "Compare Anthropic Claude models fast. Learn the strengths of Opus, Sonnet, and Haiku and switch between them in one Lorka AI chat.",
+                "timestamp": "",
+                "url": "https://www.lorka.ai/ai-models/anthropic",
+                "meta_data": {
+                  "citation_domain_name": "lorka",
+                  "client": "web",
+                  "images": [
+                    "https://d2u1z1lopyfwlx.cloudfront.net/thumbnails/a3df774c-69d9-59b1-9e3e-38aa6cead7a7/1c71062c-5cde-54af-8ddd-ec471a899e78.jpg"
+                  ]
+                },
+                "is_attachment": false,
+                "is_image": false,
+                "is_code_interpreter": false,
+                "is_knowledge_card": false,
+                "is_navigational": false,
+                "is_widget": false,
+                "is_focused_web": false,
+                "is_client_context": false,
+                "is_memory": false,
+                "is_conversation_history": false,
+                "is_conversation_summary": false
+              },
+              {
+                "name": "Model deprecations - Claude API Docs",
+                "snippet": "Claude API Documentation",
+                "timestamp": "",
+                "url": "https://platform.claude.com/docs/en/about-claude/model-deprecations",
+                "meta_data": {
+                  "citation_domain_name": "platform.claude",
+                  "client": "web",
+                  "images": [
+                    "https://d2u1z1lopyfwlx.cloudfront.net/thumbnails/cbd7aa9d-fe25-5686-a1f7-e5f4a117c8d7/f0550f2f-758c-5445-8c4d-3d256bad115f.jpg"
+                  ]
+                },
+                "is_attachment": false,
+                "is_image": false,
+                "is_code_interpreter": false,
+                "is_knowledge_card": false,
+                "is_navigational": false,
+                "is_widget": false,
+                "is_focused_web": false,
+                "is_client_context": false,
+                "is_memory": false,
+                "is_conversation_history": false,
+                "is_conversation_summary": false
+              },
+              {
+                "name": "New Claude & GPT Models Just Dropped (It's War!) - YouTube",
+                "snippet": "Here's the latest on the beef between Anthropic and OpenAI (including 2 new models). Discover More: 🛠️ Explore AI Tools & News: https://futuretools.io/ 📰 Weekly Newsletter: https://futuretools.io/newsletter 🎙️ The Next Wave Podcast: https://youtube.com/@TheNextWavePod Socials: ❌ Twiter/X: https://x.com/mreflow 🖼️ Instagram: https://instagram.com/mr.eflow 🧵 Threads: https://www.threads.net/@mr.eflow 🟦 LinkedIn: https://www.linkedin.com/in/matt-wolfe-30841712/ 👍 Facebook:...",
+                "timestamp": "2026-02-05T00:00:00",
+                "url": "https://www.youtube.com/watch?v=9f2egsZZjnw",
+                "meta_data": {
+                  "citation_domain_name": "youtube",
+                  "client": "web",
+                  "images": [
+                    "https://d2u1z1lopyfwlx.cloudfront.net/thumbnails/225bcf4a-3aa5-58ec-9b48-9c10c01cd17b/0af98422-8d5d-5204-9f00-361f34eddb23.jpg"
+                  ]
+                },
+                "is_attachment": false,
+                "is_image": false,
+                "is_code_interpreter": false,
+                "is_knowledge_card": false,
+                "is_navigational": false,
+                "is_widget": false,
+                "is_focused_web": false,
+                "is_client_context": false,
+                "is_memory": false,
+                "is_conversation_history": false,
+                "is_conversation_summary": false
+              },
+              {
+                "name": "Claude's new constitution - Anthropic",
+                "snippet": "A new approach to a foundational document that expresses and shapes who Claude is",
+                "timestamp": "2023-11-03T00:00:00",
+                "url": "https://www.anthropic.com/news/claude-new-constitution",
+                "meta_data": {
+                  "citation_domain_name": "anthropic",
+                  "client": "web",
+                  "images": [
+                    "https://d2u1z1lopyfwlx.cloudfront.net/thumbnails/5fa2962a-81f9-542d-aee9-3ce14bbc0caf/f0dbb6f2-a184-549f-b84c-dfbe7bec5f31.jpg"
+                  ]
+                },
+                "is_attachment": false,
+                "is_image": false,
+                "is_code_interpreter": false,
+                "is_knowledge_card": false,
+                "is_navigational": false,
+                "is_widget": false,
+                "is_focused_web": false,
+                "is_client_context": false,
+                "is_memory": false,
+                "is_conversation_history": false,
+                "is_conversation_summary": false
+              },
+              {
+                "name": "The Complete Guide to Every Claude Update in Q1 2026 (Tested by ...",
+                "snippet": "What changed how we work, what we skip, and where you should start.",
+                "timestamp": "2026-04-07T00:00:00",
+                "url": "https://aimaker.substack.com/p/anthropic-claude-updates-q1-2026-guide",
+                "meta_data": {
+                  "citation_domain_name": "aimaker.substack",
+                  "client": "web",
+                  "images": [
+                    "https://substackcdn.com/image/fetch/$s_!0RGW!,w_1200,h_675,c_fill,f_jpg,q_auto:good,fl_progressive:steep,g_auto/https%3A%2F%2Fsubstack-post-media.s3.amazonaws.com%2Fpublic%2Fimages%2F0e5f4ddb-0145-468d-9901-617393ad5b22_2752x1536.jpeg"
+                  ]
+                },
+                "is_attachment": false,
+                "is_image": false,
+                "is_code_interpreter": false,
+                "is_knowledge_card": false,
+                "is_navigational": false,
+                "is_widget": false,
+                "is_focused_web": false,
+                "is_client_context": false,
+                "is_memory": false,
+                "is_conversation_history": false,
+                "is_conversation_summary": false
+              },
+              {
+                "name": "Claude AI Updates 2026: Features and Models - Times Of AI",
+                "snippet": "Explore Claude AI updates in 2026, including Claude ai pricing, models, capabilities, more. Learn how it compares to other AI models.",
+                "timestamp": "2026-04-20T00:00:00",
+                "url": "https://www.timesofai.com/brand-insights/claude-ai-versions/",
+                "meta_data": {
+                  "citation_domain_name": "timesofai",
+                  "client": "web",
+                  "images": [
+                    "https://d2u1z1lopyfwlx.cloudfront.net/thumbnails/29211a80-1adb-5187-9155-9e8d920d37d7/54403dee-d02f-5943-bd43-3d848692ad38.jpg"
+                  ]
+                },
+                "is_attachment": false,
+                "is_image": false,
+                "is_code_interpreter": false,
+                "is_knowledge_card": false,
+                "is_navigational": false,
+                "is_widget": false,
+                "is_focused_web": false,
+                "is_client_context": false,
+                "is_memory": false,
+                "is_conversation_history": false,
+                "is_conversation_summary": false
+              },
+              {
+                "name": "Anthropic Claude 4: Evolution of a Large Language Model",
+                "snippet": "Explore the history and development of Anthropic's Claude 4 large language model, covering its evolution to Claude 4.5, key features, benchmarks, and advancements through January 2026.",
+                "timestamp": "2025-06-06T00:00:00",
+                "url": "https://intuitionlabs.ai/articles/anthropic-claude-4-llm-evolution",
+                "meta_data": {
+                  "citation_domain_name": "intuitionlabs",
+                  "client": "web",
+                  "images": [
+                    "https://d2u1z1lopyfwlx.cloudfront.net/thumbnails/74b589b8-dcbd-5475-b63e-8d0af17ef749/6ea35085-572b-5897-9243-0375d1247897.jpg"
+                  ]
+                },
+                "is_attachment": false,
+                "is_image": false,
+                "is_code_interpreter": false,
+                "is_knowledge_card": false,
+                "is_navigational": false,
+                "is_widget": false,
+                "is_focused_web": false,
+                "is_client_context": false,
+                "is_memory": false,
+                "is_conversation_history": false,
+                "is_conversation_summary": false
+              },
+              {
+                "name": "Leaks suggest Anthropic is working on a new model branded ...",
+                "snippet": "Leaks suggest Anthropic is working on a new model branded Claude Sonnet 5, with an internal date string of February 3, 2026. It’s unclear if that marks a public launch or an internal milestone, but...",
+                "timestamp": "2026-02-03T00:00:00",
+                "url": "https://www.facebook.com/TLDRTech1/posts/leaks-suggest-anthropic-is-working-on-a-new-model-branded-claude-sonnet-5-with-a/1405203314977987/",
+                "meta_data": {
+                  "citation_domain_name": "facebook",
+                  "client": "web",
+                  "images": [
+                    "https://scontent-atl3-1.xx.fbcdn.net/v/t39.30808-6/626630481_1405203294977989_4807049763779551166_n.jpg?stp=dst-jpg_tt6&cstp=mx1638x2048&ctp=p600x600&_nc_cat=106&ccb=1-7&_nc_sid=cae128&_nc_ohc=G9DN-Cpgay0Q7kNvwEBSOJw&_nc_oc=AdkfwHJKZmnQQqO_GlvPPWEAA9CUYNo07lTAw7E1FTaPFVTLItFWXZtWzDcviyVGRSA&_nc_zt=23&_nc_ht=scontent-atl3-1.xx&_nc_gid=RAXk0xvYP5vP6Q1S8K3-rg&oh=00_Aft5mDB8SParRRUdL4cy3-ZonBaKVu1v7jqU7wlrLX5Vwg&oe=69884FE5"
+                  ]
+                },
+                "is_attachment": false,
+                "is_image": false,
+                "is_code_interpreter": false,
+                "is_knowledge_card": false,
+                "is_navigational": false,
+                "is_widget": false,
+                "is_focused_web": false,
+                "is_client_context": false,
+                "is_memory": false,
+                "is_conversation_history": false,
+                "is_conversation_summary": false
+              },
+              {
+                "name": "Why Anthropic Is Taking SO Long (2026 Update) - YouTube",
+                "snippet": "🔗 Try Anijam AI: https://www.anijam.ai/?src=/youtube/fiBitBiasedAI Everyone's been waiting for Claude 5 — so where is it? In this video, I break down exactly why Anthropic has been dropping Claude 4.5, 4.6, and now Opus 4.7 instead of the generational leap we've all been expecting. From the $30B Series G funding round to the Vercept acquisition to the mysterious \"Mythos\" internal models, here's everything you need to know about Claude 5's release timeline, expected specs, and how it's likely...",
+                "timestamp": "2026-05-06T00:00:00",
+                "url": "https://www.youtube.com/watch?v=pBxCLoFVtKE",
+                "meta_data": {
+                  "citation_domain_name": "youtube",
+                  "client": "web",
+                  "images": [
+                    "https://d2u1z1lopyfwlx.cloudfront.net/thumbnails/774d46cf-0589-5152-9d6e-0af0056957a7/0af98422-8d5d-5204-9f00-361f34eddb23.jpg"
+                  ]
+                },
+                "is_attachment": false,
+                "is_image": false,
+                "is_code_interpreter": false,
+                "is_knowledge_card": false,
+                "is_navigational": false,
+                "is_widget": false,
+                "is_focused_web": false,
+                "is_client_context": false,
+                "is_memory": false,
+                "is_conversation_history": false,
+                "is_conversation_summary": false
+              },
+              {
+                "name": "Claude AI in 2026: Complete Guide to Anthropic's Models, Pricing ...",
+                "snippet": "Complete guide to Claude AI in 2026. Covers every Anthropic model (Opus, Sonnet, Haiku), pricing, Claude Code features, free access, desktop apps, and how Claud",
+                "timestamp": "2026-04-12T00:00:00",
+                "url": "https://www.startuphub.ai/ai-news/reviews/2026/claude-ai-complete-guide-2026",
+                "meta_data": {
+                  "citation_domain_name": "startuphub",
+                  "client": "web",
+                  "images": [
+                    "https://cdn.startuphub.ai/storage/v1/object/public/images/articles/claude-ai-complete-guide-2026.png"
+                  ]
+                },
+                "is_attachment": false,
+                "is_image": false,
+                "is_code_interpreter": false,
+                "is_knowledge_card": false,
+                "is_navigational": false,
+                "is_widget": false,
+                "is_focused_web": false,
+                "is_client_context": false,
+                "is_memory": false,
+                "is_conversation_history": false,
+                "is_conversation_summary": false
+              },
+              {
+                "name": "Anthropic Updates Its AI Model, Claude Opus 4.6 - YouTube",
+                "snippet": "Anthropic is updating its AI model, Claude Opus 4.6, to carry out financial research, days after the company's push into legal services rattled the stocks of legacy software makers. Bloomberg's Shirin Ghaffary reports. More on Bloomberg Television and Markets Like this video? Subscribe and turn on notifications so you don't miss any videos from Bloomberg Markets & Finance: https://tinyurl.com/ysu5b8a9 Visit http://www.bloomberg.com for business news & analysis, up-to-the-minute market data,...",
+                "timestamp": "2026-02-05T00:00:00",
+                "url": "https://www.youtube.com/watch?v=WsqotomF2Dw",
+                "meta_data": {
+                  "citation_domain_name": "youtube",
+                  "client": "web",
+                  "images": [
+                    "https://d2u1z1lopyfwlx.cloudfront.net/thumbnails/1ce3d8b2-b652-5524-af91-10ea0e70a358/0af98422-8d5d-5204-9f00-361f34eddb23.jpg"
+                  ]
+                },
+                "is_attachment": false,
+                "is_image": false,
+                "is_code_interpreter": false,
+                "is_knowledge_card": false,
+                "is_navigational": false,
+                "is_widget": false,
+                "is_focused_web": false,
+                "is_client_context": false,
+                "is_memory": false,
+                "is_conversation_history": false,
+                "is_conversation_summary": false
+              },
+              {
+                "name": "Release of Claude 5 imminent: Anthropic aims to score with lower ...",
+                "snippet": "In the AI industry, there is currently speculation about an upcoming release from Anthropic. The company could soon introduce Claude Sonnet 5, a language",
+                "timestamp": "2026-02-03T00:00:00",
+                "url": "https://www.trendingtopics.eu/release-of-claude-5-imminent-anthropic-aims-to-score-with-lower-inference-costs/",
+                "meta_data": {
+                  "citation_domain_name": "trendingtopics",
+                  "client": "web",
+                  "images": [
+                    "https://d2u1z1lopyfwlx.cloudfront.net/thumbnails/5e9451f5-4da8-54d7-81ba-67d6bae1b592/ad2a08ad-80bc-58c7-b478-daeeab6859f5.jpg"
+                  ]
+                },
+                "is_attachment": false,
+                "is_image": false,
+                "is_code_interpreter": false,
+                "is_knowledge_card": false,
+                "is_navigational": false,
+                "is_widget": false,
+                "is_focused_web": false,
+                "is_client_context": false,
+                "is_memory": false,
+                "is_conversation_history": false,
+                "is_conversation_summary": false
+              },
+              {
+                "name": "What major developments do you expect from Claude in 2026, and ...",
+                "snippet": "What major developments do you expect from Claude in 2026, and how might they reshape social platforms, work, and everyday life?",
+                "timestamp": "2026-01-02T16:24:27",
+                "url": "https://www.reddit.com/r/Anthropic/comments/1q22zjq/what_major_developments_do_you_expect_from_claude/",
+                "meta_data": {
+                  "citation_domain_name": "reddit",
+                  "client": "web",
+                  "images": []
+                },
+                "is_attachment": false,
+                "is_image": false,
+                "is_code_interpreter": false,
+                "is_knowledge_card": false,
+                "is_navigational": false,
+                "is_widget": false,
+                "is_focused_web": false,
+                "is_client_context": false,
+                "is_memory": false,
+                "is_conversation_history": false,
+                "is_conversation_summary": false
+              }
+            ],
+            "result_count": 15,
+            "rows": [
+              {
+                "web_result": {
+                  "name": "Introducing Claude Opus 4.7 - Anthropic",
+                  "snippet": "Apr 16, 2026 Our latest model, Claude Opus 4.7, is now generally available. Opus 4.7 is a notable improvement on Opus 4.6 in advanced software engineering, with particular gains on the most difficult tasks. Users report being able to hand off their hardest coding work—the kind that previously needed close supervision—to Opus 4.7 with confidence. Opus 4.7 handles complex, long-running tasks with rigor and consistency, pays precise attention to instructions, and devises ways to verify its own...",
+                  "timestamp": "2026-04-16T00:00:00",
+                  "url": "https://www.anthropic.com/news/claude-opus-4-7",
+                  "meta_data": {
+                    "citation_domain_name": "anthropic",
+                    "client": "web",
+                    "images": [
+                      "https://d2u1z1lopyfwlx.cloudfront.net/thumbnails/cda0caff-a3aa-5842-9d80-1b997f1ba188/8d01f69d-0fab-563d-a7fa-2c09fb1e3645.jpg"
+                    ]
+                  },
+                  "is_attachment": false,
+                  "is_image": false,
+                  "is_code_interpreter": false,
+                  "is_knowledge_card": false,
+                  "is_navigational": false,
+                  "is_widget": false,
+                  "is_focused_web": false,
+                  "is_client_context": false,
+                  "is_memory": false,
+                  "is_conversation_history": false,
+                  "is_conversation_summary": false
+                },
+                "status": "SELECTED",
+                "citation": 1
+              },
+              {
+                "web_result": {
+                  "name": "Anthropic's Transparency Hub",
+                  "snippet": "Model descriptionClaude Opus 4.7 is our new hybrid reasoning large language model. It has notable improvement in advanced software engineering, with particular gains on the most difficult tasks. Knowledge Cutoff DateClaude Opus 4.7 has a knowledge cutoff date of January 2026. This means the models’ knowledge base is most extensive and reliable on information and events up to January 2026. Software and Hardware Used in DevelopmentCloud computing resources from Amazon Web Services and Google...",
+                  "timestamp": "2024-12-19T00:00:00",
+                  "url": "https://www.anthropic.com/transparency",
+                  "meta_data": {
+                    "citation_domain_name": "anthropic",
+                    "client": "web",
+                    "images": [
+                      "https://d2u1z1lopyfwlx.cloudfront.net/thumbnails/8d912fb7-b40e-57ab-bf6c-313d97c628e7/8d01f69d-0fab-563d-a7fa-2c09fb1e3645.jpg"
+                    ]
+                  },
+                  "is_attachment": false,
+                  "is_image": false,
+                  "is_code_interpreter": false,
+                  "is_knowledge_card": false,
+                  "is_navigational": false,
+                  "is_widget": false,
+                  "is_focused_web": false,
+                  "is_client_context": false,
+                  "is_memory": false,
+                  "is_conversation_history": false,
+                  "is_conversation_summary": false
+                },
+                "status": "SELECTED",
+                "citation": 2
+              },
+              {
+                "web_result": {
+                  "name": "Anthropic Claude AI Models List (2026): All Versions Compared",
+                  "snippet": "Compare Anthropic Claude models fast. Learn the strengths of Opus, Sonnet, and Haiku and switch between them in one Lorka AI chat.",
+                  "timestamp": "",
+                  "url": "https://www.lorka.ai/ai-models/anthropic",
+                  "meta_data": {
+                    "citation_domain_name": "lorka",
+                    "client": "web",
+                    "images": [
+                      "https://d2u1z1lopyfwlx.cloudfront.net/thumbnails/a3df774c-69d9-59b1-9e3e-38aa6cead7a7/1c71062c-5cde-54af-8ddd-ec471a899e78.jpg"
+                    ]
+                  },
+                  "is_attachment": false,
+                  "is_image": false,
+                  "is_code_interpreter": false,
+                  "is_knowledge_card": false,
+                  "is_navigational": false,
+                  "is_widget": false,
+                  "is_focused_web": false,
+                  "is_client_context": false,
+                  "is_memory": false,
+                  "is_conversation_history": false,
+                  "is_conversation_summary": false
+                },
+                "status": "SELECTED",
+                "citation": 3
+              },
+              {
+                "web_result": {
+                  "name": "Model deprecations - Claude API Docs",
+                  "snippet": "Claude API Documentation",
+                  "timestamp": "",
+                  "url": "https://platform.claude.com/docs/en/about-claude/model-deprecations",
+                  "meta_data": {
+                    "citation_domain_name": "platform.claude",
+                    "client": "web",
+                    "images": [
+                      "https://d2u1z1lopyfwlx.cloudfront.net/thumbnails/cbd7aa9d-fe25-5686-a1f7-e5f4a117c8d7/f0550f2f-758c-5445-8c4d-3d256bad115f.jpg"
+                    ]
+                  },
+                  "is_attachment": false,
+                  "is_image": false,
+                  "is_code_interpreter": false,
+                  "is_knowledge_card": false,
+                  "is_navigational": false,
+                  "is_widget": false,
+                  "is_focused_web": false,
+                  "is_client_context": false,
+                  "is_memory": false,
+                  "is_conversation_history": false,
+                  "is_conversation_summary": false
+                },
+                "status": "SELECTED",
+                "citation": 4
+              },
+              {
+                "web_result": {
+                  "name": "New Claude & GPT Models Just Dropped (It's War!) - YouTube",
+                  "snippet": "Here's the latest on the beef between Anthropic and OpenAI (including 2 new models). Discover More: 🛠️ Explore AI Tools & News: https://futuretools.io/ 📰 Weekly Newsletter: https://futuretools.io/newsletter 🎙️ The Next Wave Podcast: https://youtube.com/@TheNextWavePod Socials: ❌ Twiter/X: https://x.com/mreflow 🖼️ Instagram: https://instagram.com/mr.eflow 🧵 Threads: https://www.threads.net/@mr.eflow 🟦 LinkedIn: https://www.linkedin.com/in/matt-wolfe-30841712/ 👍 Facebook:...",
+                  "timestamp": "2026-02-05T00:00:00",
+                  "url": "https://www.youtube.com/watch?v=9f2egsZZjnw",
+                  "meta_data": {
+                    "citation_domain_name": "youtube",
+                    "client": "web",
+                    "images": [
+                      "https://d2u1z1lopyfwlx.cloudfront.net/thumbnails/225bcf4a-3aa5-58ec-9b48-9c10c01cd17b/0af98422-8d5d-5204-9f00-361f34eddb23.jpg"
+                    ]
+                  },
+                  "is_attachment": false,
+                  "is_image": false,
+                  "is_code_interpreter": false,
+                  "is_knowledge_card": false,
+                  "is_navigational": false,
+                  "is_widget": false,
+                  "is_focused_web": false,
+                  "is_client_context": false,
+                  "is_memory": false,
+                  "is_conversation_history": false,
+                  "is_conversation_summary": false
+                },
+                "status": "REVIEWED"
+              },
+              {
+                "web_result": {
+                  "name": "Claude's new constitution - Anthropic",
+                  "snippet": "A new approach to a foundational document that expresses and shapes who Claude is",
+                  "timestamp": "2023-11-03T00:00:00",
+                  "url": "https://www.anthropic.com/news/claude-new-constitution",
+                  "meta_data": {
+                    "citation_domain_name": "anthropic",
+                    "client": "web",
+                    "images": [
+                      "https://d2u1z1lopyfwlx.cloudfront.net/thumbnails/5fa2962a-81f9-542d-aee9-3ce14bbc0caf/f0dbb6f2-a184-549f-b84c-dfbe7bec5f31.jpg"
+                    ]
+                  },
+                  "is_attachment": false,
+                  "is_image": false,
+                  "is_code_interpreter": false,
+                  "is_knowledge_card": false,
+                  "is_navigational": false,
+                  "is_widget": false,
+                  "is_focused_web": false,
+                  "is_client_context": false,
+                  "is_memory": false,
+                  "is_conversation_history": false,
+                  "is_conversation_summary": false
+                },
+                "status": "REVIEWED"
+              },
+              {
+                "web_result": {
+                  "name": "The Complete Guide to Every Claude Update in Q1 2026 (Tested by ...",
+                  "snippet": "What changed how we work, what we skip, and where you should start.",
+                  "timestamp": "2026-04-07T00:00:00",
+                  "url": "https://aimaker.substack.com/p/anthropic-claude-updates-q1-2026-guide",
+                  "meta_data": {
+                    "citation_domain_name": "aimaker.substack",
+                    "client": "web",
+                    "images": [
+                      "https://substackcdn.com/image/fetch/$s_!0RGW!,w_1200,h_675,c_fill,f_jpg,q_auto:good,fl_progressive:steep,g_auto/https%3A%2F%2Fsubstack-post-media.s3.amazonaws.com%2Fpublic%2Fimages%2F0e5f4ddb-0145-468d-9901-617393ad5b22_2752x1536.jpeg"
+                    ]
+                  },
+                  "is_attachment": false,
+                  "is_image": false,
+                  "is_code_interpreter": false,
+                  "is_knowledge_card": false,
+                  "is_navigational": false,
+                  "is_widget": false,
+                  "is_focused_web": false,
+                  "is_client_context": false,
+                  "is_memory": false,
+                  "is_conversation_history": false,
+                  "is_conversation_summary": false
+                },
+                "status": "REVIEWED"
+              },
+              {
+                "web_result": {
+                  "name": "Claude AI Updates 2026: Features and Models - Times Of AI",
+                  "snippet": "Explore Claude AI updates in 2026, including Claude ai pricing, models, capabilities, more. Learn how it compares to other AI models.",
+                  "timestamp": "2026-04-20T00:00:00",
+                  "url": "https://www.timesofai.com/brand-insights/claude-ai-versions/",
+                  "meta_data": {
+                    "citation_domain_name": "timesofai",
+                    "client": "web",
+                    "images": [
+                      "https://d2u1z1lopyfwlx.cloudfront.net/thumbnails/29211a80-1adb-5187-9155-9e8d920d37d7/54403dee-d02f-5943-bd43-3d848692ad38.jpg"
+                    ]
+                  },
+                  "is_attachment": false,
+                  "is_image": false,
+                  "is_code_interpreter": false,
+                  "is_knowledge_card": false,
+                  "is_navigational": false,
+                  "is_widget": false,
+                  "is_focused_web": false,
+                  "is_client_context": false,
+                  "is_memory": false,
+                  "is_conversation_history": false,
+                  "is_conversation_summary": false
+                },
+                "status": "REVIEWED"
+              },
+              {
+                "web_result": {
+                  "name": "Anthropic Claude 4: Evolution of a Large Language Model",
+                  "snippet": "Explore the history and development of Anthropic's Claude 4 large language model, covering its evolution to Claude 4.5, key features, benchmarks, and advancements through January 2026.",
+                  "timestamp": "2025-06-06T00:00:00",
+                  "url": "https://intuitionlabs.ai/articles/anthropic-claude-4-llm-evolution",
+                  "meta_data": {
+                    "citation_domain_name": "intuitionlabs",
+                    "client": "web",
+                    "images": [
+                      "https://d2u1z1lopyfwlx.cloudfront.net/thumbnails/74b589b8-dcbd-5475-b63e-8d0af17ef749/6ea35085-572b-5897-9243-0375d1247897.jpg"
+                    ]
+                  },
+                  "is_attachment": false,
+                  "is_image": false,
+                  "is_code_interpreter": false,
+                  "is_knowledge_card": false,
+                  "is_navigational": false,
+                  "is_widget": false,
+                  "is_focused_web": false,
+                  "is_client_context": false,
+                  "is_memory": false,
+                  "is_conversation_history": false,
+                  "is_conversation_summary": false
+                },
+                "status": "REVIEWED"
+              },
+              {
+                "web_result": {
+                  "name": "Leaks suggest Anthropic is working on a new model branded ...",
+                  "snippet": "Leaks suggest Anthropic is working on a new model branded Claude Sonnet 5, with an internal date string of February 3, 2026. It’s unclear if that marks a public launch or an internal milestone, but...",
+                  "timestamp": "2026-02-03T00:00:00",
+                  "url": "https://www.facebook.com/TLDRTech1/posts/leaks-suggest-anthropic-is-working-on-a-new-model-branded-claude-sonnet-5-with-a/1405203314977987/",
+                  "meta_data": {
+                    "citation_domain_name": "facebook",
+                    "client": "web",
+                    "images": [
+                      "https://scontent-atl3-1.xx.fbcdn.net/v/t39.30808-6/626630481_1405203294977989_4807049763779551166_n.jpg?stp=dst-jpg_tt6&cstp=mx1638x2048&ctp=p600x600&_nc_cat=106&ccb=1-7&_nc_sid=cae128&_nc_ohc=G9DN-Cpgay0Q7kNvwEBSOJw&_nc_oc=AdkfwHJKZmnQQqO_GlvPPWEAA9CUYNo07lTAw7E1FTaPFVTLItFWXZtWzDcviyVGRSA&_nc_zt=23&_nc_ht=scontent-atl3-1.xx&_nc_gid=RAXk0xvYP5vP6Q1S8K3-rg&oh=00_Aft5mDB8SParRRUdL4cy3-ZonBaKVu1v7jqU7wlrLX5Vwg&oe=69884FE5"
+                    ]
+                  },
+                  "is_attachment": false,
+                  "is_image": false,
+                  "is_code_interpreter": false,
+                  "is_knowledge_card": false,
+                  "is_navigational": false,
+                  "is_widget": false,
+                  "is_focused_web": false,
+                  "is_client_context": false,
+                  "is_memory": false,
+                  "is_conversation_history": false,
+                  "is_conversation_summary": false
+                },
+                "status": "REVIEWED"
+              },
+              {
+                "web_result": {
+                  "name": "Why Anthropic Is Taking SO Long (2026 Update) - YouTube",
+                  "snippet": "🔗 Try Anijam AI: https://www.anijam.ai/?src=/youtube/fiBitBiasedAI Everyone's been waiting for Claude 5 — so where is it? In this video, I break down exactly why Anthropic has been dropping Claude 4.5, 4.6, and now Opus 4.7 instead of the generational leap we've all been expecting. From the $30B Series G funding round to the Vercept acquisition to the mysterious \"Mythos\" internal models, here's everything you need to know about Claude 5's release timeline, expected specs, and how it's likely...",
+                  "timestamp": "2026-05-06T00:00:00",
+                  "url": "https://www.youtube.com/watch?v=pBxCLoFVtKE",
+                  "meta_data": {
+                    "citation_domain_name": "youtube",
+                    "client": "web",
+                    "images": [
+                      "https://d2u1z1lopyfwlx.cloudfront.net/thumbnails/774d46cf-0589-5152-9d6e-0af0056957a7/0af98422-8d5d-5204-9f00-361f34eddb23.jpg"
+                    ]
+                  },
+                  "is_attachment": false,
+                  "is_image": false,
+                  "is_code_interpreter": false,
+                  "is_knowledge_card": false,
+                  "is_navigational": false,
+                  "is_widget": false,
+                  "is_focused_web": false,
+                  "is_client_context": false,
+                  "is_memory": false,
+                  "is_conversation_history": false,
+                  "is_conversation_summary": false
+                },
+                "status": "REVIEWED"
+              },
+              {
+                "web_result": {
+                  "name": "Claude AI in 2026: Complete Guide to Anthropic's Models, Pricing ...",
+                  "snippet": "Complete guide to Claude AI in 2026. Covers every Anthropic model (Opus, Sonnet, Haiku), pricing, Claude Code features, free access, desktop apps, and how Claud",
+                  "timestamp": "2026-04-12T00:00:00",
+                  "url": "https://www.startuphub.ai/ai-news/reviews/2026/claude-ai-complete-guide-2026",
+                  "meta_data": {
+                    "citation_domain_name": "startuphub",
+                    "client": "web",
+                    "images": [
+                      "https://cdn.startuphub.ai/storage/v1/object/public/images/articles/claude-ai-complete-guide-2026.png"
+                    ]
+                  },
+                  "is_attachment": false,
+                  "is_image": false,
+                  "is_code_interpreter": false,
+                  "is_knowledge_card": false,
+                  "is_navigational": false,
+                  "is_widget": false,
+                  "is_focused_web": false,
+                  "is_client_context": false,
+                  "is_memory": false,
+                  "is_conversation_history": false,
+                  "is_conversation_summary": false
+                },
+                "status": "REVIEWED"
+              },
+              {
+                "web_result": {
+                  "name": "Anthropic Updates Its AI Model, Claude Opus 4.6 - YouTube",
+                  "snippet": "Anthropic is updating its AI model, Claude Opus 4.6, to carry out financial research, days after the company's push into legal services rattled the stocks of legacy software makers. Bloomberg's Shirin Ghaffary reports. More on Bloomberg Television and Markets Like this video? Subscribe and turn on notifications so you don't miss any videos from Bloomberg Markets & Finance: https://tinyurl.com/ysu5b8a9 Visit http://www.bloomberg.com for business news & analysis, up-to-the-minute market data,...",
+                  "timestamp": "2026-02-05T00:00:00",
+                  "url": "https://www.youtube.com/watch?v=WsqotomF2Dw",
+                  "meta_data": {
+                    "citation_domain_name": "youtube",
+                    "client": "web",
+                    "images": [
+                      "https://d2u1z1lopyfwlx.cloudfront.net/thumbnails/1ce3d8b2-b652-5524-af91-10ea0e70a358/0af98422-8d5d-5204-9f00-361f34eddb23.jpg"
+                    ]
+                  },
+                  "is_attachment": false,
+                  "is_image": false,
+                  "is_code_interpreter": false,
+                  "is_knowledge_card": false,
+                  "is_navigational": false,
+                  "is_widget": false,
+                  "is_focused_web": false,
+                  "is_client_context": false,
+                  "is_memory": false,
+                  "is_conversation_history": false,
+                  "is_conversation_summary": false
+                },
+                "status": "REVIEWED"
+              },
+              {
+                "web_result": {
+                  "name": "Release of Claude 5 imminent: Anthropic aims to score with lower ...",
+                  "snippet": "In the AI industry, there is currently speculation about an upcoming release from Anthropic. The company could soon introduce Claude Sonnet 5, a language",
+                  "timestamp": "2026-02-03T00:00:00",
+                  "url": "https://www.trendingtopics.eu/release-of-claude-5-imminent-anthropic-aims-to-score-with-lower-inference-costs/",
+                  "meta_data": {
+                    "citation_domain_name": "trendingtopics",
+                    "client": "web",
+                    "images": [
+                      "https://d2u1z1lopyfwlx.cloudfront.net/thumbnails/5e9451f5-4da8-54d7-81ba-67d6bae1b592/ad2a08ad-80bc-58c7-b478-daeeab6859f5.jpg"
+                    ]
+                  },
+                  "is_attachment": false,
+                  "is_image": false,
+                  "is_code_interpreter": false,
+                  "is_knowledge_card": false,
+                  "is_navigational": false,
+                  "is_widget": false,
+                  "is_focused_web": false,
+                  "is_client_context": false,
+                  "is_memory": false,
+                  "is_conversation_history": false,
+                  "is_conversation_summary": false
+                },
+                "status": "REVIEWED"
+              },
+              {
+                "web_result": {
+                  "name": "What major developments do you expect from Claude in 2026, and ...",
+                  "snippet": "What major developments do you expect from Claude in 2026, and how might they reshape social platforms, work, and everyday life?",
+                  "timestamp": "2026-01-02T16:24:27",
+                  "url": "https://www.reddit.com/r/Anthropic/comments/1q22zjq/what_major_developments_do_you_expect_from_claude/",
+                  "meta_data": {
+                    "citation_domain_name": "reddit",
+                    "client": "web",
+                    "images": []
+                  },
+                  "is_attachment": false,
+                  "is_image": false,
+                  "is_code_interpreter": false,
+                  "is_knowledge_card": false,
+                  "is_navigational": false,
+                  "is_widget": false,
+                  "is_focused_web": false,
+                  "is_client_context": false,
+                  "is_memory": false,
+                  "is_conversation_history": false,
+                  "is_conversation_summary": false
+                },
+                "status": "REVIEWED"
+              }
+            ]
+          }
+        }
+      ],
+      "related_query_items": [
+        {
+          "text": "Build a sortable comparison dashboard for Claude Opus 4.7, GPT-5, and Gemini 2.0 Ultra including pricing, inference latency, context window size, agentic coding performance on SWE-bench, and reasoning scores. Add a toggle to filter by specific capabilities like mathematical logic, creative writing, and data extraction, and include a real-time table of recent benchmark results from public testing platforms like LMSYS Chatbot Arena to show relative ranking and Elo shifts over the last 90 days",
+          "type": "UPSELL",
+          "upsell_type": "computer_related_query",
+          "query_params": {},
+          "uuid": "9232d7b6-ada3-422e-9ef9-9cac2091a0d7",
+          "display_text": "Claude Opus 4.7 vs GPT-5: sortable capability benchmark dashboard"
+        },
+        {
+          "text": "Create an audit report of all 30+ Anthropic updates and Skills released in Q1-Q2 2026. Include a structured checklist categorized by task type (e.g., Excel/PowerPoint automation, script execution, agent planning, file generation), identify which specific Anthropic-built tools are now available for each, and map them to their primary use case (coding vs business analysis vs creative). Build a sortable tracking table that shows the feature, its release date, and a productivity-gain estimate for common knowledge-work workflows",
+          "type": "UPSELL",
+          "upsell_type": "computer_related_query",
+          "query_params": {},
+          "uuid": "87e5121d-9974-4a23-9ed6-e527e33681a7",
+          "display_text": "Audit the last 6 months of Claude updates — a checklist of the 30+ new agentic skills and workflow tools you can use now"
+        },
+        {
+          "text": "How does Claude Opus 4.7 compare with Sonnet 4.6",
+          "type": "DEFAULT"
+        },
+        {
+          "text": "What benchmarks show Opus 4.7 improvements in coding",
+          "type": "DEFAULT"
+        },
+        {
+          "text": "Which Claude model is best for agent planning",
+          "type": "DEFAULT"
+        }
+      ],
+      "access_level": "PRIVATE_READ",
+      "answer_modes": [
+        {
+          "answer_mode_type": "IMAGE",
+          "has_preview": false
+        },
+        {
+          "answer_mode_type": "SOURCES"
+        }
+      ],
+      "structured_answer_block_usages": [
+        "ask_text_0_markdown"
+      ],
+      "reconnectable": false,
+      "classifier_results": {
+        "personal_search": false,
+        "skip_search": false,
+        "widget_type": null,
+        "hide_nav": false,
+        "hide_sources": false,
+        "image_generation": false,
+        "time_widget": false,
+        "mhe_predictions": {
+          "skip_search": false,
+          "image_generation_intent": false,
+          "time_widget": false,
+          "sports_intent": null,
+          "places_search_intent": false,
+          "shopping_intent": false,
+          "movie_lists_intent": false,
+          "image_preview": false,
+          "video_preview": false,
+          "nav_intent": false,
+          "study_intent": null,
+          "personal_search": false,
+          "weather_widget": false,
+          "finance_widget_gating": false,
+          "calculator_widget": false,
+          "comet_nav_widget_combined_target": false,
+          "finance_agent_gating": false
+        },
+        "mhe_predictions_full": {
+          "skip_search": {
+            "is_true": false,
+            "probability": null,
+            "threshold": null
+          },
+          "image_generation_intent": {
+            "is_true": false,
+            "probability": 0.00075531006,
+            "threshold": 0.98
+          },
+          "time_widget": {
+            "is_true": false,
+            "probability": 0.0003681183,
+            "threshold": 0.8
+          },
+          "sports_intent": null,
+          "places_search_intent": {
+            "is_true": false,
+            "probability": 0.061035156,
+            "threshold": 0.85
+          },
+          "shopping_intent": {
+            "is_true": false,
+            "probability": 0.00064468384,
+            "threshold": 0.8
+          },
+          "movie_lists_intent": {
+            "is_true": false,
+            "probability": 0.00014019012,
+            "threshold": 0.65
+          },
+          "image_preview": {
+            "is_true": false,
+            "probability": 0.00592041,
+            "threshold": 0.42
+          },
+          "video_preview": {
+            "is_true": false,
+            "probability": 0.006286621,
+            "threshold": 0.5
+          },
+          "nav_intent": {
+            "is_true": false,
+            "probability": 0.02368164,
+            "threshold": 0.5
+          },
+          "study_intent": null,
+          "personal_search": {
+            "is_true": false,
+            "probability": null,
+            "threshold": null
+          },
+          "skip_personal_search": {
+            "is_true": true,
+            "probability": 1.0,
+            "threshold": 0.95
+          },
+          "weather_widget": {
+            "is_true": false,
+            "probability": 0.016357422,
+            "threshold": 0.4
+          },
+          "finance_widget_gating": {
+            "is_true": false,
+            "probability": 0.051757812,
+            "threshold": 0.53
+          },
+          "calculator_widget": {
+            "is_true": false,
+            "probability": 0.00011587143,
+            "threshold": 0.3
+          },
+          "comet_nav_widget_combined_target": {
+            "is_true": false,
+            "probability": 0.043945312,
+            "threshold": 0.5
+          },
+          "domain_subdomain": {
+            "label": "TECHNOLOGY/ARTIFICIAL_INTELLIGENCE",
+            "probability": 0.9765625
+          },
+          "finance_agent_gating": {
+            "is_true": false,
+            "probability": 0.005554199,
+            "threshold": 0.7
+          }
+        }
+      },
+      "search_implementation_mode": "multi_step",
+      "query_language": "en",
+      "search_mode": "SEARCH",
+      "social_info": {
+        "view_count": 0,
+        "fork_count": 0,
+        "like_count": 0,
+        "user_likes": false
+      },
+      "featured_images": []
+    }
+  ],
+  "has_next_page": false,
+  "next_cursor": null,
+  "status": "success",
+  "thread_metadata": {
+    "created_at": "2026-05-19T05:19:12.310743",
+    "crons": null,
+    "local_workspace_directories": null,
+    "locked_reason": null,
+    "mode": "2",
+    "sensitive_claims_visibility": null,
+    "subscribe_entry_uuids": null,
+    "thread_status": "completed",
+    "thread_status_summary": null,
+    "thread_status_summary_enum": null,
+    "title": "[probe-news-claude-db625886] What is the latest Anthropic Claude model release as of May 2026, and what are its key new features and capabilities?",
+    "updated_at": "2026-05-19T05:19:35.139009",
+    "wake_at": null,
+    "workflow_snapshots": null
+  }
+}

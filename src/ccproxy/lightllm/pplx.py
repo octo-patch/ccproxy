@@ -695,48 +695,51 @@ def _format_citations(
     return _CITATION_PATTERN.sub(replacer, text)
 
 
-def _extract_final_answer(
-    structured_answer: list[dict[str, Any]] | None,
+def _extract_answer_from_entry(
+    entry: dict[str, Any],
     citation_mode: str = "markdown",
 ) -> tuple[str, list[dict[str, Any]]]:
-    """Pull the FINAL step's answer text + web_results from a stored thread entry.
+    """Pull the answer markdown + web_results from a thread entry's ``blocks[]``.
 
-    Used by ``_thread_to_openai_messages``. Handles the JSON-encoded answer
-    string variant (``content.answer`` may itself be a JSON object string
-    wrapping ``answer`` and ``web_results``).
+    Reads:
+    - ``entry.structured_answer_block_usages`` (e.g. ``["ask_text_0_markdown"]``)
+      names the block carrying the canonical answer; default to that name.
+    - That block's ``markdown_block.answer`` is the raw answer string.
+    - The first ``intended_usage == "web_results"`` block carries
+      ``web_result_block.web_results[]`` for citation numbering.
     """
-    if not isinstance(structured_answer, list):
+    blocks = entry.get("blocks") or []
+    if not isinstance(blocks, list):
         return "", []
-    for step in structured_answer:
-        if not isinstance(step, dict):
+
+    usages = entry.get("structured_answer_block_usages")
+    answer_iu = (
+        usages[0]
+        if isinstance(usages, list) and usages and isinstance(usages[0], str)
+        else "ask_text_0_markdown"
+    )
+
+    raw_answer = ""
+    web_results: list[dict[str, Any]] = []
+    for block in blocks:
+        if not isinstance(block, dict):
             continue
-        if step.get("step_type") != "FINAL":
-            continue
-        content = step.get("content") or {}
-        if not isinstance(content, dict):
-            continue
-        answer_field = content.get("answer")
-        answer_data: dict[str, Any] = content
-        if isinstance(answer_field, str):
-            try:
-                inner = json.loads(answer_field)
-                if isinstance(inner, dict):
-                    answer_data = inner
-            except json.JSONDecodeError:
-                pass
-        raw_text = answer_data.get("answer") if isinstance(answer_data, dict) else None
-        web_results = (
-            answer_data.get("web_results") if isinstance(answer_data, dict) else None
-        )
-        if not isinstance(web_results, list):
-            web_results = []
-        text = _format_citations(
-            raw_text if isinstance(raw_text, str) else "",
-            citation_mode,
-            web_results,
-        )
-        return (text or "", web_results)
-    return "", []
+        iu = block.get("intended_usage")
+        if iu == answer_iu and not raw_answer:
+            mb = block.get("markdown_block") or {}
+            if isinstance(mb, dict):
+                ans = mb.get("answer")
+                if isinstance(ans, str):
+                    raw_answer = ans
+        elif iu == "web_results" and not web_results:
+            wrb = block.get("web_result_block") or {}
+            if isinstance(wrb, dict):
+                wrs = wrb.get("web_results") or []
+                if isinstance(wrs, list):
+                    web_results = [w for w in wrs if isinstance(w, dict)]
+
+    text = _format_citations(raw_answer, citation_mode, web_results)
+    return (text or ""), web_results
 
 
 def _thread_to_openai_messages(
@@ -768,22 +771,28 @@ def _thread_to_openai_messages(
                 user_text = f"{user_text}\n\n[Attached: {', '.join(names)}]"
         out.append({"role": "user", "content": user_text})
 
-        structured = entry.get("structured_answer")
-        answer_text, _web = _extract_final_answer(structured, citation_mode)
+        answer_text, _web = _extract_answer_from_entry(entry, citation_mode)
 
-        if include_reasoning and isinstance(structured, list):
+        if include_reasoning:
             reasoning_lines: list[str] = []
-            for step in structured:
-                if not isinstance(step, dict):
+            for block in entry.get("blocks") or []:
+                if not isinstance(block, dict):
                     continue
-                plan = step.get("plan_block") or {}
+                if block.get("intended_usage") not in (
+                    "pro_search_steps",
+                    "plan",
+                    "reasoning_plan_block",
+                ):
+                    continue
+                plan = block.get("plan_block") or {}
                 goals = plan.get("goals") or []
-                if isinstance(goals, list):
-                    for g in goals:
-                        if isinstance(g, dict):
-                            d = g.get("description")
-                            if isinstance(d, str) and d:
-                                reasoning_lines.append(d)
+                if not isinstance(goals, list):
+                    continue
+                for g in goals:
+                    if isinstance(g, dict):
+                        d = g.get("description")
+                        if isinstance(d, str) and d:
+                            reasoning_lines.append(d)
             if reasoning_lines:
                 answer_text = (
                     f"{answer_text}\n\n---\n**Reasoning:**\n\n- "
