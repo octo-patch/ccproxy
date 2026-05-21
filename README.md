@@ -170,7 +170,7 @@ chain on 429/503) and cloudcode-pa envelope unwrapping.
 URL rewriting, auth signing, request/response format conversion — without the
 proxy server, cost tracking, or callback machinery.
 
-**SSE streaming**: `SseTransformer` handles cross-provider streaming by parsing
+**SSE streaming**: `SSETransformer` handles cross-provider streaming by parsing
 SSE events, transforming each chunk via LiteLLM’s per-provider
 `ModelResponseIterator`, and re-serializing as OpenAI-format SSE.
 

@@ -534,7 +534,7 @@ ccproxy port 4000 / 4001 (mitmweb reverse listener)
    InspectorRouter (transform)   non-streaming: calls handle_transform_response which calls
                                                  PerplexityProConfig.transform_response
                                                  (full SSE parse → OpenAI ChatCompletion JSON)
-                                  streaming:     SseTransformer wraps each chunk through
+                                  streaming:     SSETransformer wraps each chunk through
                                                  PerplexityProIterator.chunk_parser
    InspectorRouter (outbound)   skip for response phase
    OAuthAddon.response          skip (Perplexity doesn't use OAuth Bearer; 401 path inactive)
@@ -605,13 +605,13 @@ state is delivered to the client.
 6. The route layer JSON-encodes and overwrites `flow.response.content`
 
 **Streaming** — `PerplexityProIterator.chunk_parser` (pplx.py:670-720):
-1. Called once per parsed SSE chunk by `SseTransformer`
+1. Called once per parsed SSE chunk by `SSETransformer`
 2. State persists across calls (`self._state`)
 3. Each chunk → `Delta(content=answer_delta, reasoning_content=reasoning_delta)`
 4. `finish_reason = "stop"` only when `state.final` is True (gated on
    `final_sse_message`, NOT on `final` which can appear multiple times)
 5. After emitting the stop chunk, `self._terminated = True` and subsequent
-   chunks return `None` (suppressed by `SseTransformer`'s
+   chunks return `None` (suppressed by `SSETransformer`'s
    `if model_chunk is None: return b""`)
 6. The terminal chunk carries `response.pplx_thread_url_slug` as a non-spec
    field

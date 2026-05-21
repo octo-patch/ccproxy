@@ -235,7 +235,7 @@ uv run python docs/sdk/lightllm_transform.py
 - Sentinel keys: `sk-ant-oat-ccproxy-anthropic` and `sk-ant-oat-ccproxy-gemini`
 - ccproxy auto-detects OpenAI format from `/v1/chat/completions` path
 - Format mismatch triggers transform automatically (no config needed)
-- ``SseTransformer`` handles cross-provider streaming: parses provider-native SSE
+- ``SSETransformer`` handles cross-provider streaming: parses provider-native SSE
   chunks, transforms each via ``ModelResponseIterator``, re-serializes as OpenAI SSE
 - Demonstrates both non-streaming and streaming for each provider direction
 

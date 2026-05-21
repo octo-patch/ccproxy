@@ -47,7 +47,7 @@ class EnvelopeUnwrapStream:
     Standard Gemini SDK clients expect ``data: {"candidates": [...]}``. This
     transformer parses each event and unwraps the inner ``response`` object.
 
-    Mirrors the protocol of :class:`ccproxy.lightllm.dispatch.SseTransformer`:
+    Mirrors the protocol of :class:`ccproxy.lightllm.dispatch.SSETransformer`:
     a callable ``(bytes) -> bytes | Iterable[bytes]`` installed as
     ``flow.response.stream``. Tees raw input chunks for ``raw_body`` capture.
     """

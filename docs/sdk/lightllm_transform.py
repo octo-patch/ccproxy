@@ -9,7 +9,7 @@ ccproxy auto-triggers a transform through LiteLLM's ``BaseConfig`` pipeline:
 - Gemini provider → ``_transform_gemini`` code path
   (bypasses ``BaseConfig``, uses ``_get_gemini_url`` + ``_transform_request_body``)
 
-Streaming responses are handled by ``SseTransformer`` — provider-native SSE
+Streaming responses are handled by ``SSETransformer`` — provider-native SSE
 chunks are parsed, transformed, and re-serialized as OpenAI-format SSE.
 
 Requirements:

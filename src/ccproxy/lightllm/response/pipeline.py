@@ -1,6 +1,6 @@
 """Sync ``flow.response.stream`` callable bridging upstream wire → listener wire via IR.
 
-``SsePipeline`` is the sync class mitmproxy installs on
+``SSEPipeline`` is the sync class mitmproxy installs on
 ``flow.response.stream`` when the transform router decides a cross-format
 response transform is needed. It wires:
 
@@ -31,7 +31,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-class SsePipeline:
+class SSEPipeline:
     """Sync callable bridging upstream SSE → listener SSE via pydantic-ai IR."""
 
     def __init__(self, *, intake: ResponseIntake, render: ResponseRender) -> None:
@@ -49,7 +49,7 @@ class SsePipeline:
                 out.extend(self._render.render(event))
             return bytes(out) if out else []
         except Exception:
-            logger.exception("SsePipeline.feed failed mid-stream; passing chunk through")
+            logger.exception("SSEPipeline.feed failed mid-stream; passing chunk through")
             return data
 
     def _flush_and_close(self) -> bytes | list[bytes]:
@@ -61,11 +61,11 @@ class SsePipeline:
             for event in self._intake.close():
                 out.extend(self._render.render(event))
         except Exception:
-            logger.exception("SsePipeline intake.close failed; emitting render terminator only")
+            logger.exception("SSEPipeline intake.close failed; emitting render terminator only")
         try:
             out.extend(self._render.close())
         except Exception:
-            logger.exception("SsePipeline render.close failed; no terminator emitted")
+            logger.exception("SSEPipeline render.close failed; no terminator emitted")
         return bytes(out) if out else []
 
     @property
@@ -75,5 +75,5 @@ class SsePipeline:
 
     @property
     def raw_body(self) -> bytes:
-        """Alias of ``upstream_raw_bytes`` for backward-compat with old ``SseTransformer.raw_body`` callsites."""
+        """Alias of ``upstream_raw_bytes`` for backward-compat with old ``SSETransformer.raw_body`` callsites."""
         return self.upstream_raw_bytes

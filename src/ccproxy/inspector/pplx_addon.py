@@ -52,7 +52,7 @@ class PerplexityAddon:
     async def response(self, flow: http.HTTPFlow) -> None:
         """Parse the upstream Perplexity SSE body and save IDs to the L1 cache.
 
-        Reads from the ``SseTransformer.raw_body`` accumulated during streaming
+        Reads from the ``SSETransformer.raw_body`` accumulated during streaming
         (when the InspectorAddon installed one), or falls back to
         ``flow.response.content`` for buffered flows. Silently no-ops on parse
         failure, missing IDs, or absence of a ``conversation_id`` to key by.
@@ -109,7 +109,7 @@ class PerplexityAddon:
             if isinstance(body, bytes) and body:
                 return body
         # Streaming flows that never went through the route's transform_response:
-        # the SseTransformer keeps the raw_body tee.
+        # the SSETransformer keeps the raw_body tee.
         transformer = flow.metadata.get("ccproxy.sse_transformer")
         if transformer is not None and hasattr(transformer, "raw_body"):
             raw = transformer.raw_body

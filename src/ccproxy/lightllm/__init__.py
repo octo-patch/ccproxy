@@ -8,7 +8,7 @@ LiteLLM-based one. The module name is preserved across the cut.
 
 from ccproxy.lightllm.dispatch import (
     MitmResponseShim,
-    SseTransformer,
+    SSETransformer,
     make_sse_transformer,
     transform_to_openai,
     transform_to_provider,
@@ -20,7 +20,7 @@ __all__ = [
     "ListenerFormat",
     "MitmResponseShim",
     "ParsedRequest",
-    "SseTransformer",
+    "SSETransformer",
     "get_config",
     "make_sse_transformer",
     "transform_to_openai",

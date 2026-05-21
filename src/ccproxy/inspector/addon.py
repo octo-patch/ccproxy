@@ -220,7 +220,7 @@ class InspectorAddon:
         """Install the SSE response transformer on ``flow.response.stream``.
 
         Non-Gemini providers route through the new pydantic-ai-mediated
-        :class:`~ccproxy.lightllm.response.pipeline.SsePipeline` when the
+        :class:`~ccproxy.lightllm.response.pipeline.SSEPipeline` when the
         transform router stamped both ``listener_format`` and
         ``request_parameters``. Without those, falls back to passthrough.
 
@@ -254,14 +254,14 @@ class InspectorAddon:
         listener_format = ListenerFormat(transform.listener_format)
         if listener_format is ListenerFormat.UNKNOWN or transform.request_parameters is None:
             logger.warning(
-                "SsePipeline missing listener_format / request_parameters; falling back to passthrough",
+                "SSEPipeline missing listener_format / request_parameters; falling back to passthrough",
             )
             flow.response.stream = True
             return
 
         # deferred: pydantic-ai heavy imports
         from ccproxy.lightllm.response.intake import select_intake
-        from ccproxy.lightllm.response.pipeline import SsePipeline
+        from ccproxy.lightllm.response.pipeline import SSEPipeline
         from ccproxy.lightllm.response.render import select_render
 
         try:
@@ -271,12 +271,12 @@ class InspectorAddon:
                 request_params=transform.request_parameters,
             )
             render = select_render(listener_format)
-            pipeline = SsePipeline(intake=intake, render=render)
+            pipeline = SSEPipeline(intake=intake, render=render)
             flow.response.stream = pipeline
             flow.metadata["ccproxy.sse_transformer"] = pipeline
         except Exception:
             logger.warning(
-                "Failed to construct SsePipeline, falling back to passthrough",
+                "Failed to construct SSEPipeline, falling back to passthrough",
                 exc_info=True,
             )
             flow.response.stream = True

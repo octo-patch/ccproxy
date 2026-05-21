@@ -294,7 +294,7 @@ InspectorAddon.responseheaders fires
   → content-type == text/event-stream
       → record.transform set, transform.is_streaming, transform.mode == "transform"
             → make_sse_transformer(provider, model, optional_params)
-            → flow.response.stream = SseTransformer(...)   [cross-provider]
+            → flow.response.stream = SSETransformer(...)   [cross-provider]
       → for redirect-mode Gemini streaming flows: returns without setting stream
         (deferred to GeminiAddon below)
       → else
@@ -309,7 +309,7 @@ GeminiAddon.responseheaders fires (after outbound pipeline)
             → flow.response.stream = EnvelopeUnwrapStream()  [unwrap v1internal]
 ```
 
-**`SseTransformer`** (cross-provider transform): Stateful callable on `flow.response.stream`.
+**`SSETransformer`** (cross-provider transform): Stateful callable on `flow.response.stream`.
 Parses SSE events from the upstream provider, transforms each chunk via LiteLLM's per-provider
 `ModelResponseIterator.chunk_parser()`, re-serializes as OpenAI-format SSE.
 
@@ -386,7 +386,7 @@ handle_transform (RouteType.REQUEST)
 ```
 handle_transform_response (RouteType.RESPONSE)
   → guard: record.transform is not None
-  → guard: transform.is_streaming → return (handled by SseTransformer already)
+  → guard: transform.is_streaming → return (handled by SSETransformer already)
   → guard: response status < 400
   → transform_to_openai(model, provider, MitmResponseShim(flow.response), ...)
       → MitmResponseShim duck-types httpx.Response for mitmproxy's flow.response

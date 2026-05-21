@@ -329,7 +329,7 @@ inspector:
 
 - **Non-streaming responses** with a matched transform rule are converted back
   to OpenAI format before being sent to the client.
-- **SSE streaming responses** use an `SseTransformer` that parses SSE events
+- **SSE streaming responses** use an `SSETransformer` that parses SSE events
   from the upstream provider and re-serializes them as OpenAI-format SSE chunks
   in real time.
 - **Passthrough and redirect** responses are forwarded unchanged.

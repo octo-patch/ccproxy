@@ -1,7 +1,7 @@
-"""Integration tests for the SsePipeline + buffered.py modules.
+"""Integration tests for the SSEPipeline + buffered.py modules.
 
 Tests the wiring between vendor-side intakes and listener-side renderers
-via the SsePipeline sync callable. Exercises both same-format and
+via the SSEPipeline sync callable. Exercises both same-format and
 cross-format paths.
 """
 
@@ -15,7 +15,7 @@ from pydantic_ai.models import ModelRequestParameters
 from ccproxy.lightllm.parsed import ListenerFormat
 from ccproxy.lightllm.response.buffered import transform_buffered_response
 from ccproxy.lightllm.response.intake import select_intake
-from ccproxy.lightllm.response.pipeline import SsePipeline
+from ccproxy.lightllm.response.pipeline import SSEPipeline
 from ccproxy.lightllm.response.render import select_render
 
 pytestmark = pytest.mark.asyncio
@@ -58,9 +58,9 @@ def _build_anthropic_text_sse(text: str) -> bytes:
     return b"".join(f"event: {e['type']}\ndata: {json.dumps(e)}\n\n".encode() for e in events)
 
 
-class TestSsePipelineSameFormat:
+class TestSSEPipelineSameFormat:
     async def test_anthropic_to_anthropic_text_passthrough_semantics(self) -> None:
-        """SsePipeline with Anthropic intake + Anthropic render should be semantically lossless."""
+        """SSEPipeline with Anthropic intake + Anthropic render should be semantically lossless."""
         from ccproxy.lightllm.response.intake_anthropic import AnthropicResponseIntake
 
         intake = AnthropicResponseIntake(
@@ -68,7 +68,7 @@ class TestSsePipelineSameFormat:
             request_params=ModelRequestParameters(),
         )
         render = select_render(ListenerFormat.ANTHROPIC_MESSAGES)
-        pipeline = SsePipeline(intake=intake, render=render)
+        pipeline = SSEPipeline(intake=intake, render=render)
 
         upstream_bytes = _build_anthropic_text_sse("hello world")
         out = bytearray()
@@ -101,7 +101,7 @@ class TestSsePipelineSameFormat:
             request_params=ModelRequestParameters(),
         )
         render = select_render(ListenerFormat.ANTHROPIC_MESSAGES)
-        pipeline = SsePipeline(intake=intake, render=render)
+        pipeline = SSEPipeline(intake=intake, render=render)
 
         upstream_bytes = _build_anthropic_text_sse("xyz")
         pipeline(upstream_bytes)
@@ -110,7 +110,7 @@ class TestSsePipelineSameFormat:
         assert pipeline.raw_body == upstream_bytes
 
 
-class TestSsePipelineCrossFormat:
+class TestSSEPipelineCrossFormat:
     async def test_anthropic_upstream_to_openai_listener(self) -> None:
         """Anthropic SSE → IR events → OpenAI Chat Completion SSE."""
         intake = select_intake(
@@ -119,7 +119,7 @@ class TestSsePipelineCrossFormat:
             request_params=ModelRequestParameters(),
         )
         render = select_render(ListenerFormat.OPENAI_CHAT)
-        pipeline = SsePipeline(intake=intake, render=render)
+        pipeline = SSEPipeline(intake=intake, render=render)
 
         upstream_bytes = _build_anthropic_text_sse("response text")
         out = bytearray()
@@ -138,7 +138,7 @@ class TestSsePipelineCrossFormat:
         assert "[DONE]" in text
 
 
-class TestSsePipelineErrorHandling:
+class TestSSEPipelineErrorHandling:
     async def test_malformed_chunk_passes_through(self) -> None:
         intake = select_intake(
             upstream_provider="anthropic",
@@ -146,7 +146,7 @@ class TestSsePipelineErrorHandling:
             request_params=ModelRequestParameters(),
         )
         render = select_render(ListenerFormat.ANTHROPIC_MESSAGES)
-        pipeline = SsePipeline(intake=intake, render=render)
+        pipeline = SSEPipeline(intake=intake, render=render)
 
         # An unparseable frame doesn't crash — the malformed payload is
         # silently dropped by the intake and processing continues.

@@ -12,7 +12,7 @@ from mitmproxy.proxy.mode_specs import ProxyMode
 from ccproxy.flows.store import FlowRecord, InspectorMeta, TransformMeta
 from ccproxy.lightllm.dispatch import (
     MitmResponseShim,
-    SseTransformer,
+    SSETransformer,
     _make_response_iterator,
     make_sse_transformer,
 )
@@ -53,21 +53,21 @@ class TestMitmResponseShim:
         assert shim.json() == body
 
 
-# --- SseTransformer ---
+# --- SSETransformer ---
 
 
-class TestSseTransformer:
+class TestSSETransformer:
     def test_passthrough_when_no_iterator(self) -> None:
         """When _make_response_iterator returns None, bytes pass through."""
         with patch("ccproxy.lightllm.dispatch._make_response_iterator", return_value=None):
-            transformer = SseTransformer("openai", "gpt-4o", {})
+            transformer = SSETransformer("openai", "gpt-4o", {})
 
         chunk = b'data: {"choices":[{"delta":{"content":"hi"}}]}\n\n'
         assert transformer(chunk) == chunk
 
     def test_passthrough_end_of_stream(self) -> None:
         with patch("ccproxy.lightllm.dispatch._make_response_iterator", return_value=None):
-            transformer = SseTransformer("openai", "gpt-4o", {})
+            transformer = SSETransformer("openai", "gpt-4o", {})
         # Empty bytes would be encoded as ``0\r\n\r\n`` by mitmproxy's HTTP/1.1
         # chunked encoder — the EOS marker, which truncates the response.
         # Returning [] tells mitmproxy to emit no chunk frame at all.
@@ -80,7 +80,7 @@ class TestSseTransformer:
         mock_iterator.chunk_parser.return_value = mock_chunk
 
         with patch("ccproxy.lightllm.dispatch._make_response_iterator", return_value=mock_iterator):
-            transformer = SseTransformer("anthropic", "claude-3", {})
+            transformer = SSETransformer("anthropic", "claude-3", {})
 
         event = b'data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"hi"}}\n\n'
         result = transformer(event)
@@ -100,7 +100,7 @@ class TestSseTransformer:
         mock_iterator.chunk_parser.side_effect = [chunk1, chunk2]
 
         with patch("ccproxy.lightllm.dispatch._make_response_iterator", return_value=mock_iterator):
-            transformer = SseTransformer("anthropic", "claude-3", {})
+            transformer = SSETransformer("anthropic", "claude-3", {})
 
         data = b'data: {"type":"event1"}\n\ndata: {"type":"event2"}\n\n'
         result = transformer(data)
@@ -116,7 +116,7 @@ class TestSseTransformer:
         mock_iterator.chunk_parser.return_value = mock_chunk
 
         with patch("ccproxy.lightllm.dispatch._make_response_iterator", return_value=mock_iterator):
-            transformer = SseTransformer("anthropic", "claude-3", {})
+            transformer = SSETransformer("anthropic", "claude-3", {})
 
         # First chunk: incomplete event (no trailing \n\n)
         result1 = transformer(b'data: {"type":"part')
@@ -131,7 +131,7 @@ class TestSseTransformer:
         mock_iterator = MagicMock()
 
         with patch("ccproxy.lightllm.dispatch._make_response_iterator", return_value=mock_iterator):
-            transformer = SseTransformer("anthropic", "claude-3", {})
+            transformer = SSETransformer("anthropic", "claude-3", {})
 
         result = transformer(b"data: [DONE]\n\n")
         assert result == []
@@ -144,7 +144,7 @@ class TestSseTransformer:
         mock_iterator.chunk_parser.side_effect = RuntimeError("boom")
 
         with patch("ccproxy.lightllm.dispatch._make_response_iterator", return_value=mock_iterator):
-            transformer = SseTransformer("anthropic", "claude-3", {})
+            transformer = SSETransformer("anthropic", "claude-3", {})
 
         event = b'data: {"type":"bad"}\n\n'
         result = transformer(event)
@@ -157,7 +157,7 @@ class TestSseTransformer:
         mock_iterator = MagicMock()
 
         with patch("ccproxy.lightllm.dispatch._make_response_iterator", return_value=mock_iterator):
-            transformer = SseTransformer("anthropic", "claude-3", {})
+            transformer = SSETransformer("anthropic", "claude-3", {})
 
         result = transformer(b"data: not-json\n\n")
         assert result == []
@@ -170,7 +170,7 @@ class TestSseTransformer:
         mock_iterator.chunk_parser.return_value = mock_chunk
 
         with patch("ccproxy.lightllm.dispatch._make_response_iterator", return_value=mock_iterator):
-            transformer = SseTransformer("anthropic", "claude-3", {})
+            transformer = SSETransformer("anthropic", "claude-3", {})
 
         event = b'data: {"type":\ndata: "ping"}\n\n'
         result = transformer(event)
@@ -185,7 +185,7 @@ class TestSseTransformer:
         mock_iterator.chunk_parser.return_value = mock_chunk
 
         with patch("ccproxy.lightllm.dispatch._make_response_iterator", return_value=mock_iterator):
-            transformer = SseTransformer("anthropic", "claude-3", {})
+            transformer = SSETransformer("anthropic", "claude-3", {})
 
         transformer(b'data: {"type":"delta"}\n\n')
         mock_chunk.model_dump.assert_called_once_with(mode="json", exclude_none=True)
@@ -195,18 +195,18 @@ class TestSseTransformer:
         mock_iterator.chunk_parser.return_value = None
 
         with patch("ccproxy.lightllm.dispatch._make_response_iterator", return_value=mock_iterator):
-            transformer = SseTransformer("anthropic", "claude-3", {})
+            transformer = SSETransformer("anthropic", "claude-3", {})
 
         result = transformer(b'data: {"type":"ping"}\n\n')
         assert result == []
 
 
-class TestSseTransformerRawBody:
-    """Tests for the raw chunk tee buffer on SseTransformer."""
+class TestSSETransformerRawBody:
+    """Tests for the raw chunk tee buffer on SSETransformer."""
 
     def test_raw_body_accumulates_chunks(self) -> None:
         with patch("ccproxy.lightllm.dispatch._make_response_iterator", return_value=None):
-            transformer = SseTransformer("openai", "gpt-4o", {})
+            transformer = SSETransformer("openai", "gpt-4o", {})
 
         transformer(b"chunk1")
         transformer(b"chunk2")
@@ -214,7 +214,7 @@ class TestSseTransformerRawBody:
 
     def test_raw_body_includes_empty_sentinel(self) -> None:
         with patch("ccproxy.lightllm.dispatch._make_response_iterator", return_value=None):
-            transformer = SseTransformer("openai", "gpt-4o", {})
+            transformer = SSETransformer("openai", "gpt-4o", {})
 
         transformer(b"data: hi\n\n")
         transformer(b"")
@@ -222,15 +222,15 @@ class TestSseTransformerRawBody:
 
     def test_raw_body_empty_initially(self) -> None:
         with patch("ccproxy.lightllm.dispatch._make_response_iterator", return_value=None):
-            transformer = SseTransformer("openai", "gpt-4o", {})
+            transformer = SSETransformer("openai", "gpt-4o", {})
         assert transformer.raw_body == b""
 
 
-class TestMakeSseTransformer:
+class TestMakeSSETransformer:
     def test_returns_sse_transformer(self) -> None:
         with patch("ccproxy.lightllm.dispatch._make_response_iterator", return_value=None):
             transformer = make_sse_transformer("openai", "gpt-4o")
-        assert isinstance(transformer, SseTransformer)
+        assert isinstance(transformer, SSETransformer)
 
 
 # --- responseheaders hook ---
@@ -285,7 +285,7 @@ class TestResponseHeaders:
         from pydantic_ai.models import ModelRequestParameters
 
         from ccproxy.inspector.addon import InspectorAddon
-        from ccproxy.lightllm.response.pipeline import SsePipeline
+        from ccproxy.lightllm.response.pipeline import SSEPipeline
 
         addon = InspectorAddon()
         meta = TransformMeta(
@@ -299,7 +299,7 @@ class TestResponseHeaders:
         )
         flow = self._make_flow(transform=meta)
         await addon.responseheaders(flow)
-        assert isinstance(flow.response.stream, SsePipeline)
+        assert isinstance(flow.response.stream, SSEPipeline)
 
     @pytest.mark.asyncio
     async def test_falls_back_to_passthrough_when_ir_context_missing(self) -> None:
@@ -335,7 +335,7 @@ class TestResponseHeaders:
         with patch("ccproxy.lightllm.dispatch._make_response_iterator", return_value=None):
             await addon.responseheaders(flow)
 
-        assert isinstance(flow.response.stream, SseTransformer)
+        assert isinstance(flow.response.stream, SSETransformer)
 
     @pytest.mark.asyncio
     async def test_falls_back_to_passthrough_on_legacy_error(self) -> None:

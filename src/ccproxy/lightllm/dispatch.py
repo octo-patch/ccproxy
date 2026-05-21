@@ -301,7 +301,7 @@ def _make_response_iterator(provider: str, model: str, optional_params: dict[str
     return None
 
 
-class SseTransformer:
+class SSETransformer:
     """Stateful SSE chunk transformer for flow.response.stream.
 
     If no iterator is available (provider already emits OpenAI-format SSE),
@@ -391,5 +391,5 @@ def make_sse_transformer(
     provider: str,
     model: str,
     optional_params: dict[str, Any] | None = None,
-) -> SseTransformer:
-    return SseTransformer(provider, model, optional_params or {})
+) -> SSETransformer:
+    return SSETransformer(provider, model, optional_params or {})

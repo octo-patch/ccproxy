@@ -67,7 +67,7 @@ ccproxy start
   → provider API directly
 ```
 
-`InspectorAddon` owns OTel span lifecycle, FlowRecord creation, direction detection, and pre-pipeline request snapshot. `responseheaders()` sets `flow.response.stream` (either `True` for passthrough or an `SseTransformer` for cross-provider transform). `OAuthAddon` runs after the pipeline and detects 401s on flows where `forward_oauth` injected a token, refreshes, and replays. `GeminiAddon` follows it and handles cloudcode-pa response unwrapping plus capacity (429/503) sticky-retry and fallback-model walking.
+`InspectorAddon` owns OTel span lifecycle, FlowRecord creation, direction detection, and pre-pipeline request snapshot. `responseheaders()` sets `flow.response.stream` (either `True` for passthrough or an `SSETransformer` for cross-provider transform). `OAuthAddon` runs after the pipeline and detects 401s on flows where `forward_oauth` injected a token, refreshes, and replays. `GeminiAddon` follows it and handles cloudcode-pa response unwrapping plus capacity (429/503) sticky-retry and fallback-model walking.
 
 There is no LiteLLM subprocess, no gateway namespace, no second WireGuard tunnel. Two listeners are bound by mitmweb: `reverse:http://localhost:1@{port}` (placeholder backend, overwritten by transform) and `wireguard:{conf}@{udp_port}`.
 
@@ -83,7 +83,7 @@ The pipeline routers are only added when their hook list is non-empty. `Transpor
 
 ### Key Subsystems (`src/ccproxy/`)
 
-- **`lightllm/`** — Surgical connector into LiteLLM's `BaseConfig` transformation pipeline. Standard providers: `validate_environment → get_complete_url → transform_request → sign_request`. Gemini/Vertex AI bypasses BaseConfig and uses `_get_gemini_url` + `_transform_request_body` directly. `SseTransformer` is the stateful `flow.response.stream` callable that parses SSE events, transforms each via per-provider `ModelResponseIterator`, and re-serializes as OpenAI-format SSE. `context_cache.py` handles Gemini/Vertex AI provider-side KV caching via Google's `cachedContents` API. `NoopLogging` duck-types LiteLLM's `Logging` to bypass cost/callback machinery.
+- **`lightllm/`** — Surgical connector into LiteLLM's `BaseConfig` transformation pipeline. Standard providers: `validate_environment → get_complete_url → transform_request → sign_request`. Gemini/Vertex AI bypasses BaseConfig and uses `_get_gemini_url` + `_transform_request_body` directly. `SSETransformer` is the stateful `flow.response.stream` callable that parses SSE events, transforms each via per-provider `ModelResponseIterator`, and re-serializes as OpenAI-format SSE. `context_cache.py` handles Gemini/Vertex AI provider-side KV caching via Google's `cachedContents` API. `NoopLogging` duck-types LiteLLM's `Logging` to bypass cost/callback machinery.
 
 - **`pipeline/`** — DAG-based hook execution engine.
   - `context.py` — `Context` wraps an `HTTPFlow` (or bare `http.Request` for shapes). Content fields (`messages`, `system`, `tools`) are lazy-parsed into Pydantic AI typed objects (`ModelMessage`, `SystemPromptPart`, `ToolDefinition`) and flushed back via `commit()`. Header mutations are immediate; body mutations are deferred until `commit()`.
