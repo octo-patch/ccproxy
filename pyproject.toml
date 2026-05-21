@@ -158,6 +158,23 @@ check_untyped_defs = true
 module = "ccproxy.mcp.server"
 disallow_any_generics = false
 
+# pydantic_graph.beta's ``GraphBuilder`` and ``StepContext`` are declared as
+# ``Generic[StateT, DepsT, ...]`` with ``typing_extensions.TypeVar(infer_variance=True)``.
+# mypy 1.19 doesn't recognize these as generic at runtime — it reports the
+# classes as ``expects no type arguments`` and degrades ``ctx.state`` /
+# ``ctx.inputs`` access to ``StateT?`` (unsolved TypeVar), cascading into
+# ``attr-defined``, ``no-any-return``, and ``misc`` (for ``TypeExpression[T]``)
+# errors. Disable the affected error codes for the FSM wire-translation
+# modules; pyright handles these correctly so editor IntelliSense is unaffected.
+[[tool.mypy.overrides]]
+module = [
+  "ccproxy.lightllm.graph.anthropic_dump",
+  "ccproxy.lightllm.graph.anthropic_load",
+  "ccproxy.lightllm.graph.openai_dump",
+  "ccproxy.lightllm.graph.openai_load",
+]
+disable_error_code = ["type-arg", "attr-defined", "no-any-return", "misc", "index", "arg-type", "unreachable"]
+
 [tool.pyright]
 include = ["src", "tests"]
 ignore = ["tests/"]
