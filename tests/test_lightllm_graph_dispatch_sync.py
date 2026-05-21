@@ -1,8 +1,10 @@
-"""Sync facade over the async outbound renderer.
+"""Sync facade over the async dispatch_dump (replacement for outbound_sync).
 
-Verifies ``render_outbound_sync`` produces bytes byte-equal to
-``asyncio.run(render_outbound(...))`` across every supported provider,
-and that the unsupported-provider path still raises the right exception.
+Verifies ``dispatch_dump_sync`` produces bytes byte-equal to
+``asyncio.run(dispatch_dump(...))`` across every supported provider, and
+that the unsupported-provider path still raises ``UnsupportedUpstreamError``.
+
+This is the FSM-side replacement for ``test_lightllm_outbound_sync.py``.
 """
 
 from __future__ import annotations
@@ -15,10 +17,10 @@ import pytest
 from pydantic_ai.messages import ModelRequest, UserPromptPart
 from pydantic_ai.models import ModelRequestParameters
 
-from ccproxy.lightllm.outbound import (
+from ccproxy.lightllm.graph import (
     UnsupportedUpstreamError,
-    render_outbound,
-    render_outbound_sync,
+    dispatch_dump,
+    dispatch_dump_sync,
 )
 from ccproxy.lightllm.parsed import ParsedRequest
 
@@ -50,14 +52,14 @@ def _make_parsed(
         ("vertex_ai", "gemini-1.5-pro"),
     ],
 )
-def test_render_outbound_sync_matches_async(provider: str, model: str) -> None:
+def test_dispatch_dump_sync_matches_async(provider: str, model: str) -> None:
     parsed = _make_parsed(model=model)
-    expected = asyncio.run(render_outbound(parsed, provider=provider))
-    actual = render_outbound_sync(parsed, provider=provider)
+    expected = asyncio.run(dispatch_dump(parsed, provider=provider))
+    actual = dispatch_dump_sync(parsed, provider=provider)
     assert actual == expected
 
 
-def test_render_outbound_sync_matches_async_perplexity_pro() -> None:
+def test_dispatch_dump_sync_matches_async_perplexity_pro() -> None:
     """Perplexity Pro mints a ``frontend_uuid`` per request. Lock it via
     patch so both async and sync paths emit identical bytes."""
     parsed = _make_parsed(
@@ -75,17 +77,17 @@ def test_render_outbound_sync_matches_async_perplexity_pro() -> None:
         "ccproxy.lightllm.pplx.uuid.uuid4",
         return_value="33333333-3333-3333-3333-333333333333",
     ):
-        expected = asyncio.run(render_outbound(parsed, provider="perplexity_pro"))
+        expected = asyncio.run(dispatch_dump(parsed, provider="perplexity_pro"))
     with patch(
         "ccproxy.lightllm.pplx.uuid.uuid4",
         return_value="33333333-3333-3333-3333-333333333333",
     ):
-        actual = render_outbound_sync(parsed, provider="perplexity_pro")
+        actual = dispatch_dump_sync(parsed, provider="perplexity_pro")
 
     assert actual == expected
 
 
-def test_render_outbound_sync_raises_for_unknown_provider() -> None:
+def test_dispatch_dump_sync_raises_for_unknown_provider() -> None:
     parsed = _make_parsed()
     with pytest.raises(UnsupportedUpstreamError, match="no outbound renderer"):
-        render_outbound_sync(parsed, provider="not-a-real-provider")
+        dispatch_dump_sync(parsed, provider="not-a-real-provider")

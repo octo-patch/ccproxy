@@ -127,7 +127,7 @@ _PASSTHROUGH_VALUE_KEYS: frozenset[str] = frozenset(
 )
 
 
-async def render_google(parsed: ParsedRequest) -> bytes:
+async def render_google_dump(parsed: ParsedRequest) -> bytes:
     """Render :class:`ParsedRequest` to Google Gemini ``generateContent`` wire bytes."""
     provider = _CaptureGoogleProvider()
     # ``GoogleModel`` calls ``check_allow_model_requests`` first; pydantic-ai's

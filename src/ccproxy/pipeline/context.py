@@ -143,15 +143,9 @@ class Context:
         """
         if self._parsed is not None:
             return self._parsed
-        from ccproxy.lightllm.anthropic_inbound import parse_anthropic_messages
-        from ccproxy.lightllm.openai_inbound import parse_openai_chat
+        from ccproxy.lightllm.graph import dispatch_load
 
-        if self._listener_format is ListenerFormat.ANTHROPIC_MESSAGES:
-            self._parsed = await parse_anthropic_messages(self._body)
-        elif self._listener_format is ListenerFormat.OPENAI_CHAT:
-            self._parsed = await parse_openai_chat(self._body)
-        else:
-            raise ValueError(f"no IR parser for listener_format={self._listener_format}")
+        self._parsed = await dispatch_load(self._body, listener_format=self._listener_format)
         return self._parsed
 
     def invalidate_parsed(self) -> None:
@@ -360,7 +354,7 @@ class Context:
         if self._listener_format is ListenerFormat.UNKNOWN:
             return
 
-        from ccproxy.lightllm.outbound import render_outbound_sync
+        from ccproxy.lightllm.graph import dispatch_dump_sync
 
         # Ensure we have a base ParsedRequest to mutate.
         parsed = self.parse_sync()
@@ -383,7 +377,7 @@ class Context:
         # ``provider`` here is the LISTENER format name — the outbound dispatcher
         # routes it to the matching renderer (anthropic/openai).
         listener_provider = "anthropic" if self._listener_format is ListenerFormat.ANTHROPIC_MESSAGES else "openai"
-        rendered = render_outbound_sync(parsed, provider=listener_provider)
+        rendered = dispatch_dump_sync(parsed, provider=listener_provider)
         self._body = json.loads(rendered)
 
     def commit(self) -> None:

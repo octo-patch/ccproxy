@@ -31,6 +31,7 @@ dependencies = [
   "xepor-ccproxy>=0.7.0",
   "humanize>=4.0.0",
   "pydantic-ai-slim>=1.85.1",
+  "pydantic-graph>=1.85.1",
   "glom>=24.1.0",
   "mcp>=1.0.0",
   "xxhash>=3.0.0",

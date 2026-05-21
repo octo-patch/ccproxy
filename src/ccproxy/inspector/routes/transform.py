@@ -353,7 +353,7 @@ def _handle_transform(
         # deferred: avoid pulling pydantic-ai at module import time
         import dataclasses
 
-        from ccproxy.lightllm.outbound import render_outbound_sync
+        from ccproxy.lightllm.graph import dispatch_dump_sync
         from ccproxy.pipeline.context import Context
 
         ctx = Context.from_flow(flow)
@@ -362,7 +362,7 @@ def _handle_transform(
         if model and model != parsed.model:
             parsed = dataclasses.replace(parsed, model=model)
         flow.metadata["ccproxy.parsed_request_parameters"] = parsed.request_parameters
-        new_body = render_outbound_sync(parsed, provider=provider_str)
+        new_body = dispatch_dump_sync(parsed, provider=provider_str)
         url, headers = _resolve_upstream_url_and_headers(
             model=model,
             provider=provider_str,

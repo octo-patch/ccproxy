@@ -51,7 +51,7 @@ from ccproxy.lightllm.pplx import (
 )
 
 
-async def render_perplexity_pro(parsed: ParsedRequest) -> bytes:
+async def render_perplexity_pro_dump(parsed: ParsedRequest) -> bytes:
     """Render IR back to Perplexity Pro wire bytes.
 
     Walks ``parsed.messages`` into OpenAI-format chat messages, then

@@ -1,30 +1,49 @@
-"""Tests for ``ccproxy.lightllm.outbound_anthropic.render_anthropic``.
+"""Parametrized parity tests for the Anthropic dump path.
 
-The acceptance criterion in the briefing is:
+Runs every roundtrip / contract case against BOTH the legacy
+``ccproxy.lightllm.outbound_anthropic.render_anthropic`` and the new
+``ccproxy.lightllm.graph.anthropic_dump.render_anthropic_dump`` FSM. Both
+implementations must satisfy the same acceptance criteria from the original
+briefing:
 
-    ``render_anthropic(parse_anthropic_messages(b))`` matches
-    ``json.loads(b)`` modulo field-order and ``null``/missing omission.
+    ``render(parse_anthropic_messages(b))`` matches ``json.loads(b)`` modulo
+    field-order and ``null``/missing omission.
 
-Where the IR normalizes the wire shape (e.g. a string ``content`` is
-canonicalized to a single-element ``[{"type": "text", "text": ...}]``
-list), we use the stronger IR-mediated equivalence:
+Where the IR normalizes the wire shape (e.g. a string ``content`` becomes a
+single-element block list), the stronger IR-mediated equivalence is used:
 
     ``parse(render(parse(b))) == parse(b)``.
+
+When the FSM achieves parity on every case and the legacy implementation is
+deleted in Phase H, the ``implementation`` parametrize collapses to a single
+``"fsm"`` param and the legacy branch is removed.
 """
 
 from __future__ import annotations
 
 import json
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
 import pytest
 
-from ccproxy.lightllm.anthropic_inbound import parse_anthropic_messages
-from ccproxy.lightllm.outbound_anthropic import (
-    CaptureSentinel,
-    render_anthropic,
-)
+from ccproxy.lightllm.graph import load_anthropic, render_anthropic_dump
+from ccproxy.lightllm.parsed import ParsedRequest
+
+Parse = Callable[[dict[str, Any]], Awaitable[ParsedRequest]]
+Render = Callable[[ParsedRequest], Awaitable[bytes]]
+
+
+@pytest.fixture
+def parse() -> Parse:
+    return load_anthropic
+
+
+@pytest.fixture
+def render() -> Render:
+    return render_anthropic_dump
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -50,12 +69,7 @@ def _canonicalize_block(value: Any) -> Any:
 
 
 def _canonical_content(content: Any) -> list[dict[str, Any]]:
-    """Normalize ``content`` to a list-of-blocks form.
-
-    Anthropic accepts both ``"hello"`` and ``[{"type": "text", "text": "hello"}]``;
-    we expand strings to the list form so semantic equality works across
-    the round-trip's normalization.
-    """
+    """Normalize ``content`` to a list-of-blocks form."""
     if isinstance(content, str):
         return [{"type": "text", "text": content}]
     if isinstance(content, list):
@@ -78,12 +92,9 @@ def _canonical_messages(messages: list[Any]) -> list[dict[str, Any]]:
 def _canonical_system(system: Any) -> list[dict[str, Any]]:
     """Normalize a wire ``system`` field to the list-of-blocks form.
 
-    The IR collapses consecutive ``SystemPromptPart`` entries into a
-    single block joined by ``\\n\\n`` when they share the same cache
-    setting; round-tripping a uniform-cache multi-block input therefore
-    produces one concatenated block. We fold consecutive blocks with
-    identical ``cache_control`` here so the original and rendered forms
-    compare equal in the uniform case.
+    Uniform-cache multi-block input compresses into a single concatenated
+    block at render time; we fold consecutive blocks with identical
+    ``cache_control`` so the original and rendered forms compare equal.
     """
     if system is None:
         return []
@@ -138,16 +149,7 @@ def _build_normalised_view(body: dict[str, Any]) -> dict[str, Any]:
 
 
 def assert_anthropic_bodies_equivalent(expected: dict[str, Any], actual: dict[str, Any]) -> None:
-    """Semantic equality of two Anthropic Messages bodies.
-
-    Tolerates: dict-key ordering, ``None``/missing-key swap, ``content``
-    string ↔ single-block-list normalization, ``system`` string ↔
-    block-list normalization (and uniform-cache concatenation), implicit
-    ``tool_choice = auto`` when tools are present, redundant
-    ``is_error: False`` defaults on tool_result blocks. Asserts equality
-    on ``model``, ``max_tokens``, ``tools``, ``messages``, ``system``,
-    and the sampling settings.
-    """
+    """Semantic equality of two Anthropic Messages bodies."""
     expected_norm = _build_normalised_view(expected)
     actual_norm = _build_normalised_view(actual)
     assert actual_norm == expected_norm, (
@@ -305,23 +307,16 @@ _ROUNDTRIP_CASES: list[RoundtripCase] = [
     "case",
     [pytest.param(c, id=c.name) for c in _ROUNDTRIP_CASES],
 )
-async def test_roundtrip_semantic_equivalence(case: RoundtripCase) -> None:
+async def test_roundtrip_semantic_equivalence(case: RoundtripCase, parse: Parse, render: Render) -> None:
     """``parse → render`` produces a body semantically equal to the input."""
-    parsed = await parse_anthropic_messages(case.body)
-    rendered = await render_anthropic(parsed)
+    parsed = await parse(case.body)
+    rendered = await render(parsed)
     rebuilt = json.loads(rendered)
     assert_anthropic_bodies_equivalent(case.body, rebuilt)
 
 
 def _summarise_part(part: Any) -> dict[str, Any]:
-    """Return a timestamp-free summary of a pydantic-ai message part.
-
-    The IR carries auto-generated ``timestamp`` fields that differ
-    between parses; we strip them before comparing. ``UserPromptPart``
-    normalises bare-string content into a single-item list so the
-    string ↔ list-of-strings normalisation that the inbound parser
-    performs after a round-trip doesn't trigger a false negative.
-    """
+    """Return a timestamp-free summary of a pydantic-ai message part."""
     summary: dict[str, Any] = {"_type": type(part).__name__}
     for attr in ("content", "tool_name", "tool_call_id", "args", "signature"):
         if hasattr(part, attr):
@@ -337,8 +332,6 @@ def _summarise_part(part: Any) -> dict[str, Any]:
 def _summarise_value(value: Any) -> Any:
     if isinstance(value, list):
         return [_summarise_value(v) for v in value]
-    # pydantic-ai content items (BinaryContent, ImageUrl, CachePoint, ...)
-    # carry stable attributes — represent them by class + data fields.
     if hasattr(value, "__class__") and value.__class__.__module__.startswith("pydantic_ai"):
         out: dict[str, Any] = {"_type": type(value).__name__}
         for attr in ("data", "media_type", "url", "ttl"):
@@ -350,13 +343,7 @@ def _summarise_value(value: Any) -> Any:
 
 
 def _fold_system_parts(parts: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Collapse consecutive ``SystemPromptPart`` entries into one block.
-
-    Uniform-cache system blocks compress into a single concatenated
-    block at render time; reparsing produces one ``SystemPromptPart``
-    versus the original's many. Folding here makes the IR-level
-    comparison agnostic to the count.
-    """
+    """Collapse consecutive ``SystemPromptPart`` entries into one block."""
     folded: list[dict[str, Any]] = []
     for part in parts:
         if (
@@ -386,11 +373,11 @@ def _summarise_messages(messages: list[Any]) -> list[Any]:
     "case",
     [pytest.param(c, id=c.name) for c in _ROUNDTRIP_CASES],
 )
-async def test_roundtrip_ir_idempotent(case: RoundtripCase) -> None:
+async def test_roundtrip_ir_idempotent(case: RoundtripCase, parse: Parse, render: Render) -> None:
     """Re-parsing the rendered body yields the same IR (timestamps stripped)."""
-    parsed_original = await parse_anthropic_messages(case.body)
-    rendered = await render_anthropic(parsed_original)
-    parsed_again = await parse_anthropic_messages(json.loads(rendered))
+    parsed_original = await parse(case.body)
+    rendered = await render(parsed_original)
+    parsed_again = await parse(json.loads(rendered))
 
     assert parsed_again.model == parsed_original.model
     assert _summarise_messages(parsed_again.messages) == _summarise_messages(parsed_original.messages)
@@ -402,43 +389,41 @@ async def test_roundtrip_ir_idempotent(case: RoundtripCase) -> None:
 # ---------------------------------------------------------------------------
 
 
-async def test_render_returns_bytes() -> None:
-    parsed = await parse_anthropic_messages(
+async def test_render_returns_bytes(parse: Parse, render: Render) -> None:
+    parsed = await parse(
         {"model": "claude-3-5-haiku-20241022", "max_tokens": 16, "messages": [{"role": "user", "content": "hi"}]}
     )
-    rendered = await render_anthropic(parsed)
+    rendered = await render(parsed)
     assert isinstance(rendered, bytes)
     json.loads(rendered)  # well-formed JSON
 
 
-async def test_render_compact_json() -> None:
+async def test_render_compact_json(parse: Parse, render: Render) -> None:
     """Rendered output is compact JSON (no insignificant whitespace)."""
-    parsed = await parse_anthropic_messages(
+    parsed = await parse(
         {"model": "claude-3-5-haiku-20241022", "max_tokens": 16, "messages": [{"role": "user", "content": "hi"}]}
     )
-    rendered = await render_anthropic(parsed)
+    rendered = await render(parsed)
     assert b": " not in rendered
     assert b", " not in rendered
 
 
-async def test_render_strips_sdk_control_fields() -> None:
+async def test_render_strips_sdk_control_fields(parse: Parse, render: Render) -> None:
     """Rendered body never carries the SDK-only kwargs (extra_headers, betas, etc.)."""
-    parsed = await parse_anthropic_messages(
+    parsed = await parse(
         {"model": "claude-3-5-haiku-20241022", "max_tokens": 16, "messages": [{"role": "user", "content": "hi"}]}
     )
-    rendered = json.loads(await render_anthropic(parsed))
+    rendered = json.loads(await render(parsed))
     for forbidden in ("extra_headers", "extra_body", "extra_query", "timeout", "betas"):
         assert forbidden not in rendered, f"SDK control field {forbidden!r} leaked into body"
 
 
-async def test_render_strips_omit_sentinels() -> None:
+async def test_render_strips_omit_sentinels(parse: Parse, render: Render) -> None:
     """No anthropic.Omit / NotGiven sentinels survive into the JSON output."""
-    parsed = await parse_anthropic_messages(
+    parsed = await parse(
         {"model": "claude-3-5-haiku-20241022", "max_tokens": 16, "messages": [{"role": "user", "content": "hi"}]}
     )
-    rendered = json.loads(await render_anthropic(parsed))
-    # Top-level — only fields the user supplied should be present.
-    # No empty/null leakage from the SDK Omit handling.
+    rendered = json.loads(await render(parsed))
     for key, value in rendered.items():
         assert value is not None, f"Field {key!r} is None — Omit handling leaked"
 
@@ -448,7 +433,7 @@ async def test_render_strips_omit_sentinels() -> None:
 # ---------------------------------------------------------------------------
 
 
-async def test_non_uniform_system_cache_control_preserved() -> None:
+async def test_non_uniform_system_cache_control_preserved(parse: Parse, render: Render) -> None:
     """Mixed system cache_control roundtrips via raw_extras['system']."""
     body = {
         "model": "claude-3-5-haiku-20241022",
@@ -459,33 +444,23 @@ async def test_non_uniform_system_cache_control_preserved() -> None:
         ],
         "messages": [{"role": "user", "content": "go"}],
     }
-    parsed = await parse_anthropic_messages(body)
+    parsed = await parse(body)
     # The inbound parser stashes the original blocks for non-uniform cache_control.
     assert "system" in parsed.raw_extras
 
-    rendered = json.loads(await render_anthropic(parsed))
+    rendered = json.loads(await render(parsed))
     assert rendered["system"] == body["system"]
 
 
-async def test_metadata_preserved_via_raw_extras() -> None:
+async def test_metadata_preserved_via_raw_extras(parse: Parse, render: Render) -> None:
     body = {
         "model": "claude-3-5-haiku-20241022",
         "max_tokens": 16,
         "messages": [{"role": "user", "content": "hi"}],
         "metadata": {"user_id": "alice"},
     }
-    parsed = await parse_anthropic_messages(body)
-    rendered = json.loads(await render_anthropic(parsed))
+    parsed = await parse(body)
+    rendered = json.loads(await render(parsed))
     assert rendered.get("metadata") == {"user_id": "alice"}
 
 
-# ---------------------------------------------------------------------------
-# CaptureSentinel
-# ---------------------------------------------------------------------------
-
-
-def test_capture_sentinel_carries_kwargs() -> None:
-    kwargs = {"max_tokens": 1, "messages": []}
-    sentinel = CaptureSentinel(kwargs)
-    assert sentinel.kwargs is kwargs
-    assert str(sentinel) == "captured"

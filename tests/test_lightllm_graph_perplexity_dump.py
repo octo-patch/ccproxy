@@ -18,8 +18,17 @@ from pydantic_ai.messages import (
 )
 from pydantic_ai.models import ModelRequestParameters
 
-from ccproxy.lightllm.outbound_perplexity import render_perplexity_pro
+from collections.abc import Awaitable, Callable
+
+from ccproxy.lightllm.graph import render_perplexity_pro_dump
 from ccproxy.lightllm.parsed import ParsedRequest
+
+Render = Callable[[ParsedRequest], Awaitable[bytes]]
+
+
+@pytest.fixture
+def render() -> Render:
+    return render_perplexity_pro_dump
 
 
 def _make_parsed(
@@ -42,14 +51,14 @@ def _make_parsed(
 class TestSingleUserTextQuery:
     """Basic flow — one user message, no extras, first turn."""
 
-    async def test_single_user_message_renders_first_turn_payload(self) -> None:
+    async def test_single_user_message_renders_first_turn_payload(self, render: Render) -> None:
         parsed = _make_parsed(
             messages=[
                 ModelRequest(parts=[UserPromptPart(content="what is quantum?")])
             ],
         )
 
-        body = await render_perplexity_pro(parsed)
+        body = await render(parsed)
 
         payload = json.loads(body)
         assert payload["query_str"] == "what is quantum?"
@@ -61,7 +70,7 @@ class TestSingleUserTextQuery:
         assert payload["params"]["send_back_text_in_streaming_api"] is False
         assert payload["params"]["time_from_first_type"] == 18361
 
-    async def test_system_then_user_flattens_with_system_prefix(self) -> None:
+    async def test_system_then_user_flattens_with_system_prefix(self, render: Render) -> None:
         parsed = _make_parsed(
             messages=[
                 ModelRequest(
@@ -73,14 +82,14 @@ class TestSingleUserTextQuery:
             ],
         )
 
-        body = await render_perplexity_pro(parsed)
+        body = await render(parsed)
 
         payload = json.loads(body)
         assert payload["query_str"].startswith("[System]: be terse")
         assert "what is quantum?" in payload["query_str"]
         assert payload["params"]["query_source"] == "home"
 
-    async def test_multimodal_user_content_drops_image_block_in_flatten(self) -> None:
+    async def test_multimodal_user_content_drops_image_block_in_flatten(self, render: Render) -> None:
         parsed = _make_parsed(
             messages=[
                 ModelRequest(
@@ -96,7 +105,7 @@ class TestSingleUserTextQuery:
             ],
         )
 
-        body = await render_perplexity_pro(parsed)
+        body = await render(parsed)
 
         payload = json.loads(body)
         assert payload["query_str"] == "what is in this image?"
@@ -107,7 +116,7 @@ class TestSingleUserTextQuery:
 class TestAttachmentsInRawExtras:
     """File upload chain output — extract_pplx_files hook output."""
 
-    async def test_attachments_propagate_to_params(self) -> None:
+    async def test_attachments_propagate_to_params(self, render: Render) -> None:
         attachments = [
             "https://s3.example.com/upload/abc.png",
             "https://s3.example.com/upload/def.pdf",
@@ -121,12 +130,12 @@ class TestAttachmentsInRawExtras:
             raw_extras={"pplx": {"attachments": attachments}},
         )
 
-        body = await render_perplexity_pro(parsed)
+        body = await render(parsed)
 
         payload = json.loads(body)
         assert payload["params"]["attachments"] == attachments
 
-    async def test_empty_pplx_block_defaults_to_no_attachments(self) -> None:
+    async def test_empty_pplx_block_defaults_to_no_attachments(self, render: Render) -> None:
         parsed = _make_parsed(
             messages=[
                 ModelRequest(parts=[UserPromptPart(content="hi")])
@@ -134,7 +143,7 @@ class TestAttachmentsInRawExtras:
             raw_extras={},
         )
 
-        body = await render_perplexity_pro(parsed)
+        body = await render(parsed)
 
         payload = json.loads(body)
         assert payload["params"]["attachments"] == []
@@ -143,7 +152,7 @@ class TestAttachmentsInRawExtras:
 class TestThreadContinuation:
     """Followup-request shape — last_backend_uuid + read_write_token injected."""
 
-    async def test_followup_uses_only_last_user_turn(self) -> None:
+    async def test_followup_uses_only_last_user_turn(self, render: Render) -> None:
         parsed = _make_parsed(
             messages=[
                 ModelRequest(parts=[UserPromptPart(content="Name a fruit")]),
@@ -159,7 +168,7 @@ class TestThreadContinuation:
             },
         )
 
-        body = await render_perplexity_pro(parsed)
+        body = await render(parsed)
 
         payload = json.loads(body)
         assert payload["query_str"] == "Name a vegetable"
@@ -172,7 +181,7 @@ class TestThreadContinuation:
         assert payload["params"]["time_from_first_type"] == 8758
 
     async def test_followup_with_thread_uuid_alias_triggers_followup_source(
-        self,
+        self, render: Render,
     ) -> None:
         parsed = _make_parsed(
             messages=[
@@ -183,7 +192,7 @@ class TestThreadContinuation:
             raw_extras={"pplx": {"thread_uuid": "thread-abc"}},
         )
 
-        body = await render_perplexity_pro(parsed)
+        body = await render(parsed)
 
         payload = json.loads(body)
         assert payload["query_str"] == "next"
@@ -207,6 +216,7 @@ class TestModelSelection:
         model_id: str,
         expected_identifier: str,
         expected_mode: str,
+        render: Render,
     ) -> None:
         parsed = _make_parsed(
             model=model_id,
@@ -215,26 +225,26 @@ class TestModelSelection:
             ],
         )
 
-        body = await render_perplexity_pro(parsed)
+        body = await render(parsed)
 
         payload = json.loads(body)
         assert payload["params"]["model_preference"] == expected_identifier
         assert payload["params"]["mode"] == expected_mode
 
-    async def test_unknown_model_raises_value_error(self) -> None:
+    async def test_unknown_model_raises_value_error(self, render: Render) -> None:
         parsed = _make_parsed(
             model="not/a/real/model",
             messages=[ModelRequest(parts=[UserPromptPart(content="hi")])],
         )
 
         with pytest.raises(ValueError, match="Unknown Perplexity model"):
-            await render_perplexity_pro(parsed)
+            await render(parsed)
 
 
 class TestBinaryContentSurvivorPath:
     """Defensive: BinaryContent that wasn't stripped by extract_pplx_files."""
 
-    async def test_residual_binary_image_drops_in_flatten(self) -> None:
+    async def test_residual_binary_image_drops_in_flatten(self, render: Render) -> None:
         parsed = _make_parsed(
             messages=[
                 ModelRequest(
@@ -253,7 +263,7 @@ class TestBinaryContentSurvivorPath:
             ],
         )
 
-        body = await render_perplexity_pro(parsed)
+        body = await render(parsed)
 
         payload = json.loads(body)
         assert payload["query_str"] == "what is in this image?"

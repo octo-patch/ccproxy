@@ -319,7 +319,7 @@ class TestHandleTransform:
         router.request(flow)
         assert flow.request.content == original_content
 
-    @patch("ccproxy.lightllm.outbound.render_outbound_sync")
+    @patch("ccproxy.lightllm.graph.dispatch_dump_sync")
     @patch("ccproxy.lightllm.transform_to_provider")
     def test_rewrites_matched_flow(
         self,
@@ -372,7 +372,7 @@ class TestHandleTransform:
         assert flow.request.headers["x-api-key"] == "test-key"
         assert flow.request.content == b'{"model": "claude-3-5-sonnet-20241022", "messages": []}'
 
-    @patch("ccproxy.lightllm.outbound.render_outbound_sync")
+    @patch("ccproxy.lightllm.graph.dispatch_dump_sync")
     @patch("ccproxy.lightllm.transform_to_provider")
     def test_passes_messages_and_params(
         self,
