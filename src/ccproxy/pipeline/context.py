@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any
 from pydantic_ai.messages import ModelMessage, SystemPromptPart
 from pydantic_ai.tools import ToolDefinition
 
+from ccproxy.lightllm.parsed import ListenerFormat, ParsedRequest
 from ccproxy.pipeline.wire import (
     parse_messages,
     parse_system,
@@ -27,6 +28,23 @@ from ccproxy.pipeline.wire import (
 if TYPE_CHECKING:
     from mitmproxy import http
     from mitmproxy.http import HTTPFlow
+
+
+def _select_listener_format(req: http.Request | None) -> ListenerFormat:
+    """Determine the listener-side wire format from path + headers.
+
+    The choice is independent of upstream OAuth provider resolution
+    (which happens later in the pipeline via ``forward_oauth``) — wire
+    format is dictated by what the client SENT, not what we route to.
+    """
+    if req is None:
+        return ListenerFormat.UNKNOWN
+    path = (req.path or "").split("?", 1)[0]
+    if path.startswith("/v1/messages") or req.headers.get("anthropic-version"):
+        return ListenerFormat.ANTHROPIC_MESSAGES
+    if path.startswith("/v1/chat/completions") or path.startswith("/chat/completions"):
+        return ListenerFormat.OPENAI_CHAT
+    return ListenerFormat.UNKNOWN
 
 
 @dataclass
@@ -55,6 +73,38 @@ class Context:
     _cached_tools: list[ToolDefinition] | None = field(default=None, repr=False)
     """Lazy-parsed typed tool definitions, populated on first access."""
 
+    _listener_format: ListenerFormat = field(default=ListenerFormat.UNKNOWN, repr=False)
+    """Listener-side wire format, pinned at construction. UNKNOWN for unmatched routes."""
+
+    _parsed: ParsedRequest | None = field(default=None, repr=False)
+    """Lazy-parsed IR view of the request. Populated by per-listener parser on demand."""
+
+    async def ensure_parsed(self) -> ParsedRequest:
+        """Lazily parse ``self._body`` via the listener-format-matched inbound parser.
+
+        Raises ``ValueError`` if the listener format is UNKNOWN — callers
+        that need the IR view should branch on ``self._listener_format``
+        first. Subsequent calls return the cached ``ParsedRequest`` even
+        if ``_body`` has been mutated; call ``invalidate_parsed()`` to
+        force a re-parse.
+        """
+        if self._parsed is not None:
+            return self._parsed
+        from ccproxy.lightllm.anthropic_inbound import parse_anthropic_messages
+        from ccproxy.lightllm.openai_inbound import parse_openai_chat
+
+        if self._listener_format is ListenerFormat.ANTHROPIC_MESSAGES:
+            self._parsed = await parse_anthropic_messages(self._body)
+        elif self._listener_format is ListenerFormat.OPENAI_CHAT:
+            self._parsed = await parse_openai_chat(self._body)
+        else:
+            raise ValueError(f"no IR parser for listener_format={self._listener_format}")
+        return self._parsed
+
+    def invalidate_parsed(self) -> None:
+        """Drop the cached ``ParsedRequest`` so the next ``ensure_parsed`` re-parses."""
+        self._parsed = None
+
     @classmethod
     def from_flow(cls, flow: HTTPFlow) -> Context:
         """Build Context from a mitmproxy HTTPFlow."""
@@ -62,7 +112,11 @@ class Context:
             body = json.loads(flow.request.content or b"{}")
         except (json.JSONDecodeError, TypeError):
             body = {}
-        return cls(flow=flow, _body=body)
+        return cls(
+            flow=flow,
+            _body=body,
+            _listener_format=_select_listener_format(flow.request),
+        )
 
     @classmethod
     def from_request(cls, req: http.Request) -> Context:
@@ -71,7 +125,12 @@ class Context:
             body = json.loads(req.content or b"{}")
         except (json.JSONDecodeError, TypeError):
             body = {}
-        return cls(flow=None, _body=body, _request=req)
+        return cls(
+            flow=None,
+            _body=body,
+            _request=req,
+            _listener_format=_select_listener_format(req),
+        )
 
     # --- Typed content properties ---
 

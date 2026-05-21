@@ -166,7 +166,7 @@ stubPath = "stubs"
 
 [tool.ty.environment]
 python-version = "3.13"
-root = "src"
+root = ["src"]
 
 [tool.ruff]
 target-version = "py313"
