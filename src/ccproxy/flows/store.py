@@ -89,6 +89,21 @@ class TransformMeta:
     mode: Literal["redirect", "transform"] = "redirect"
     """Transform mode: redirect preserves body, transform rewrites it."""
 
+    listener_format: str = "unknown"
+    """Listener-side wire format (anthropic_messages / openai_chat / unknown).
+
+    Stamped by the transform router from ``Context._listener_format``.
+    Consumed by the response-side pipeline to select the matching
+    listener renderer. String-valued for dataclass-hashability.
+    """
+
+    request_parameters: Any = None
+    """pydantic-ai ``ModelRequestParameters`` from the inbound parse.
+
+    Used by the response intake to construct ``ModelResponsePartsManager``.
+    ``None`` when no inbound parse happened (passthrough / unknown listener).
+    """
+
 
 @dataclass
 class FlowRecord:
