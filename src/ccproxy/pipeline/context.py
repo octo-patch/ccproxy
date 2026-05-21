@@ -8,6 +8,7 @@ commit(). Header mutations are live — they hit the flow immediately.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -104,6 +105,23 @@ class Context:
     def invalidate_parsed(self) -> None:
         """Drop the cached ``ParsedRequest`` so the next ``ensure_parsed`` re-parses."""
         self._parsed = None
+
+    def parse_sync(self) -> ParsedRequest:
+        """Sync wrapper around :meth:`ensure_parsed`.
+
+        Drives the async parser on a private event loop so sync callers
+        (xepor route handlers, mitmproxy stream callbacks) can pull the
+        IR view without contaminating the surrounding async runtime.
+        Safe because the inbound parsers raise ``CaptureSentinel`` before
+        any actual I/O, so the loop never blocks on the network.
+        """
+        if self._parsed is not None:
+            return self._parsed
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(self.ensure_parsed())
+        finally:
+            loop.close()
 
     @classmethod
     def from_flow(cls, flow: HTTPFlow) -> Context:

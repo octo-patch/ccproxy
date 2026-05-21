@@ -156,12 +156,16 @@ def _record_transform_meta(
     record = flow.metadata.get(InspectorMeta.RECORD)
     if record is None:
         return
+    listener_format = flow.metadata.get("ccproxy.listener_format", "unknown")
+    request_parameters = flow.metadata.get("ccproxy.parsed_request_parameters")
     record.transform = TransformMeta(
         provider=provider,
         model=model,
         request_data={**body},
         is_streaming=is_streaming,
         mode=mode,  # type: ignore[arg-type]
+        listener_format=listener_format,
+        request_parameters=request_parameters,
     )
 
 
@@ -236,16 +240,53 @@ def _handle_redirect(
     logger.info("redirect: → %s %s%s", provider_str, host, path)
 
 
+def _resolve_upstream_url_and_headers(
+    *,
+    model: str,
+    provider: str,
+    messages: list[object],
+    optional_params: dict[str, object],
+    api_key: str | None,
+    is_streaming: bool,
+) -> tuple[str, dict[str, str]]:
+    """Return ``(url, headers)`` for a transform-mode upstream call.
+
+    Phase 8 transitional shim: delegates to LiteLLM's ``transform_to_provider``
+    for URL + headers only — the body it returns is discarded because
+    :func:`render_outbound_sync` now owns body generation. Phase 9 deletes
+    this once the Gemini cachedContents carve-out lands on the new
+    renderer, at which point a pure ccproxy URL/header builder replaces
+    the LiteLLM dependency.
+    """
+    # deferred: heavy LiteLLM transform chain
+    from ccproxy.lightllm import transform_to_provider
+
+    url, headers, _body = transform_to_provider(
+        model=model,
+        provider=provider,
+        messages=messages,  # type: ignore[arg-type]
+        optional_params=optional_params,
+        api_key=api_key,
+        stream=is_streaming,
+    )
+    return url, headers
+
+
 def _handle_transform(
     flow: HTTPFlow,
     target: Provider | TransformOverride,
     body: dict[str, object],
 ) -> None:
-    """Cross-format transform via lightllm: rewrite both body and destination."""
-    from urllib.parse import urlparse
+    """Cross-format transform: render the body via ``render_outbound_sync`` and
+    rewrite the destination.
 
-    # deferred: heavy LiteLLM transform chain
-    from ccproxy.lightllm import transform_to_provider
+    Gemini family providers stay on the legacy lightllm dispatch path —
+    ``cachedContents`` resolution hasn't been folded into the new renderer
+    yet. Everything else routes through pydantic-ai's IR via
+    :class:`~ccproxy.pipeline.context.Context.parse_sync` + the per-provider
+    ``render_outbound_*`` chain.
+    """
+    from urllib.parse import urlparse
 
     is_streaming = bool(glom(body, "stream", default=False))
     config = get_config()
@@ -276,11 +317,16 @@ def _handle_transform(
 
     messages: list[object] = list(glom(body, "messages", default=[]))  # type: ignore[arg-type]
     optional_params = {k: v for k, v in body.items() if k != "messages"}
-    cached_content: str | None = None
 
     if provider_str in _GEMINI_FORMATS:
+        # Gemini context_cache path still uses lightllm — refactor pending.
+        # TODO(phase9): fold cachedContents resolution into outbound_google.py
+        # and route Gemini through render_outbound_sync alongside other providers.
+        # deferred: heavy LiteLLM transform chain
+        from ccproxy.lightllm import transform_to_provider
         from ccproxy.lightllm.context_cache import resolve_cached_content
 
+        cached_content: str | None = None
         try:
             messages, optional_params, cached_content = resolve_cached_content(
                 messages=messages,  # type: ignore[arg-type]
@@ -294,15 +340,37 @@ def _handle_transform(
         except Exception:
             logger.warning("Context cache resolution failed, proceeding without", exc_info=True)
 
-    url, headers, new_body = transform_to_provider(
-        model=model,
-        provider=provider_str,
-        messages=messages,  # type: ignore[arg-type]
-        optional_params=optional_params,
-        api_key=api_key,
-        stream=is_streaming,
-        cached_content=cached_content,
-    )
+        url, headers, new_body = transform_to_provider(
+            model=model,
+            provider=provider_str,
+            messages=messages,  # type: ignore[arg-type]
+            optional_params=optional_params,
+            api_key=api_key,
+            stream=is_streaming,
+            cached_content=cached_content,
+        )
+    else:
+        # deferred: avoid pulling pydantic-ai at module import time
+        import dataclasses
+
+        from ccproxy.lightllm.outbound import render_outbound_sync
+        from ccproxy.pipeline.context import Context
+
+        ctx = Context.from_flow(flow)
+        flow.metadata.setdefault("ccproxy.listener_format", ctx._listener_format.value)
+        parsed = ctx.parse_sync()
+        if model and model != parsed.model:
+            parsed = dataclasses.replace(parsed, model=model)
+        flow.metadata["ccproxy.parsed_request_parameters"] = parsed.request_parameters
+        new_body = render_outbound_sync(parsed, provider=provider_str)
+        url, headers = _resolve_upstream_url_and_headers(
+            model=model,
+            provider=provider_str,
+            messages=messages,
+            optional_params=optional_params,
+            api_key=api_key,
+            is_streaming=is_streaming,
+        )
 
     _record_transform_meta(
         flow,
@@ -313,13 +381,13 @@ def _handle_transform(
         mode="transform",
     )
 
-    parsed = urlparse(url)
-    host = parsed.hostname or flow.request.host
-    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    parsed_url = urlparse(url)
+    host = parsed_url.hostname or flow.request.host
+    port = parsed_url.port or (443 if parsed_url.scheme == "https" else 80)
     flow.request.host = host
     flow.request.port = port
-    flow.request.scheme = parsed.scheme or "https"
-    flow.request.path = parsed.path or "/"
+    flow.request.scheme = parsed_url.scheme or "https"
+    flow.request.path = parsed_url.path or "/"
     flow.server_conn = Server(address=(host, port))
     for k, v in headers.items():
         flow.request.headers[k] = v

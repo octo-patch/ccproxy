@@ -319,10 +319,16 @@ class TestHandleTransform:
         router.request(flow)
         assert flow.request.content == original_content
 
+    @patch("ccproxy.lightllm.outbound.render_outbound_sync")
     @patch("ccproxy.lightllm.transform_to_provider")
-    def test_rewrites_matched_flow(self, mock_transform: MagicMock, cleanup: None) -> None:
+    def test_rewrites_matched_flow(
+        self,
+        mock_transform: MagicMock,
+        mock_render: MagicMock,
+        cleanup: None,
+    ) -> None:
         # transform action with an override requires a registered Provider entry
-        # for dest_provider so the handler can resolve the LiteLLM format.
+        # for dest_provider so the handler can resolve the destination format.
         config = CCProxyConfig(
             inspector=InspectorConfig(
                 transforms=[
@@ -340,11 +346,14 @@ class TestHandleTransform:
             },
         )
         set_config_instance(config)
+        # transform_to_provider still drives URL + headers via the Phase 8
+        # transitional shim; render_outbound_sync owns the body.
         mock_transform.return_value = (
             "https://api.anthropic.com/v1/messages",
             {"x-api-key": "test-key", "anthropic-version": "2023-06-01"},
-            b'{"model": "claude-3-5-sonnet-20241022", "messages": []}',
+            b"unused-body",
         )
+        mock_render.return_value = b'{"model": "claude-3-5-sonnet-20241022", "messages": []}'
 
         router = InspectorRouter(
             name="test_transform",
@@ -363,8 +372,14 @@ class TestHandleTransform:
         assert flow.request.headers["x-api-key"] == "test-key"
         assert flow.request.content == b'{"model": "claude-3-5-sonnet-20241022", "messages": []}'
 
+    @patch("ccproxy.lightllm.outbound.render_outbound_sync")
     @patch("ccproxy.lightllm.transform_to_provider")
-    def test_passes_messages_and_params(self, mock_transform: MagicMock, cleanup: None) -> None:
+    def test_passes_messages_and_params(
+        self,
+        mock_transform: MagicMock,
+        mock_render: MagicMock,
+        cleanup: None,
+    ) -> None:
         config = CCProxyConfig(
             inspector=InspectorConfig(
                 transforms=[
@@ -383,6 +398,7 @@ class TestHandleTransform:
         )
         set_config_instance(config)
         mock_transform.return_value = ("https://api.anthropic.com/v1/messages", {}, b"{}")
+        mock_render.return_value = b"{}"
 
         flow = _make_flow(
             body={

@@ -281,13 +281,51 @@ class TestResponseHeaders:
         assert not isinstance(flow.response.stream, bool) or flow.response.stream is not True
 
     @pytest.mark.asyncio
-    async def test_creates_transformer_for_cross_provider(self) -> None:
+    async def test_creates_pipeline_for_cross_provider_with_ir_context(self) -> None:
+        from pydantic_ai.models import ModelRequestParameters
+
+        from ccproxy.inspector.addon import InspectorAddon
+        from ccproxy.lightllm.response.pipeline import SsePipeline
+
+        addon = InspectorAddon()
+        meta = TransformMeta(
+            provider="anthropic",
+            model="claude-3",
+            request_data={"messages": [], "max_tokens": 100},
+            is_streaming=True,
+            mode="transform",
+            listener_format="openai_chat",
+            request_parameters=ModelRequestParameters(),
+        )
+        flow = self._make_flow(transform=meta)
+        await addon.responseheaders(flow)
+        assert isinstance(flow.response.stream, SsePipeline)
+
+    @pytest.mark.asyncio
+    async def test_falls_back_to_passthrough_when_ir_context_missing(self) -> None:
+        """No listener_format/request_parameters → passthrough fallback."""
         from ccproxy.inspector.addon import InspectorAddon
 
         addon = InspectorAddon()
         meta = TransformMeta(
             provider="anthropic",
             model="claude-3",
+            request_data={"messages": [], "max_tokens": 100},
+            is_streaming=True,
+            mode="transform",
+        )
+        flow = self._make_flow(transform=meta)
+        await addon.responseheaders(flow)
+        assert flow.response.stream is True
+
+    @pytest.mark.asyncio
+    async def test_gemini_keeps_legacy_sse_transformer(self) -> None:
+        from ccproxy.inspector.addon import InspectorAddon
+
+        addon = InspectorAddon()
+        meta = TransformMeta(
+            provider="gemini",
+            model="gemini-1.5-pro",
             request_data={"messages": [], "max_tokens": 100},
             is_streaming=True,
             mode="transform",
@@ -300,13 +338,13 @@ class TestResponseHeaders:
         assert isinstance(flow.response.stream, SseTransformer)
 
     @pytest.mark.asyncio
-    async def test_falls_back_to_passthrough_on_error(self) -> None:
+    async def test_falls_back_to_passthrough_on_legacy_error(self) -> None:
         from ccproxy.inspector.addon import InspectorAddon
 
         addon = InspectorAddon()
         meta = TransformMeta(
-            provider="anthropic",
-            model="claude-3",
+            provider="gemini",
+            model="gemini-1.5-pro",
             request_data={"messages": []},
             is_streaming=True,
         )

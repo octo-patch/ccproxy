@@ -20,6 +20,7 @@ upstream URL is handled separately by the transform router via
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING
 
 from ccproxy.lightllm.outbound_anthropic import render_anthropic
@@ -50,3 +51,18 @@ async def render_outbound(parsed: ParsedRequest, *, provider: str) -> bytes:
     if provider == "perplexity_pro":
         return await render_perplexity_pro(parsed)
     raise UnsupportedUpstreamError(f"no outbound renderer for provider={provider!r}")
+
+
+def render_outbound_sync(parsed: ParsedRequest, *, provider: str) -> bytes:
+    """Sync facade over :func:`render_outbound`.
+
+    Drives the async renderer on a private event loop so the inspector's
+    sync route handler can call it. Safe because each renderer raises
+    ``CaptureSentinel`` before any real I/O — the loop never blocks on
+    the network.
+    """
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(render_outbound(parsed, provider=provider))
+    finally:
+        loop.close()

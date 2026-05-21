@@ -21,6 +21,7 @@ from ccproxy.flows.store import (
     FLOW_ID_HEADER,
     HttpSnapshot,
     InspectorMeta,
+    TransformMeta,
     create_flow_record,
     get_flow_record,
 )
@@ -37,6 +38,11 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 Direction = Literal["inbound"]
+
+_GEMINI_PROVIDERS: frozenset[str] = frozenset({"gemini", "vertex_ai", "vertex_ai_beta"})
+"""Providers that still go through the legacy lightllm SSE transformer
+because their response intake/render flow hasn't been folded into the
+pydantic-ai-mediated wire layer yet (Gemini cachedContents)."""
 
 
 class InspectorAddon:
@@ -199,6 +205,30 @@ class InspectorAddon:
         transform = getattr(record, "transform", None) if record else None
 
         if transform is not None and transform.is_streaming and transform.mode == "transform":
+            self._install_streaming_transformer(flow, transform)
+        elif transform is not None and not transform.is_streaming and transform.mode == "transform":
+            # Non-streaming client + event-stream upstream (e.g. Perplexity always
+            # streams). Buffer so handle_transform_response can call
+            # transform_to_openai on the complete body.
+            flow.response.stream = False
+        else:
+            flow.response.stream = True
+
+    def _install_streaming_transformer(
+        self, flow: http.HTTPFlow, transform: TransformMeta
+    ) -> None:
+        """Install the SSE response transformer on ``flow.response.stream``.
+
+        Non-Gemini providers route through the new pydantic-ai-mediated
+        :class:`~ccproxy.lightllm.response.pipeline.SsePipeline` when the
+        transform router stamped both ``listener_format`` and
+        ``request_parameters``. Without those, falls back to passthrough.
+
+        Gemini family providers stay on the legacy
+        :func:`~ccproxy.lightllm.dispatch.make_sse_transformer` path until
+        their response chain is migrated.
+        """
+        if transform.provider in _GEMINI_PROVIDERS:
             # deferred: heavy LiteLLM provider chain
             from ccproxy.lightllm.dispatch import make_sse_transformer
 
@@ -217,12 +247,38 @@ class InspectorAddon:
                     exc_info=True,
                 )
                 flow.response.stream = True
-        elif transform is not None and not transform.is_streaming and transform.mode == "transform":
-            # Non-streaming client + event-stream upstream (e.g. Perplexity always
-            # streams). Buffer so handle_transform_response can call
-            # transform_to_openai on the complete body.
-            flow.response.stream = False
-        else:
+            return
+
+        from ccproxy.lightllm.parsed import ListenerFormat
+
+        listener_format = ListenerFormat(transform.listener_format)
+        if listener_format is ListenerFormat.UNKNOWN or transform.request_parameters is None:
+            logger.warning(
+                "SsePipeline missing listener_format / request_parameters; falling back to passthrough",
+            )
+            flow.response.stream = True
+            return
+
+        # deferred: pydantic-ai heavy imports
+        from ccproxy.lightllm.response.intake import select_intake
+        from ccproxy.lightllm.response.pipeline import SsePipeline
+        from ccproxy.lightllm.response.render import select_render
+
+        try:
+            intake = select_intake(
+                upstream_provider=transform.provider,
+                model=transform.model,
+                request_params=transform.request_parameters,
+            )
+            render = select_render(listener_format)
+            pipeline = SsePipeline(intake=intake, render=render)
+            flow.response.stream = pipeline
+            flow.metadata["ccproxy.sse_transformer"] = pipeline
+        except Exception:
+            logger.warning(
+                "Failed to construct SsePipeline, falling back to passthrough",
+                exc_info=True,
+            )
             flow.response.stream = True
 
     async def response(self, flow: http.HTTPFlow) -> None:

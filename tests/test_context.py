@@ -249,3 +249,43 @@ class TestFromRequest:
         req.headers = {}
         ctx = Context.from_request(req)
         assert ctx.flow_id == ""
+
+
+class TestParseSync:
+    def test_parse_sync_returns_parsed_request(self):
+        from ccproxy.lightllm.parsed import ListenerFormat, ParsedRequest
+
+        flow = _make_flow(
+            body={"model": "claude-3", "messages": [{"role": "user", "content": "hi"}]},
+            headers={"anthropic-version": "2023-06-01"},
+        )
+        flow.request.path = "/v1/messages"
+        ctx = Context.from_flow(flow)
+        assert ctx._listener_format is ListenerFormat.ANTHROPIC_MESSAGES
+
+        parsed = ctx.parse_sync()
+        assert isinstance(parsed, ParsedRequest)
+        assert parsed.model == "claude-3"
+        assert len(parsed.messages) == 1
+
+    def test_parse_sync_caches_result(self):
+        flow = _make_flow(
+            body={"model": "claude-3", "messages": [{"role": "user", "content": "hi"}]},
+            headers={"anthropic-version": "2023-06-01"},
+        )
+        flow.request.path = "/v1/messages"
+        ctx = Context.from_flow(flow)
+
+        first = ctx.parse_sync()
+        second = ctx.parse_sync()
+        assert first is second
+
+    def test_parse_sync_raises_for_unknown_listener_format(self):
+        import pytest
+
+        flow = _make_flow(body={"model": "?", "messages": []}, headers={})
+        flow.request.path = "/unknown/path"
+        ctx = Context.from_flow(flow)
+
+        with pytest.raises(ValueError, match="no IR parser"):
+            ctx.parse_sync()

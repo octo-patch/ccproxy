@@ -61,6 +61,7 @@ class PipelineExecutor:
         and trace_id, but do not block execution.
         """
         ctx = Context.from_flow(flow)
+        flow.metadata["ccproxy.listener_format"] = ctx._listener_format.value
         available = extract_available_keys(ctx)
 
         overrides = extract_overrides_from_context(ctx.headers)
