@@ -9,8 +9,9 @@ typed ``ChatCompletionMessageParam`` dicts via the per-part / per-message
 helpers, and stitches the static envelope (model, settings, tools,
 tool_choice, response_format, ``raw_extras``).
 
-Wire dicts use the SDK TypedDicts from ``openai.types.chat`` as the typed
-boundary — no hand-rolled mirror models.
+The FSM is built atop :mod:`pydantic_graph.beta`'s ``GraphBuilder``. Wire
+dicts use the SDK TypedDicts from ``openai.types.chat`` as the typed boundary
+— no hand-rolled mirror models.
 """
 
 from __future__ import annotations
@@ -53,7 +54,7 @@ from pydantic_ai.messages import (
     UserPromptPart,
 )
 from pydantic_ai.tools import ToolDefinition
-from pydantic_graph import BaseNode, End, Graph, GraphRunContext
+from pydantic_graph.beta import GraphBuilder, StepContext
 
 from ccproxy.lightllm.parsed import ParsedRequest
 
@@ -68,160 +69,154 @@ class _UserContentState:
     parts: list[ChatCompletionContentPartParam] = field(default_factory=list)
 
 
-@dataclass
-class FetchNextUserContentNode(
-    BaseNode[_UserContentState, None, list[ChatCompletionContentPartParam]]
-):
-    """Router for one user-content-list item — dispatches by IR type via ``match``."""
-
-    async def run(
-        self, ctx: GraphRunContext[_UserContentState, None]
-    ) -> (
-        BaseNode[_UserContentState, None, Any]
-        | End[list[ChatCompletionContentPartParam]]
-    ):
-        if not ctx.state.queue:
-            return End(ctx.state.parts)
-
-        item = ctx.state.queue.popleft()
-
-        match item:
-            case str():
-                return ParseUserTextItemNode(text=item)
-            case BinaryContent():
-                return ParseUserBinaryItemNode(item=item)
-            case ImageUrl():
-                return ParseUserImageUrlItemNode(item=item)
-            case UploadedFile():
-                return ParseUserUploadedFileItemNode(item=item)
-            case CachePoint() | AudioUrl() | DocumentUrl():
-                # OpenAI has no cache concept; no top-level audio URL / doc URL
-                # content parts on the Chat Completions wire.
-                return FetchNextUserContentNode()
-            case _:
-                return FetchNextUserContentNode()
+class _OpenAIDone:
+    """Marker returned when the user-content queue is exhausted."""
 
 
-@dataclass
-class ParseUserTextItemNode(BaseNode[_UserContentState, None]):
+class _OpenAISkip:
+    """Marker for queue items with no OpenAI Chat Completions content equivalent."""
+
+
+_g: GraphBuilder[
+    _UserContentState, None, None, list[ChatCompletionContentPartParam]
+] = GraphBuilder(
+    state_type=_UserContentState,
+    output_type=list[ChatCompletionContentPartParam],
+)
+
+
+@_g.step
+async def take_next(ctx: StepContext[_UserContentState, None, None]) -> Any:
+    """Router source: pop the next user-content item or signal end via :class:`_OpenAIDone`."""
+    if not ctx.state.queue:
+        return _OpenAIDone()
+    item = ctx.state.queue.popleft()
+    if isinstance(item, (str, BinaryContent, ImageUrl, UploadedFile)):
+        return item
+    # CachePoint, AudioUrl, DocumentUrl — no OpenAI content equivalent.
+    if isinstance(item, (CachePoint, AudioUrl, DocumentUrl)):
+        return _OpenAISkip()
+    return _OpenAISkip()
+
+
+@_g.step
+async def parse_text_item(ctx: StepContext[_UserContentState, None, str]) -> None:
     """Emit a text content part."""
-
-    text: str
-
-    async def run(
-        self, ctx: GraphRunContext[_UserContentState, None]
-    ) -> BaseNode[_UserContentState, None, Any]:
-        ctx.state.parts.append(cast(ChatCompletionContentPartTextParam, {"type": "text", "text": self.text}))
-        return FetchNextUserContentNode()
+    ctx.state.parts.append(
+        cast(ChatCompletionContentPartTextParam, {"type": "text", "text": ctx.inputs})
+    )
 
 
-@dataclass
-class ParseUserBinaryItemNode(BaseNode[_UserContentState, None]):
-    """Emit an image_url (image bytes → data URI) or input_audio content part.
-
-    Documents / other media have no OpenAI Chat Completions equivalent and
-    are dropped.
-    """
-
-    item: BinaryContent
-
-    async def run(
-        self, ctx: GraphRunContext[_UserContentState, None]
-    ) -> BaseNode[_UserContentState, None, Any]:
-        media_type = self.item.media_type
-        if media_type.startswith("image/"):
-            data_uri = f"data:{media_type};base64,{base64.b64encode(self.item.data).decode('ascii')}"
-            ctx.state.parts.append(
-                cast(
-                    ChatCompletionContentPartImageParam,
-                    {"type": "image_url", "image_url": {"url": data_uri}},
-                )
-            )
-        elif media_type.startswith("audio/"):
-            audio_format = media_type.split("/", 1)[1]
-            if audio_format not in ("wav", "mp3"):
-                audio_format = "wav"
-            ctx.state.parts.append(
-                cast(
-                    ChatCompletionContentPartInputAudioParam,
-                    {
-                        "type": "input_audio",
-                        "input_audio": {
-                            "data": base64.b64encode(self.item.data).decode("ascii"),
-                            "format": cast(Literal["wav", "mp3"], audio_format),
-                        },
-                    },
-                )
-            )
-        return FetchNextUserContentNode()
-
-
-@dataclass
-class ParseUserImageUrlItemNode(BaseNode[_UserContentState, None]):
-    """Emit an image_url content part from an :class:`ImageUrl` (with optional detail)."""
-
-    item: ImageUrl
-
-    async def run(
-        self, ctx: GraphRunContext[_UserContentState, None]
-    ) -> BaseNode[_UserContentState, None, Any]:
-        vendor = self.item.vendor_metadata or {}
-        image_url: dict[str, Any] = {"url": self.item.url}
-        if detail := vendor.get("detail"):
-            image_url["detail"] = detail
+@_g.step
+async def parse_binary_item(ctx: StepContext[_UserContentState, None, BinaryContent]) -> None:
+    """Emit an image_url (image bytes → data URI) or input_audio content part."""
+    item = ctx.inputs
+    media_type = item.media_type
+    if media_type.startswith("image/"):
+        data_uri = f"data:{media_type};base64,{base64.b64encode(item.data).decode('ascii')}"
         ctx.state.parts.append(
             cast(
                 ChatCompletionContentPartImageParam,
-                {"type": "image_url", "image_url": cast(Any, image_url)},
+                {"type": "image_url", "image_url": {"url": data_uri}},
             )
         )
-        return FetchNextUserContentNode()
-
-
-@dataclass
-class ParseUserUploadedFileItemNode(BaseNode[_UserContentState, None]):
-    """Emit a ``file`` content part from an OpenAI-provider :class:`UploadedFile`."""
-
-    item: UploadedFile
-
-    async def run(
-        self, ctx: GraphRunContext[_UserContentState, None]
-    ) -> BaseNode[_UserContentState, None, Any]:
-        if self.item.provider_name != "openai":
-            return FetchNextUserContentNode()
+    elif media_type.startswith("audio/"):
+        audio_format = media_type.split("/", 1)[1]
+        if audio_format not in ("wav", "mp3"):
+            audio_format = "wav"
         ctx.state.parts.append(
             cast(
-                ChatCompletionContentPartParam,
-                {"type": "file", "file": {"file_id": self.item.file_id}},
+                ChatCompletionContentPartInputAudioParam,
+                {
+                    "type": "input_audio",
+                    "input_audio": {
+                        "data": base64.b64encode(item.data).decode("ascii"),
+                        "format": cast(Literal["wav", "mp3"], audio_format),
+                    },
+                },
             )
         )
-        return FetchNextUserContentNode()
 
 
-_user_content_graph = Graph[_UserContentState, None, list[ChatCompletionContentPartParam]](
-    nodes=(
-        FetchNextUserContentNode,
-        ParseUserTextItemNode,
-        ParseUserBinaryItemNode,
-        ParseUserImageUrlItemNode,
-        ParseUserUploadedFileItemNode,
+@_g.step
+async def parse_image_url_item(ctx: StepContext[_UserContentState, None, ImageUrl]) -> None:
+    """Emit an image_url content part from an :class:`ImageUrl` (with optional detail)."""
+    item = ctx.inputs
+    vendor = item.vendor_metadata or {}
+    image_url: dict[str, Any] = {"url": item.url}
+    if detail := vendor.get("detail"):
+        image_url["detail"] = detail
+    ctx.state.parts.append(
+        cast(
+            ChatCompletionContentPartImageParam,
+            {"type": "image_url", "image_url": cast(Any, image_url)},
+        )
+    )
+
+
+@_g.step
+async def parse_uploaded_file_item(
+    ctx: StepContext[_UserContentState, None, UploadedFile],
+) -> None:
+    """Emit a ``file`` content part from an OpenAI-provider :class:`UploadedFile`."""
+    item = ctx.inputs
+    if item.provider_name != "openai":
+        return
+    ctx.state.parts.append(
+        cast(
+            ChatCompletionContentPartParam,
+            {"type": "file", "file": {"file_id": item.file_id}},
+        )
+    )
+
+
+@_g.step
+async def skip_item(ctx: StepContext[_UserContentState, None, _OpenAISkip]) -> None:
+    """No-op for queue items with no OpenAI Chat Completions equivalent."""
+    del ctx  # protocol-required parameter; intentionally unused
+
+
+@_g.step
+async def emit_parts(
+    ctx: StepContext[_UserContentState, None, _OpenAIDone],
+) -> list[ChatCompletionContentPartParam]:
+    """Terminal step — hand the accumulated content parts to the end node."""
+    return ctx.state.parts
+
+
+_g.add(
+    _g.edge_from(_g.start_node).to(take_next),
+    _g.edge_from(take_next).to(
+        _g.decision()
+        .branch(_g.match(_OpenAIDone).to(emit_parts))
+        .branch(_g.match(_OpenAISkip).to(skip_item))
+        .branch(_g.match(str).to(parse_text_item))
+        .branch(_g.match(BinaryContent).to(parse_binary_item))
+        .branch(_g.match(ImageUrl).to(parse_image_url_item))
+        .branch(_g.match(UploadedFile).to(parse_uploaded_file_item))
     ),
+    _g.edge_from(
+        parse_text_item,
+        parse_binary_item,
+        parse_image_url_item,
+        parse_uploaded_file_item,
+        skip_item,
+    ).to(take_next),
+    _g.edge_from(emit_parts).to(_g.end_node),
 )
+
+
+_user_content_graph = _g.build()
 
 
 async def _render_user_content(
     content: Any,
 ) -> str | list[ChatCompletionContentPartParam]:
-    """Convert a :class:`UserPromptPart` content list to OpenAI content parts.
-
-    A bare string passes through. A single-item string list collapses back to
-    a bare string (matches pydantic-ai's emission convention).
-    """
+    """Convert a :class:`UserPromptPart` content list to OpenAI content parts."""
     if isinstance(content, str):
         return content
     state = _UserContentState(queue=deque(content))
-    result = await _user_content_graph.run(FetchNextUserContentNode(), state=state)
-    parts = result.output
+    parts = await _user_content_graph.run(state=state)
     if len(parts) == 1 and parts[0].get("type") == "text":
         text_part = cast(ChatCompletionContentPartTextParam, parts[0])
         return text_part["text"]
@@ -280,12 +275,7 @@ async def _render_request_messages(msg: ModelRequest) -> list[ChatCompletionMess
 
 
 def _render_response_message(msg: ModelResponse) -> ChatCompletionAssistantMessageParam | None:
-    """Aggregate a :class:`ModelResponse`'s parts into one assistant message dict.
-
-    Multiple :class:`TextPart` are concatenated. :class:`ToolCallPart` entries
-    are collected into ``tool_calls[]``. Returns ``None`` if the response has
-    neither text nor tool calls (skip emitting an empty message).
-    """
+    """Aggregate a :class:`ModelResponse`'s parts into one assistant message dict."""
     text = ""
     tool_calls: list[ChatCompletionMessageFunctionToolCallParam] = []
     for part in msg.parts:
@@ -386,13 +376,7 @@ _INTERNAL_RAW_EXTRA_PREFIXES = (
 
 
 def _stitch_raw_extras(body: dict[str, Any], parsed: ParsedRequest) -> None:
-    """Re-inject non-IR-internal ``raw_extras`` onto the rendered body.
-
-    * ``tool_choice`` / ``response_format`` overrides win (the inbound parser
-      preserves them as raw_extras when the IR couldn't fold them).
-    * IR-internal markers are skipped.
-    * Other keys are copied verbatim if not already on the body.
-    """
+    """Re-inject non-IR-internal ``raw_extras`` onto the rendered body."""
     for key in ("tool_choice", "response_format"):
         if key in parsed.raw_extras:
             body[key] = parsed.raw_extras[key]
@@ -409,12 +393,7 @@ def _stitch_raw_extras(body: dict[str, Any], parsed: ParsedRequest) -> None:
 
 
 async def render_openai_chat_dump(parsed: ParsedRequest) -> bytes:
-    """Render a :class:`ParsedRequest` to OpenAI Chat Completions wire bytes.
-
-    Walks the IR conversation imperatively (per-part dispatch); drives the
-    per-:class:`UserPromptPart` content-walk FSM for polymorphic user content;
-    assembles the static envelope (model, settings, tools, ``raw_extras``).
-    """
+    """Render a :class:`ParsedRequest` to OpenAI Chat Completions wire bytes."""
     messages: list[ChatCompletionMessageParam] = []
     for msg in parsed.messages:
         if isinstance(msg, ModelRequest):

@@ -2,13 +2,14 @@
 
 Inverse of :mod:`ccproxy.lightllm.graph.openai_dump`. Replaces the imperative
 :mod:`ccproxy.lightllm.openai_inbound` parser with one polymorphic-walk FSM
-for user-role content lists; everything else (system / developer / assistant /
-tool message dispatch, two-pass ``tool_name`` resolution, settings + tools
-extraction, ``raw_extras`` accumulation) is imperative envelope handling.
+(built atop :mod:`pydantic_graph.beta`'s ``GraphBuilder``) for user-role
+content lists; everything else (system / developer / assistant / tool message
+dispatch, two-pass ``tool_name`` resolution, settings + tools extraction,
+``raw_extras`` accumulation) is imperative envelope handling.
 
 The FSM mirrors the Anthropic-load shape: one graph run per
-``UserPromptPart`` content list, ``match``-based router over block types,
-per-block-type nodes emitting :class:`UserContent` items.
+``UserPromptPart`` content list, decision-routed dispatch over block types,
+per-block-type steps emitting :class:`UserContent` items.
 """
 
 from __future__ import annotations
@@ -41,7 +42,7 @@ from pydantic_ai.messages import (
 from pydantic_ai.models import ModelRequestParameters
 from pydantic_ai.settings import ModelSettings
 from pydantic_ai.tools import ToolDefinition
-from pydantic_graph import BaseNode, End, Graph, GraphRunContext
+from pydantic_graph.beta import GraphBuilder, StepContext
 
 from ccproxy.lightllm.parsed import ParsedRequest
 
@@ -93,158 +94,192 @@ class _UserContentState:
     raw_extras: dict[str, Any] = field(default_factory=dict)
 
 
-@dataclass
-class FetchNextUserBlockNode(BaseNode[_UserContentState, None, list[UserContent]]):
-    """Pop the next content block and dispatch by ``type``."""
-
-    async def run(
-        self, ctx: GraphRunContext[_UserContentState, None]
-    ) -> BaseNode[_UserContentState, None, Any] | End[list[UserContent]]:
-        if not ctx.state.queue:
-            return End(ctx.state.items)
-
-        block_index, raw_block = ctx.state.queue.popleft()
-        if not isinstance(raw_block, dict):
-            ctx.state.items.append(str(raw_block))
-            return FetchNextUserBlockNode()
-
-        block: dict[str, Any] = raw_block
-
-        match block.get("type", ""):
-            case "text":
-                return ParseUserTextNode(block=block)
-            case "image_url":
-                return ParseUserImageUrlNode(block_index=block_index, block=block)
-            case "input_audio":
-                return ParseUserInputAudioNode(block=block)
-            case "file":
-                return ParseUserFileNode(block_index=block_index, block=block)
-            case _:
-                return ParseUserUnknownBlockNode(block_index=block_index, block=block)
+class _UserDone:
+    """Marker returned when the user-content queue is exhausted."""
 
 
 @dataclass
-class ParseUserTextNode(BaseNode[_UserContentState, None]):
-    """Append a text item to the accumulator."""
-
-    block: dict[str, Any]
-
-    async def run(
-        self, ctx: GraphRunContext[_UserContentState, None]
-    ) -> BaseNode[_UserContentState, None, Any]:
-        ctx.state.items.append(cast(str, self.block.get("text", "")))
-        return FetchNextUserBlockNode()
-
-
-@dataclass
-class ParseUserImageUrlNode(BaseNode[_UserContentState, None]):
-    """Append an image item — ``data:`` URIs become :class:`BinaryContent`, HTTP(S) becomes :class:`ImageUrl`.
-
-    OpenAI's ``image_url.detail`` (if present) is preserved in
-    ``raw_extras['image_detail:msg:{i}:block:{j}']`` for outbound round-trip.
-    """
+class _UserBlock:
+    """Base typed envelope for user-side block dispatch."""
 
     block_index: int
     block: dict[str, Any]
 
-    async def run(
-        self, ctx: GraphRunContext[_UserContentState, None]
-    ) -> BaseNode[_UserContentState, None, Any]:
-        image_block = self.block.get("image_url") or {}
-        url = ""
-        detail: str | None = None
-        if isinstance(image_block, dict):
-            url = cast(str, image_block.get("url", ""))
-            raw_detail = image_block.get("detail")
-            if isinstance(raw_detail, str):
-                detail = raw_detail
-        if detail is None:
-            outer_detail = self.block.get("detail")
-            if isinstance(outer_detail, str):
-                detail = outer_detail
-        if detail is not None:
-            ctx.state.raw_extras[
-                f"image_detail:msg:{ctx.state.msg_index}:block:{self.block_index}"
-            ] = detail
 
-        if url.startswith("data:"):
-            try:
-                ctx.state.items.append(cast(UserContent, BinaryContent.from_data_uri(url)))
-                return FetchNextUserBlockNode()
-            except (ValueError, binascii.Error):
-                logger.warning("OpenAI load: malformed data URI; falling back to ImageUrl")
-        ctx.state.items.append(ImageUrl(url=url))
-        return FetchNextUserBlockNode()
+@dataclass
+class _UserTextBlock(_UserBlock):
+    pass
 
 
 @dataclass
-class ParseUserInputAudioNode(BaseNode[_UserContentState, None]):
-    """Append an :class:`BinaryContent` audio item from an ``input_audio`` block."""
-
-    block: dict[str, Any]
-
-    async def run(
-        self, ctx: GraphRunContext[_UserContentState, None]
-    ) -> BaseNode[_UserContentState, None, Any]:
-        audio = self.block.get("input_audio") or {}
-        data = ""
-        audio_format = "wav"
-        if isinstance(audio, dict):
-            data = cast(str, audio.get("data", ""))
-            audio_format = cast(str, audio.get("format", "wav"))
-        try:
-            data_bytes = base64.b64decode(data) if data else b""
-        except (ValueError, binascii.Error):
-            logger.warning("OpenAI load: malformed base64 audio payload; emitting empty bytes")
-            data_bytes = b""
-        ctx.state.items.append(BinaryContent(data=data_bytes, media_type=f"audio/{audio_format}"))
-        return FetchNextUserBlockNode()
+class _UserImageUrlBlock(_UserBlock):
+    pass
 
 
 @dataclass
-class ParseUserFileNode(BaseNode[_UserContentState, None]):
-    """Stash a ``file`` block in raw_extras and emit a JSON-string placeholder."""
+class _UserInputAudioBlock(_UserBlock):
+    pass
+
+
+@dataclass
+class _UserFileBlock(_UserBlock):
+    pass
+
+
+@dataclass
+class _UserUnknownBlock(_UserBlock):
+    pass
+
+
+@dataclass
+class _UserNonDictBlock:
+    """A non-dict queue item (coerced to its ``str`` form)."""
 
     block_index: int
-    block: dict[str, Any]
-
-    async def run(
-        self, ctx: GraphRunContext[_UserContentState, None]
-    ) -> BaseNode[_UserContentState, None, Any]:
-        ctx.state.raw_extras[
-            f"file:msg:{ctx.state.msg_index}:block:{self.block_index}"
-        ] = self.block
-        ctx.state.items.append(json.dumps(self.block))
-        return FetchNextUserBlockNode()
+    raw: Any
 
 
-@dataclass
-class ParseUserUnknownBlockNode(BaseNode[_UserContentState, None]):
-    """Stash an unknown block in raw_extras and emit a JSON-string placeholder."""
-
-    block_index: int
-    block: dict[str, Any]
-
-    async def run(
-        self, ctx: GraphRunContext[_UserContentState, None]
-    ) -> BaseNode[_UserContentState, None, Any]:
-        ctx.state.raw_extras[
-            f"unknown_block:msg:{ctx.state.msg_index}:block:{self.block_index}"
-        ] = self.block
-        ctx.state.items.append(json.dumps(self.block))
-        return FetchNextUserBlockNode()
-
-
-_user_content_graph = Graph[_UserContentState, None, list[UserContent]](
-    nodes=(
-        FetchNextUserBlockNode,
-        ParseUserTextNode,
-        ParseUserImageUrlNode,
-        ParseUserInputAudioNode,
-        ParseUserFileNode,
-        ParseUserUnknownBlockNode,
-    ),
+_g: GraphBuilder[_UserContentState, None, None, list[UserContent]] = GraphBuilder(
+    state_type=_UserContentState,
+    output_type=list[UserContent],
 )
+
+
+@_g.step
+async def take_next(ctx: StepContext[_UserContentState, None, None]) -> Any:
+    """Router source: pop the next block and dispatch by ``type``."""
+    if not ctx.state.queue:
+        return _UserDone()
+    block_index, raw_block = ctx.state.queue.popleft()
+    if not isinstance(raw_block, dict):
+        return _UserNonDictBlock(block_index=block_index, raw=raw_block)
+    block: dict[str, Any] = raw_block
+    block_type = block.get("type", "")
+    if block_type == "text":
+        return _UserTextBlock(block_index=block_index, block=block)
+    if block_type == "image_url":
+        return _UserImageUrlBlock(block_index=block_index, block=block)
+    if block_type == "input_audio":
+        return _UserInputAudioBlock(block_index=block_index, block=block)
+    if block_type == "file":
+        return _UserFileBlock(block_index=block_index, block=block)
+    return _UserUnknownBlock(block_index=block_index, block=block)
+
+
+@_g.step
+async def parse_text(ctx: StepContext[_UserContentState, None, _UserTextBlock]) -> None:
+    """Append a text item to the accumulator."""
+    ctx.state.items.append(cast(str, ctx.inputs.block.get("text", "")))
+
+
+@_g.step
+async def parse_image_url(ctx: StepContext[_UserContentState, None, _UserImageUrlBlock]) -> None:
+    """Append an image item — ``data:`` URIs become :class:`BinaryContent`, HTTP(S) becomes :class:`ImageUrl`."""
+    payload = ctx.inputs
+    image_block = payload.block.get("image_url") or {}
+    url = ""
+    detail: str | None = None
+    if isinstance(image_block, dict):
+        url = cast(str, image_block.get("url", ""))
+        raw_detail = image_block.get("detail")
+        if isinstance(raw_detail, str):
+            detail = raw_detail
+    if detail is None:
+        outer_detail = payload.block.get("detail")
+        if isinstance(outer_detail, str):
+            detail = outer_detail
+    if detail is not None:
+        ctx.state.raw_extras[
+            f"image_detail:msg:{ctx.state.msg_index}:block:{payload.block_index}"
+        ] = detail
+
+    if url.startswith("data:"):
+        try:
+            ctx.state.items.append(cast(UserContent, BinaryContent.from_data_uri(url)))
+            return
+        except (ValueError, binascii.Error):
+            logger.warning("OpenAI load: malformed data URI; falling back to ImageUrl")
+    ctx.state.items.append(ImageUrl(url=url))
+
+
+@_g.step
+async def parse_input_audio(
+    ctx: StepContext[_UserContentState, None, _UserInputAudioBlock],
+) -> None:
+    """Append an :class:`BinaryContent` audio item from an ``input_audio`` block."""
+    audio = ctx.inputs.block.get("input_audio") or {}
+    data = ""
+    audio_format = "wav"
+    if isinstance(audio, dict):
+        data = cast(str, audio.get("data", ""))
+        audio_format = cast(str, audio.get("format", "wav"))
+    try:
+        data_bytes = base64.b64decode(data) if data else b""
+    except (ValueError, binascii.Error):
+        logger.warning("OpenAI load: malformed base64 audio payload; emitting empty bytes")
+        data_bytes = b""
+    ctx.state.items.append(BinaryContent(data=data_bytes, media_type=f"audio/{audio_format}"))
+
+
+@_g.step
+async def parse_file(ctx: StepContext[_UserContentState, None, _UserFileBlock]) -> None:
+    """Stash a ``file`` block in raw_extras and emit a JSON-string placeholder."""
+    payload = ctx.inputs
+    ctx.state.raw_extras[
+        f"file:msg:{ctx.state.msg_index}:block:{payload.block_index}"
+    ] = payload.block
+    ctx.state.items.append(json.dumps(payload.block))
+
+
+@_g.step
+async def parse_unknown(ctx: StepContext[_UserContentState, None, _UserUnknownBlock]) -> None:
+    """Stash an unknown block in raw_extras and emit a JSON-string placeholder."""
+    payload = ctx.inputs
+    ctx.state.raw_extras[
+        f"unknown_block:msg:{ctx.state.msg_index}:block:{payload.block_index}"
+    ] = payload.block
+    ctx.state.items.append(json.dumps(payload.block))
+
+
+@_g.step
+async def parse_non_dict(ctx: StepContext[_UserContentState, None, _UserNonDictBlock]) -> None:
+    """Append a string-coerced form of a non-dict block to the accumulator."""
+    ctx.state.items.append(str(ctx.inputs.raw))
+
+
+@_g.step
+async def emit_items(
+    ctx: StepContext[_UserContentState, None, _UserDone],
+) -> list[UserContent]:
+    """Terminal step — hand the accumulated content items to the end node."""
+    return ctx.state.items
+
+
+_g.add(
+    _g.edge_from(_g.start_node).to(take_next),
+    _g.edge_from(take_next).to(
+        _g.decision()
+        .branch(_g.match(_UserDone).to(emit_items))
+        .branch(_g.match(_UserTextBlock).to(parse_text))
+        .branch(_g.match(_UserImageUrlBlock).to(parse_image_url))
+        .branch(_g.match(_UserInputAudioBlock).to(parse_input_audio))
+        .branch(_g.match(_UserFileBlock).to(parse_file))
+        .branch(_g.match(_UserUnknownBlock).to(parse_unknown))
+        .branch(_g.match(_UserNonDictBlock).to(parse_non_dict))
+    ),
+    _g.edge_from(
+        parse_text,
+        parse_image_url,
+        parse_input_audio,
+        parse_file,
+        parse_unknown,
+        parse_non_dict,
+    ).to(take_next),
+    _g.edge_from(emit_items).to(_g.end_node),
+)
+
+
+_user_content_graph = _g.build()
 
 
 async def _load_user_content(
@@ -261,8 +296,7 @@ async def _load_user_content(
         msg_index=msg_index,
         raw_extras=raw_extras,
     )
-    result = await _user_content_graph.run(FetchNextUserBlockNode(), state=state)
-    items = result.output
+    items = await _user_content_graph.run(state=state)
     if not items:
         return None
     return items
@@ -489,11 +523,7 @@ def _parse_settings(body: dict[str, Any]) -> ModelSettings:
 
 
 async def load_openai_chat(body: dict[str, Any]) -> ParsedRequest:
-    """Parse an OpenAI Chat Completions request body into the IR via the FSM.
-
-    Drop-in replacement for
-    :func:`ccproxy.lightllm.openai_inbound.parse_openai_chat`.
-    """
+    """Parse an OpenAI Chat Completions request body into the IR via the FSM."""
     model = cast(str, body.get("model", ""))
     raw_messages: list[dict[str, Any]] = cast(
         list[dict[str, Any]], body.get("messages", []) or []
