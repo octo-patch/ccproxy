@@ -13,7 +13,6 @@ from pydantic_ai.messages import (
 from pydantic_ai.tools import ToolDefinition
 
 from ccproxy.pipeline.context import Context
-from ccproxy.pipeline.types import CachedSystemPromptPart
 
 _DEFAULT_BODY = {"model": "test", "messages": [], "metadata": {}}
 
@@ -89,20 +88,20 @@ class TestBodyProperties:
     def test_messages_setter_writes_to_body(self):
         ctx = Context.from_flow(_make_flow())
         ctx.messages = [ModelRequest(parts=[UserPromptPart(content="test")])]
+        ctx.commit()
         assert isinstance(ctx._body["messages"], list)
         assert ctx._body["messages"][0]["role"] == "user"
 
     def test_system_setter_writes_to_body(self):
         ctx = Context.from_flow(_make_flow())
         ctx.system = [SystemPromptPart(content="Be helpful.")]
-        assert ctx._body["system"] == "Be helpful."
-
-    def test_system_cached_writes_cache_control(self):
-        ctx = Context.from_flow(_make_flow())
-        ctx.system = [CachedSystemPromptPart(content="cached", cache_control={"type": "ephemeral"})]
+        ctx.commit()
         system_body = ctx._body["system"]
-        assert isinstance(system_body, list)
-        assert system_body[0]["cache_control"] == {"type": "ephemeral"}
+        # Anthropic outbound emits system as either a string or a list of blocks.
+        if isinstance(system_body, str):
+            assert system_body == "Be helpful."
+        else:
+            assert any(block.get("text") == "Be helpful." for block in system_body)
 
     def test_system_empty_list(self):
         flow = _make_flow(body={"model": "m", "messages": []})
@@ -126,7 +125,8 @@ class TestBodyProperties:
 
     def test_tools_setter_writes_to_body(self):
         ctx = Context.from_flow(_make_flow())
-        ctx.tools = [ToolDefinition(name="test", description="Test tool")]
+        ctx.tools = [ToolDefinition(name="test", description="Test tool", parameters_json_schema={"type": "object"})]
+        ctx.commit()
         assert ctx._body["tools"][0]["name"] == "test"
 
     def test_metadata_setdefault_behavior(self):

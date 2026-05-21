@@ -11,24 +11,47 @@ from __future__ import annotations
 import asyncio
 import json
 from dataclasses import dataclass, field
+from dataclasses import replace as _dataclass_replace
 from typing import TYPE_CHECKING, Any
 
 from pydantic_ai.messages import ModelMessage, SystemPromptPart
 from pydantic_ai.tools import ToolDefinition
 
 from ccproxy.lightllm.parsed import ListenerFormat, ParsedRequest
-from ccproxy.pipeline.wire import (
-    parse_messages,
-    parse_system,
-    parse_tools,
-    serialize_messages,
-    serialize_system,
-    serialize_tools,
-)
 
 if TYPE_CHECKING:
     from mitmproxy import http
     from mitmproxy.http import HTTPFlow
+
+
+def _replace_system_parts(
+    messages: list[ModelMessage],
+    system_parts: list[SystemPromptPart],
+) -> list[ModelMessage]:
+    """Return ``messages`` with all ``SystemPromptPart``s replaced by ``system_parts``.
+
+    System parts are stripped from every ``ModelRequest`` and the new
+    parts are prepended to the first ``ModelRequest``. If no
+    ``ModelRequest`` exists, one is created at the front.
+    """
+    # deferred: import inside function to avoid a top-level cycle if dataclasses change
+    from pydantic_ai.messages import ModelRequest
+
+    result: list[ModelMessage] = []
+    placed = False
+    for msg in messages:
+        if isinstance(msg, ModelRequest):
+            non_system = [p for p in msg.parts if not isinstance(p, SystemPromptPart)]
+            if not placed:
+                result.append(_dataclass_replace(msg, parts=[*system_parts, *non_system]))
+                placed = True
+            else:
+                result.append(_dataclass_replace(msg, parts=non_system))
+        else:
+            result.append(msg)
+    if not placed and system_parts:
+        result.insert(0, ModelRequest(parts=list(system_parts)))
+    return result
 
 
 def _select_listener_format(req: http.Request | None) -> ListenerFormat:
@@ -155,35 +178,54 @@ class Context:
     @property
     def messages(self) -> list[ModelMessage]:
         if self._cached_messages is None:
-            self._cached_messages = parse_messages(self._body.get("messages", []))
+            if self._listener_format is ListenerFormat.UNKNOWN:
+                self._cached_messages = []
+            else:
+                self._cached_messages = self.parse_sync().messages
         return self._cached_messages
 
     @messages.setter
     def messages(self, value: list[ModelMessage]) -> None:
         self._cached_messages = value
-        self._body["messages"] = serialize_messages(value)
+        if self._parsed is not None:
+            self._parsed = _dataclass_replace(self._parsed, messages=value)
+        # _body re-serialization happens at commit() via the outbound renderer.
 
     @property
     def system(self) -> list[SystemPromptPart]:
         if self._cached_system is None:
-            self._cached_system = parse_system(self._body.get("system"))
+            if self._listener_format is ListenerFormat.UNKNOWN:
+                self._cached_system = []
+            else:
+                # SystemPromptParts live inside the ModelRequest parts of the IR.
+                # Extract them so hooks that read ctx.system see the canonical view.
+                self._cached_system = [
+                    part
+                    for msg in self.parse_sync().messages
+                    if hasattr(msg, "parts")
+                    for part in msg.parts
+                    if isinstance(part, SystemPromptPart)
+                ]
         return self._cached_system
 
     @system.setter
     def system(self, value: list[SystemPromptPart]) -> None:
         self._cached_system = value
-        self._body["system"] = serialize_system(value)
+        # No direct write-back to _body — commit() re-renders via outbound.
 
     @property
     def tools(self) -> list[ToolDefinition]:
         if self._cached_tools is None:
-            self._cached_tools = parse_tools(self._body.get("tools", []))
+            if self._listener_format is ListenerFormat.UNKNOWN:
+                self._cached_tools = []
+            else:
+                self._cached_tools = list(self.parse_sync().request_parameters.function_tools)
         return self._cached_tools
 
     @tools.setter
     def tools(self, value: list[ToolDefinition]) -> None:
         self._cached_tools = value
-        self._body["tools"] = serialize_tools(value)
+        # No direct write-back to _body — commit() re-renders via outbound.
 
     @property
     def model(self) -> str:
@@ -274,13 +316,60 @@ class Context:
 
     # --- Commit ---
 
+    def _flush_parsed_to_body(self) -> None:
+        """Re-render mutated typed properties back into ``self._body``.
+
+        Builds (or refreshes) ``self._parsed`` from the cached typed
+        properties, then calls the listener-format outbound renderer to
+        produce wire bytes, and replaces ``self._body`` with the result.
+
+        UNKNOWN listener format is a no-op — there's no IR roundtrip
+        path, and the typed-property getters return ``[]`` for that case
+        so there's nothing to flush.
+        """
+        if self._listener_format is ListenerFormat.UNKNOWN:
+            return
+
+        from ccproxy.lightllm.outbound import render_outbound_sync
+
+        # Ensure we have a base ParsedRequest to mutate.
+        parsed = self.parse_sync()
+
+        if self._cached_messages is not None or self._cached_system is not None:
+            # System parts live INSIDE ModelRequest.parts in the IR — when the
+            # caller mutated ``ctx.system``, rebuild messages so the first
+            # ModelRequest carries the new system parts and any prior system
+            # parts are stripped.
+            messages = list(self._cached_messages if self._cached_messages is not None else parsed.messages)
+            if self._cached_system is not None:
+                messages = _replace_system_parts(messages, self._cached_system)
+            parsed = _dataclass_replace(parsed, messages=messages)
+
+        if self._cached_tools is not None:
+            new_params = _dataclass_replace(parsed.request_parameters, function_tools=list(self._cached_tools))
+            parsed = _dataclass_replace(parsed, request_parameters=new_params)
+
+        self._parsed = parsed
+        # ``provider`` here is the LISTENER format name — the outbound dispatcher
+        # routes it to the matching renderer (anthropic/openai).
+        listener_provider = "anthropic" if self._listener_format is ListenerFormat.ANTHROPIC_MESSAGES else "openai"
+        rendered = render_outbound_sync(parsed, provider=listener_provider)
+        self._body = json.loads(rendered)
+
     def commit(self) -> None:
         """Flush body mutations back to the underlying request content.
+
+        If a typed property setter mutated ``self._parsed``, re-render the
+        IR back to listener-wire bytes via the matching outbound renderer
+        and refresh ``self._body`` from that. Raw ``_body`` mutations (the
+        shaping inner-DAG, ``extract_pplx_files``) are picked up directly.
 
         Strips empty ``metadata`` dicts injected by property access —
         upstream APIs reject unknown fields (e.g. Google: "Unknown name
         metadata").
         """
+        if self._cached_messages is not None or self._cached_system is not None or self._cached_tools is not None:
+            self._flush_parsed_to_body()
         body = self._body
         if "metadata" in body and isinstance(body["metadata"], dict) and not body["metadata"]:
             del body["metadata"]
