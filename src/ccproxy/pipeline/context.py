@@ -24,6 +24,35 @@ if TYPE_CHECKING:
     from mitmproxy.http import HTTPFlow
 
 
+def _run_coro_sync(coro: Any) -> Any:
+    """Drive an awaitable to completion from any sync context.
+
+    If no event loop is running on the current thread, use a private
+    event loop. If a loop is already running, dispatch to a worker
+    thread that owns its own private loop — necessary because asyncio
+    forbids nested ``run_until_complete`` calls in the same thread.
+    """
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(coro)
+        finally:
+            loop.close()
+    import concurrent.futures
+
+    def _worker() -> Any:
+        worker_loop = asyncio.new_event_loop()
+        try:
+            return worker_loop.run_until_complete(coro)
+        finally:
+            worker_loop.close()
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        return pool.submit(_worker).result()
+
+
 def _replace_system_parts(
     messages: list[ModelMessage],
     system_parts: list[SystemPromptPart],
@@ -132,19 +161,20 @@ class Context:
     def parse_sync(self) -> ParsedRequest:
         """Sync wrapper around :meth:`ensure_parsed`.
 
-        Drives the async parser on a private event loop so sync callers
-        (xepor route handlers, mitmproxy stream callbacks) can pull the
-        IR view without contaminating the surrounding async runtime.
-        Safe because the inbound parsers raise ``CaptureSentinel`` before
-        any actual I/O, so the loop never blocks on the network.
+        Drives the async parser to completion so sync callers (xepor
+        route handlers, mitmproxy stream callbacks, sync hook bodies)
+        can pull the IR view. When invoked from outside any event loop,
+        a private loop is used. When invoked from inside a running loop
+        (e.g. a hook running on mitmproxy's asyncio loop), the work is
+        dispatched to a worker thread so we don't nest loops.
+
+        Safe because the inbound parsers have no real I/O — they raise
+        no exceptions other than ValidationError, so the work is bounded.
         """
         if self._parsed is not None:
             return self._parsed
-        loop = asyncio.new_event_loop()
-        try:
-            return loop.run_until_complete(self.ensure_parsed())
-        finally:
-            loop.close()
+        parsed: ParsedRequest = _run_coro_sync(self.ensure_parsed())
+        return parsed
 
     @classmethod
     def from_flow(cls, flow: HTTPFlow) -> Context:

@@ -56,13 +56,30 @@ async def render_outbound(parsed: ParsedRequest, *, provider: str) -> bytes:
 def render_outbound_sync(parsed: ParsedRequest, *, provider: str) -> bytes:
     """Sync facade over :func:`render_outbound`.
 
-    Drives the async renderer on a private event loop so the inspector's
-    sync route handler can call it. Safe because each renderer raises
-    ``CaptureSentinel`` before any real I/O — the loop never blocks on
-    the network.
+    Drives the async renderer to completion. From outside any event loop
+    we run on a private loop on the calling thread. From inside a
+    running loop (e.g. a sync hook body invoked by mitmproxy's async
+    runtime) we dispatch to a worker thread that owns its own loop —
+    asyncio forbids nested ``run_until_complete`` calls in the same
+    thread. Safe because the renderers raise ``CaptureSentinel`` before
+    any real I/O.
     """
-    loop = asyncio.new_event_loop()
     try:
-        return loop.run_until_complete(render_outbound(parsed, provider=provider))
-    finally:
-        loop.close()
+        asyncio.get_running_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(render_outbound(parsed, provider=provider))
+        finally:
+            loop.close()
+    import concurrent.futures
+
+    def _worker() -> bytes:
+        worker_loop = asyncio.new_event_loop()
+        try:
+            return worker_loop.run_until_complete(render_outbound(parsed, provider=provider))
+        finally:
+            worker_loop.close()
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        return pool.submit(_worker).result()
