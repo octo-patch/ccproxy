@@ -24,15 +24,15 @@ from __future__ import annotations
 import json
 import logging
 import re
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from glom import glom
-from litellm.types.utils import LlmProviders
 from mitmproxy.connection import Server
 from mitmproxy.proxy.mode_specs import ReverseMode
 
 from ccproxy.config import Provider, TransformOverride, get_config
 from ccproxy.flows.store import InspectorMeta, TransformMeta
+from ccproxy.lightllm.graph import _ANTHROPIC_COMPATIBLE
 
 if TYPE_CHECKING:
     from mitmproxy.http import HTTPFlow
@@ -54,13 +54,7 @@ _FORMAT_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
 )
 """URL-prefix patterns ccproxy recognises as a known wire format."""
 
-_GEMINI_FORMATS: frozenset[str] = frozenset(
-    {
-        LlmProviders.GEMINI.value,
-        LlmProviders.VERTEX_AI.value,
-        LlmProviders.VERTEX_AI_BETA.value,
-    }
-)
+_GEMINI_FORMATS: frozenset[str] = frozenset({"gemini", "vertex_ai", "vertex_ai_beta"})
 
 
 def _openai_error(message: str, *, error_type: str, code: int) -> bytes:
@@ -151,7 +145,7 @@ def _record_transform_meta(
     model: str,
     body: dict[str, object],
     is_streaming: bool,
-    mode: str,
+    mode: Literal["redirect", "transform"],
 ) -> None:
     record = flow.metadata.get(InspectorMeta.RECORD)
     if record is None:
@@ -163,7 +157,7 @@ def _record_transform_meta(
         model=model,
         request_data={**body},
         is_streaming=is_streaming,
-        mode=mode,  # type: ignore[arg-type]
+        mode=mode,
         listener_format=listener_format,
         request_parameters=request_parameters,
     )
@@ -240,35 +234,60 @@ def _handle_redirect(
     logger.info("redirect: → %s %s%s", provider_str, host, path)
 
 
-def _resolve_upstream_url_and_headers(
+def _action_for_transform(provider: str, *, is_streaming: bool) -> str | None:
+    """Resolve the ``{action}`` URL template substitution for a transform target.
+
+    Gemini-family upstreams template the SDK action into their path
+    (``:streamGenerateContent`` vs ``:generateContent``); other providers
+    have no ``{action}`` slot so the resolved value is ``None`` (the path
+    template's ``_apply_path_template`` no-ops in that case).
+    """
+    if provider in _GEMINI_FORMATS:
+        return "streamGenerateContent" if is_streaming else "generateContent"
+    return None
+
+
+def _build_upstream_url_and_headers(
     *,
+    target: Provider | TransformOverride,
+    bound: Provider | None,
     model: str,
     provider: str,
-    messages: list[object],
-    optional_params: dict[str, object],
-    api_key: str | None,
     is_streaming: bool,
 ) -> tuple[str, dict[str, str]]:
-    """Return ``(url, headers)`` for a transform-mode upstream call.
+    """Build the upstream ``(url, headers)`` for a transform-mode dispatch.
 
-    Phase 8 transitional shim: delegates to LiteLLM's ``transform_to_provider``
-    for URL + headers only — the body it returns is discarded because
-    :func:`render_outbound_sync` now owns body generation. Phase 9 deletes
-    this once the Gemini cachedContents carve-out lands on the new
-    renderer, at which point a pure ccproxy URL/header builder replaces
-    the LiteLLM dependency.
+    Pulls host/path from the resolved target (``Provider`` or
+    ``TransformOverride`` with optional ``dest_host`` / ``dest_path`` overrides
+    falling back to the bound Provider). Auth headers are already stamped by
+    the ``forward_oauth`` inbound hook — this builder only adds the
+    Anthropic-compat ``anthropic-version`` floor.
     """
-    # deferred: heavy LiteLLM transform chain
-    from ccproxy.lightllm import transform_to_provider
+    action = _action_for_transform(provider, is_streaming=is_streaming)
 
-    url, headers, _body = transform_to_provider(
-        model=model,
-        provider=provider,
-        messages=messages,  # type: ignore[arg-type]
-        optional_params=optional_params,
-        api_key=api_key,
-        stream=is_streaming,
-    )
+    host: str
+    path_template: str
+    if isinstance(target, Provider):
+        host = target.host
+        path_template = target.path
+    else:
+        resolved_host = target.dest_host or (bound.host if bound is not None else None)
+        if resolved_host is None:
+            raise ValueError(
+                "transform override missing dest_host and no resolvable dest_provider",
+            )
+        host = resolved_host
+        path_template = target.dest_path or (bound.path if bound is not None else "/")
+
+    path = _apply_path_template(path_template, model=model, action=action)
+    url = f"https://{host}{path}"
+
+    headers: dict[str, str] = {}
+    if provider in _ANTHROPIC_COMPATIBLE:
+        # Defensive floor for cross-format flows targeting an Anthropic upstream
+        # where no Anthropic shape replay runs. forward_oauth has already stamped
+        # auth; the shape hook adds the canonical Claude headers when present.
+        headers["anthropic-version"] = "2023-06-01"
     return url, headers
 
 
@@ -277,27 +296,29 @@ def _handle_transform(
     target: Provider | TransformOverride,
     body: dict[str, object],
 ) -> None:
-    """Cross-format transform: render the body via ``render_outbound_sync`` and
+    """Cross-format transform: render the body via ``dispatch_dump_sync`` and
     rewrite the destination.
 
-    Gemini family providers stay on the legacy lightllm dispatch path —
-    ``cachedContents`` resolution hasn't been folded into the new renderer
-    yet. Everything else routes through pydantic-ai's IR via
-    :class:`~ccproxy.pipeline.context.Context.parse_sync` + the per-provider
-    ``render_outbound_*`` chain.
+    All providers (Anthropic-compatible, OpenAI, Gemini-family, Perplexity Pro)
+    route through pydantic-ai's IR via :class:`~ccproxy.pipeline.context.Context.parse_sync`
+    + :func:`dispatch_dump_sync`. URL + headers come from the resolved
+    :class:`Provider` config (host/path with ``{model}`` / ``{action}`` templating)
+    or the :class:`TransformOverride` overrides.
     """
-    from urllib.parse import urlparse
+    # deferred: avoid pulling pydantic-ai at module import time
+    import dataclasses
+
+    from ccproxy.lightllm.graph import dispatch_dump_sync
+    from ccproxy.pipeline.context import Context
 
     is_streaming = bool(glom(body, "stream", default=False))
     config = get_config()
 
+    bound: Provider | None
     if isinstance(target, Provider):
         provider_str = target.provider
-        oauth_provider = flow.metadata.get("ccproxy.oauth_provider")
-        api_key = config.resolve_oauth_token(oauth_provider) if oauth_provider else None
         model = _model_for_routing(body, flow.request.path)
-        vertex_project: str | None = None
-        vertex_location: str | None = None
+        bound = target
     else:
         if target.dest_provider is None:
             logger.error("transform override missing dest_provider; passthrough")
@@ -310,67 +331,27 @@ def _handle_transform(
             )
             return
         provider_str = bound.provider
-        api_key = config.resolve_oauth_token(target.dest_provider)
         model = target.dest_model or _model_for_routing(body, flow.request.path)
-        vertex_project = target.dest_vertex_project
-        vertex_location = target.dest_vertex_location
 
-    messages: list[object] = list(glom(body, "messages", default=[]))  # type: ignore[arg-type]
-    optional_params = {k: v for k, v in body.items() if k != "messages"}
+    ctx = Context.from_flow(flow)
+    flow.metadata.setdefault("ccproxy.listener_format", ctx._listener_format.value)
+    parsed = ctx.parse_sync()
+    if model and model != parsed.model:
+        parsed = dataclasses.replace(parsed, model=model)
+    flow.metadata["ccproxy.parsed_request_parameters"] = parsed.request_parameters
+    new_body = dispatch_dump_sync(parsed, provider=provider_str)
 
-    if provider_str in _GEMINI_FORMATS:
-        # Gemini context_cache path still uses lightllm — refactor pending.
-        # TODO(phase9): fold cachedContents resolution into outbound_google.py
-        # and route Gemini through render_outbound_sync alongside other providers.
-        # deferred: heavy LiteLLM transform chain
-        from ccproxy.lightllm import transform_to_provider
-        from ccproxy.lightllm.context_cache import resolve_cached_content
-
-        cached_content: str | None = None
-        try:
-            messages, optional_params, cached_content = resolve_cached_content(
-                messages=messages,  # type: ignore[arg-type]
-                model=model,
-                provider=provider_str,  # type: ignore[arg-type]
-                optional_params=optional_params,
-                api_key=api_key,
-                vertex_project=vertex_project,
-                vertex_location=vertex_location,
-            )
-        except Exception:
-            logger.warning("Context cache resolution failed, proceeding without", exc_info=True)
-
-        url, headers, new_body = transform_to_provider(
+    try:
+        url, headers = _build_upstream_url_and_headers(
+            target=target,
+            bound=bound,
             model=model,
             provider=provider_str,
-            messages=messages,  # type: ignore[arg-type]
-            optional_params=optional_params,
-            api_key=api_key,
-            stream=is_streaming,
-            cached_content=cached_content,
-        )
-    else:
-        # deferred: avoid pulling pydantic-ai at module import time
-        import dataclasses
-
-        from ccproxy.lightllm.graph import dispatch_dump_sync
-        from ccproxy.pipeline.context import Context
-
-        ctx = Context.from_flow(flow)
-        flow.metadata.setdefault("ccproxy.listener_format", ctx._listener_format.value)
-        parsed = ctx.parse_sync()
-        if model and model != parsed.model:
-            parsed = dataclasses.replace(parsed, model=model)
-        flow.metadata["ccproxy.parsed_request_parameters"] = parsed.request_parameters
-        new_body = dispatch_dump_sync(parsed, provider=provider_str)
-        url, headers = _resolve_upstream_url_and_headers(
-            model=model,
-            provider=provider_str,
-            messages=messages,
-            optional_params=optional_params,
-            api_key=api_key,
             is_streaming=is_streaming,
         )
+    except ValueError as exc:
+        logger.error("%s; passthrough", exc)
+        return
 
     _record_transform_meta(
         flow,
@@ -380,6 +361,8 @@ def _handle_transform(
         is_streaming=is_streaming,
         mode="transform",
     )
+
+    from urllib.parse import urlparse
 
     parsed_url = urlparse(url)
     host = parsed_url.hostname or flow.request.host
@@ -391,11 +374,6 @@ def _handle_transform(
     flow.server_conn = Server(address=(host, port))
     for k, v in headers.items():
         flow.request.headers[k] = v
-    # Cookie-auth providers (Perplexity Pro) ship without an Authorization
-    # header. forward_oauth has already stamped one with the real token —
-    # strip it so the upstream doesn't see two competing auth signals.
-    if any(k.lower() == "cookie" for k in headers) and not any(k.lower() == "authorization" for k in headers):
-        flow.request.headers.pop("Authorization", None)
     flow.request.content = new_body
 
     incoming_model = str(glom(body, "model", default="?"))
@@ -411,8 +389,8 @@ def _handle_transform(
 def register_transform_routes(router: InspectorRouter) -> None:
     from ccproxy.inspector.router import RouteType
 
-    @router.route("/{path}", rtype=RouteType.REQUEST, catch_error=False)
-    def handle_transform(flow: HTTPFlow, **kwargs: object) -> None:  # pyright: ignore[reportUnusedFunction]
+    @router.route("/{path}", rtype=RouteType.REQUEST, catch_error=False)  # ty: ignore[invalid-argument-type]
+    def handle_transform(flow: HTTPFlow, **_kwargs: object) -> None:  # pyright: ignore[reportUnusedFunction]
         if flow.metadata.get(InspectorMeta.DIRECTION) != "inbound":
             return
 
@@ -475,8 +453,8 @@ def register_transform_routes(router: InspectorRouter) -> None:
                 flow.request.path,
             )
 
-    @router.route("/{path}", rtype=RouteType.RESPONSE, catch_error=False)
-    def handle_transform_response(flow: HTTPFlow, **kwargs: object) -> None:  # pyright: ignore[reportUnusedFunction]
+    @router.route("/{path}", rtype=RouteType.RESPONSE, catch_error=False)  # ty: ignore[invalid-argument-type]
+    def handle_transform_response(flow: HTTPFlow, **_kwargs: object) -> None:  # pyright: ignore[reportUnusedFunction]
         record = flow.metadata.get(InspectorMeta.RECORD)
         if record is None or getattr(record, "transform", None) is None:
             return
@@ -490,38 +468,41 @@ def register_transform_routes(router: InspectorRouter) -> None:
             return
 
         try:
-            # deferred: heavy LiteLLM transform chain
-            from ccproxy.lightllm import MitmResponseShim, transform_to_openai
+            # deferred: heavy FSM intake/render machinery
+            from ccproxy.lightllm.graph.buffered import (
+                transform_buffered_response_sync,
+            )
+            from ccproxy.lightllm.parsed import ListenerFormat
 
-            # GeminiAddon.response (which strips cloudcode-pa's {response: {...}}
-            # envelope) runs AFTER this handler in the addon chain, so the body
-            # is still wrapped at this point. Unwrap inline for Gemini-family
-            # providers; unwrap_buffered is idempotent.
-            if meta.provider in _GEMINI_FORMATS:
-                from ccproxy.hooks.gemini_envelope import unwrap_buffered
+            listener_value = meta.listener_format or "unknown"
+            try:
+                listener_enum = ListenerFormat(listener_value)
+            except ValueError:
+                listener_enum = ListenerFormat.OPENAI_CHAT
 
-                flow.response.content = unwrap_buffered(flow.response.content or b"")
+            request_params = meta.request_parameters
+            if request_params is None:
+                from pydantic_ai.models import ModelRequestParameters
 
-            shim = MitmResponseShim(flow.response)
-            messages = meta.request_data.get("messages", [])
-            request_data = {k: v for k, v in meta.request_data.items() if k != "messages"}
+                request_params = ModelRequestParameters()
 
-            model_response = transform_to_openai(
+            new_body = transform_buffered_response_sync(
+                raw_bytes=flow.response.content or b"",
+                upstream_provider=meta.provider,
+                listener_format=listener_enum,
                 model=meta.model,
-                provider=meta.provider,
-                raw_response=shim,
-                request_data=request_data,
-                messages=messages,
+                request_params=request_params,
             )
 
-            flow.response.content = json.dumps(model_response.model_dump()).encode()  # type: ignore[no-untyped-call]
+            flow.response.content = new_body
             flow.response.headers["content-type"] = "application/json"
             flow.response.headers.pop("content-encoding", None)  # type: ignore[no-untyped-call]
 
             logger.info(
-                "lightllm response transform: %s %s → OpenAI format",
+                "lightllm response transform: %s %s → %s",
                 meta.provider,
                 meta.model,
+                listener_enum.value,
             )
         except Exception:
             logger.warning("Response transform failed, passing through raw response", exc_info=True)

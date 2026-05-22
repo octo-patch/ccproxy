@@ -1,10 +1,18 @@
-"""Tests for the IR -> OpenAI Chat Completion SSE renderer."""
+"""Tests for the IR -> OpenAI Chat Completion SSE renderer FSM.
+
+The production FSMs are async; ``_OpenAIRenderFSMAdapter`` /
+``_OpenAIIntakeFSMAdapter`` wrap them with one-fresh-loop-per-call sync
+surfaces (the persistent-loop bridge lives in :class:`SSEPipeline` for
+production).
+"""
 
 from __future__ import annotations
 
+import asyncio
 import json
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Protocol
 
 import pytest
 from pydantic_ai.messages import (
@@ -22,23 +30,96 @@ from pydantic_ai.messages import (
 )
 from pydantic_ai.models import ModelRequestParameters
 
-from ccproxy.lightllm.response.intake_openai import OpenAIResponseIntake
-from ccproxy.lightllm.response.render_openai import OpenAIResponseRender
+from ccproxy.lightllm.graph.openai_intake import OpenAIResponseIntakeFSM
+from ccproxy.lightllm.graph.openai_render import OpenAIResponseRenderFSM
+
+# ---------------------------------------------------------------------------
+# Adapters
+# ---------------------------------------------------------------------------
+
+
+class _RenderLike(Protocol):
+    """Sync-callable surface around the async FSM render."""
+
+    name: str
+
+    def render(self, event: ModelResponseStreamEvent) -> bytes: ...
+
+    def close(self) -> bytes: ...
+
+
+class _OpenAIRenderFSMAdapter:
+    """Sync-facing adapter around the async :class:`OpenAIResponseRenderFSM`.
+
+    The production FSM is async (the persistent-loop bridge lives in
+    :class:`SSEPipeline`). For tests, one fresh asyncio loop per
+    ``render`` / ``close`` call is fine — tests aren't on a hot path.
+    """
+
+    name = "openai_chat"
+
+    def __init__(self, *, model: str = "gpt-4o") -> None:
+        self._fsm = OpenAIResponseRenderFSM(model=model)
+
+    def render(self, event: ModelResponseStreamEvent) -> bytes:
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(self._fsm.render(event))
+        finally:
+            loop.close()
+
+    def close(self) -> bytes:
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(self._fsm.close())
+        finally:
+            loop.close()
+
+
+_RenderFactory = Callable[..., _RenderLike]
+
+
+@pytest.fixture
+def render_factory() -> _RenderFactory:
+    """Factory for the FSM render wrapped in a sync adapter."""
+
+    def _make(*, model: str = "gpt-4o") -> _RenderLike:
+        return _OpenAIRenderFSMAdapter(model=model)
+
+    return _make
+
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
 
-def _make_render(*, model: str = "gpt-4o") -> OpenAIResponseRender:
-    return OpenAIResponseRender(model=model)
+def _make_intake(*, model: str = "gpt-4o") -> Any:
+    return _OpenAIIntakeFSMAdapter(model=model)
 
 
-def _make_intake(*, model: str = "gpt-4o") -> OpenAIResponseIntake:
-    return OpenAIResponseIntake(model=model, request_params=ModelRequestParameters())
+class _OpenAIIntakeFSMAdapter:
+    """Sync-facing adapter around the async :class:`OpenAIResponseIntakeFSM`."""
+
+    def __init__(self, *, model: str = "gpt-4o") -> None:
+        self._fsm = OpenAIResponseIntakeFSM(model=model, request_params=ModelRequestParameters())
+
+    def feed(self, data: bytes) -> list[ModelResponseStreamEvent]:
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(self._fsm.feed(data))
+        finally:
+            loop.close()
+
+    def close(self) -> list[ModelResponseStreamEvent]:
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(self._fsm.close())
+        finally:
+            loop.close()
 
 
-def _render_all(render: OpenAIResponseRender, events: list[ModelResponseStreamEvent]) -> bytes:
+def _render_all(render: _RenderLike, events: list[ModelResponseStreamEvent]) -> bytes:
     out = bytearray()
     for event in events:
         out += render.render(event)
@@ -84,8 +165,8 @@ def _ends_with_done(data: bytes) -> bool:
 
 
 class TestEmptyStream:
-    def test_close_alone_emits_finish_and_done(self) -> None:
-        render = _make_render()
+    def test_close_alone_emits_finish_and_done(self, render_factory: _RenderFactory) -> None:
+        render = render_factory()
         out = render.close()
         assert _ends_with_done(out)
         frames = _parse_frames(out)
@@ -95,9 +176,9 @@ class TestEmptyStream:
         assert choices[0]["finish_reason"] == "stop"
         assert choices[0]["delta"] == {}
 
-    def test_close_chunk_shape_matches_openai_schema(self) -> None:
+    def test_close_chunk_shape_matches_openai_schema(self, render_factory: _RenderFactory) -> None:
         """The final chunk must carry id/object/created/model/choices."""
-        render = _make_render(model="gpt-4o")
+        render = render_factory(model="gpt-4o")
         frames = _parse_frames(render.close())
         chunk = frames[0]
         assert chunk["object"] == "chat.completion.chunk"
@@ -113,8 +194,8 @@ class TestEmptyStream:
 
 
 class TestSingleTextReply:
-    def test_role_then_content_then_finish_then_done(self) -> None:
-        render = _make_render()
+    def test_role_then_content_then_finish_then_done(self, render_factory: _RenderFactory) -> None:
+        render = render_factory()
         text_part = TextPart(content="Hello, world")
         events: list[ModelResponseStreamEvent] = [PartStartEvent(index=0, part=text_part)]
         out = _render_all(render, events)
@@ -128,9 +209,9 @@ class TestSingleTextReply:
         # Default finish_reason is stop
         assert _finish_reasons(out) == [None, None, "stop"]
 
-    def test_empty_textpart_skips_content_chunk(self) -> None:
+    def test_empty_textpart_skips_content_chunk(self, render_factory: _RenderFactory) -> None:
         """A ``TextPart('')`` only emits the role chunk; the wire skips empty content."""
-        render = _make_render()
+        render = render_factory()
         events: list[ModelResponseStreamEvent] = [PartStartEvent(index=0, part=TextPart(content=""))]
         out = _render_all(render, events)
         deltas = _deltas(out)
@@ -144,9 +225,9 @@ class TestSingleTextReply:
 
 
 class TestMultiChunkText:
-    def test_each_delta_emits_its_own_chunk(self) -> None:
+    def test_each_delta_emits_its_own_chunk(self, render_factory: _RenderFactory) -> None:
         """Three text deltas produce three content chunks plus the role+finish."""
-        render = _make_render()
+        render = render_factory()
         events: list[ModelResponseStreamEvent] = [
             PartStartEvent(index=0, part=TextPart(content="abc")),
             PartDeltaEvent(index=0, delta=TextPartDelta(content_delta="def")),
@@ -162,9 +243,9 @@ class TestMultiChunkText:
             {},
         ]
 
-    def test_delta_before_start_still_emits_role(self) -> None:
+    def test_delta_before_start_still_emits_role(self, render_factory: _RenderFactory) -> None:
         """A misbehaving intake that yields a delta with no prior start still gets a well-formed assistant."""
-        render = _make_render()
+        render = render_factory()
         events: list[ModelResponseStreamEvent] = [
             PartDeltaEvent(index=0, delta=TextPartDelta(content_delta="naked")),
         ]
@@ -180,8 +261,8 @@ class TestMultiChunkText:
 
 
 class TestSingleToolCall:
-    def test_part_start_emits_tool_call_envelope(self) -> None:
-        render = _make_render()
+    def test_part_start_emits_tool_call_envelope(self, render_factory: _RenderFactory) -> None:
+        render = render_factory()
         tool_part = ToolCallPart(
             tool_name="get_weather",
             args={"location": "SF"},
@@ -208,9 +289,9 @@ class TestSingleToolCall:
         # Finish reason is tool_calls
         assert _finish_reasons(out)[-1] == "tool_calls"
 
-    def test_part_start_then_delta_appends_arguments(self) -> None:
+    def test_part_start_then_delta_appends_arguments(self, render_factory: _RenderFactory) -> None:
         """First chunk carries id+name, second chunk delivers partial arguments."""
-        render = _make_render()
+        render = render_factory()
         tool_part = ToolCallPart(tool_name="get_weather", args="", tool_call_id="call_abc")
         events: list[ModelResponseStreamEvent] = [
             PartStartEvent(index=0, part=tool_part),
@@ -224,9 +305,9 @@ class TestSingleToolCall:
         assert deltas[2]["tool_calls"] == [{"index": 0, "function": {"arguments": '{"loca'}}]
         assert deltas[3]["tool_calls"] == [{"index": 0, "function": {"arguments": 'tion":"SF"}'}}]
 
-    def test_args_dict_serialized_to_json_string(self) -> None:
+    def test_args_dict_serialized_to_json_string(self, render_factory: _RenderFactory) -> None:
         """A ``ToolCallPart.args`` dict must be JSON-encoded on the wire."""
-        render = _make_render()
+        render = render_factory()
         tool_part = ToolCallPart(
             tool_name="add",
             args={"x": 1, "y": 2},
@@ -241,9 +322,9 @@ class TestSingleToolCall:
         # Round-trip the JSON to ignore key ordering
         assert json.loads(args_str) == {"x": 1, "y": 2}
 
-    def test_tool_call_delta_dict_args_serialized(self) -> None:
+    def test_tool_call_delta_dict_args_serialized(self, render_factory: _RenderFactory) -> None:
         """A delta whose ``args_delta`` is a dict gets serialized to JSON."""
-        render = _make_render()
+        render = render_factory()
         tool_part = ToolCallPart(tool_name="get", tool_call_id="call_x")
         events: list[ModelResponseStreamEvent] = [
             PartStartEvent(index=0, part=tool_part),
@@ -261,8 +342,8 @@ class TestSingleToolCall:
 
 
 class TestMultipleToolCalls:
-    def test_two_distinct_part_indices_get_unique_tool_call_indices(self) -> None:
-        render = _make_render()
+    def test_two_distinct_part_indices_get_unique_tool_call_indices(self, render_factory: _RenderFactory) -> None:
+        render = render_factory()
         events: list[ModelResponseStreamEvent] = [
             PartStartEvent(index=0, part=ToolCallPart(tool_name="fn_a", tool_call_id="call_0")),
             PartStartEvent(index=1, part=ToolCallPart(tool_name="fn_b", tool_call_id="call_1")),
@@ -279,9 +360,9 @@ class TestMultipleToolCalls:
         assert tc_a[0]["id"] == "call_0"
         assert tc_b[0]["id"] == "call_1"
 
-    def test_interleaved_deltas_route_to_correct_index(self) -> None:
+    def test_interleaved_deltas_route_to_correct_index(self, render_factory: _RenderFactory) -> None:
         """Deltas on IR part 0 and IR part 1 must land in OpenAI tool_calls 0 and 1 respectively."""
-        render = _make_render()
+        render = render_factory()
         events: list[ModelResponseStreamEvent] = [
             PartStartEvent(index=0, part=ToolCallPart(tool_name="fn_a", tool_call_id="call_0")),
             PartStartEvent(index=1, part=ToolCallPart(tool_name="fn_b", tool_call_id="call_1")),
@@ -298,9 +379,9 @@ class TestMultipleToolCalls:
         assert deltas[5]["tool_calls"] == [{"index": 0, "function": {"arguments": "1}"}}]
         assert deltas[6]["tool_calls"] == [{"index": 1, "function": {"arguments": "2}"}}]
 
-    def test_tool_call_delta_without_prior_start_allocates_slot(self) -> None:
+    def test_tool_call_delta_without_prior_start_allocates_slot(self, render_factory: _RenderFactory) -> None:
         """An intake emitting a delta before its start still gets a usable envelope."""
-        render = _make_render()
+        render = render_factory()
         events: list[ModelResponseStreamEvent] = [
             PartDeltaEvent(
                 index=0,
@@ -332,9 +413,9 @@ class TestMultipleToolCalls:
 
 
 class TestThinkingDropped:
-    def test_thinking_part_start_does_not_emit_content(self) -> None:
+    def test_thinking_part_start_does_not_emit_content(self, render_factory: _RenderFactory) -> None:
         """``PartStartEvent(ThinkingPart)`` only triggers the role chunk; no content."""
-        render = _make_render()
+        render = render_factory()
         events: list[ModelResponseStreamEvent] = [
             PartStartEvent(index=0, part=ThinkingPart(content="reasoning...")),
         ]
@@ -343,9 +424,9 @@ class TestThinkingDropped:
         # role + final-finish; no thinking content
         assert deltas == [{"role": "assistant"}, {}]
 
-    def test_thinking_delta_emits_nothing(self) -> None:
+    def test_thinking_delta_emits_nothing(self, render_factory: _RenderFactory) -> None:
         """``ThinkingPartDelta`` produces no on-wire output."""
-        render = _make_render()
+        render = render_factory()
         events: list[ModelResponseStreamEvent] = [
             PartStartEvent(index=0, part=ThinkingPart(content="initial")),
             PartDeltaEvent(index=0, delta=ThinkingPartDelta(content_delta="more")),
@@ -362,13 +443,13 @@ class TestThinkingDropped:
 
 
 class TestInformationalEvents:
-    def test_part_end_emits_nothing(self) -> None:
-        render = _make_render()
+    def test_part_end_emits_nothing(self, render_factory: _RenderFactory) -> None:
+        render = render_factory()
         event = PartEndEvent(index=0, part=TextPart(content="x"))
         assert render.render(event) == b""
 
-    def test_final_result_event_emits_nothing(self) -> None:
-        render = _make_render()
+    def test_final_result_event_emits_nothing(self, render_factory: _RenderFactory) -> None:
+        render = render_factory()
         event = FinalResultEvent(tool_name=None, tool_call_id=None)
         assert render.render(event) == b""
 
@@ -379,13 +460,13 @@ class TestInformationalEvents:
 
 
 class TestDoneTerminator:
-    def test_close_always_emits_done(self) -> None:
-        render = _make_render()
+    def test_close_always_emits_done(self, render_factory: _RenderFactory) -> None:
+        render = render_factory()
         out = render.close()
         assert _ends_with_done(out)
 
-    def test_done_appears_after_final_chunk(self) -> None:
-        render = _make_render()
+    def test_done_appears_after_final_chunk(self, render_factory: _RenderFactory) -> None:
+        render = render_factory()
         out = _render_all(render, [PartStartEvent(index=0, part=TextPart(content="hi"))])
         # The [DONE] frame is the very last frame
         idx = out.rfind(b"data: ")
@@ -393,8 +474,24 @@ class TestDoneTerminator:
 
 
 # ---------------------------------------------------------------------------
-# 9) Roundtrip property test
+# 9) Roundtrip property test — cross-implementation matrix
 # ---------------------------------------------------------------------------
+
+
+class _IntakeLike(Protocol):
+    """Common sync-callable surface for both intake implementations."""
+
+    def feed(self, data: bytes) -> Iterable[ModelResponseStreamEvent]: ...
+
+    def close(self) -> Iterable[ModelResponseStreamEvent]: ...
+
+
+def _new_intake(*, model: str = "gpt-4o") -> _IntakeLike:
+    return _OpenAIIntakeFSMAdapter(model=model)
+
+
+def _new_render(*, model: str = "gpt-4o") -> _RenderLike:
+    return _OpenAIRenderFSMAdapter(model=model)
 
 
 @dataclass(frozen=True)
@@ -503,14 +600,16 @@ class TestRoundtrip:
         "case",
         [pytest.param(c, id=c.name) for c in ROUNDTRIP_CASES],
     )
-    def test_render_then_intake_reconstructs_same_assistant_message(self, case: RoundtripCase) -> None:
+    def test_render_then_intake_reconstructs_same_assistant_message(
+        self, case: RoundtripCase
+    ) -> None:
         # 1. Render
-        render = _make_render()
+        render = _new_render()
         wire_bytes = _render_all(render, case.events)
         assert _ends_with_done(wire_bytes)
 
         # 2. Feed back through a fresh intake
-        intake = _make_intake()
+        intake = _new_intake()
         intake_events: list[ModelResponseStreamEvent] = []
         intake_events.extend(intake.feed(wire_bytes))
         intake_events.extend(intake.close())
@@ -550,8 +649,10 @@ class TestEventCoverage:
         ],
         ids=["part_start", "part_delta", "part_end", "final_result"],
     )
-    def test_every_event_variant_does_not_raise(self, event: ModelResponseStreamEvent) -> None:
-        render = _make_render()
+    def test_every_event_variant_does_not_raise(
+        self, event: ModelResponseStreamEvent, render_factory: _RenderFactory
+    ) -> None:
+        render = render_factory()
         # Just exercise the dispatch — return value verified in other tests
         result = render.render(event)
         assert isinstance(result, bytes)

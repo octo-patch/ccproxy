@@ -39,11 +39,6 @@ logger = logging.getLogger(__name__)
 
 Direction = Literal["inbound"]
 
-_GEMINI_PROVIDERS: frozenset[str] = frozenset({"gemini", "vertex_ai", "vertex_ai_beta"})
-"""Providers that still go through the legacy lightllm SSE transformer
-because their response intake/render flow hasn't been folded into the
-pydantic-ai-mediated wire layer yet (Gemini cachedContents)."""
-
 
 class InspectorAddon:
     """Inspector addon for HTTP/HTTPS traffic capture and tracing."""
@@ -209,7 +204,7 @@ class InspectorAddon:
         elif transform is not None and not transform.is_streaming and transform.mode == "transform":
             # Non-streaming client + event-stream upstream (e.g. Perplexity always
             # streams). Buffer so handle_transform_response can call
-            # transform_to_openai on the complete body.
+            # transform_buffered_response_sync on the complete body.
             flow.response.stream = False
         else:
             flow.response.stream = True
@@ -219,67 +214,51 @@ class InspectorAddon:
     ) -> None:
         """Install the SSE response transformer on ``flow.response.stream``.
 
-        Non-Gemini providers route through the new pydantic-ai-mediated
-        :class:`~ccproxy.lightllm.response.pipeline.SSEPipeline` when the
-        transform router stamped both ``listener_format`` and
-        ``request_parameters``. Without those, falls back to passthrough.
+        All providers route through the pydantic-ai-mediated
+        :class:`~ccproxy.lightllm.graph.sse_pipeline.SSEPipeline` (persistent
+        asyncio loop in a dedicated daemon thread) when the transform router
+        stamped both ``listener_format`` and ``request_parameters``. Without
+        those, falls back to passthrough.
 
-        Gemini family providers stay on the legacy
-        :func:`~ccproxy.lightllm.dispatch.make_sse_transformer` path until
-        their response chain is migrated.
+        Gemini family providers go through the same path:
+        :func:`dispatch_intake` returns :class:`GoogleResponseIntakeFSM`
+        which transparently unwraps the cloudcode-pa ``{response: {...}}``
+        envelope. :class:`~ccproxy.inspector.gemini_addon.GeminiAddon` backs
+        off when this transformer is already installed.
         """
-        if transform.provider in _GEMINI_PROVIDERS:
-            # deferred: heavy LiteLLM provider chain
-            from ccproxy.lightllm.dispatch import make_sse_transformer
-
-            optional_params = {k: v for k, v in transform.request_data.items() if k != "messages"}
-            try:
-                sse_transformer = make_sse_transformer(
-                    transform.provider,
-                    transform.model,
-                    optional_params,
-                )
-                flow.response.stream = sse_transformer
-                flow.metadata["ccproxy.sse_transformer"] = sse_transformer
-            except Exception:
-                logger.warning(
-                    "Failed to create SSE transformer, falling back to passthrough",
-                    exc_info=True,
-                )
-                flow.response.stream = True
-            return
-
         from ccproxy.lightllm.parsed import ListenerFormat
+
+        response = flow.response
+        assert response is not None, "responseheaders guards flow.response before dispatching here"
 
         listener_format = ListenerFormat(transform.listener_format)
         if listener_format is ListenerFormat.UNKNOWN or transform.request_parameters is None:
             logger.warning(
                 "SSEPipeline missing listener_format / request_parameters; falling back to passthrough",
             )
-            flow.response.stream = True
+            response.stream = True
             return
 
         # deferred: pydantic-ai heavy imports
-        from ccproxy.lightllm.response.intake import select_intake
-        from ccproxy.lightllm.response.pipeline import SSEPipeline
-        from ccproxy.lightllm.response.render import select_render
+        from ccproxy.lightllm.graph import dispatch_intake, dispatch_render
+        from ccproxy.lightllm.graph.sse_pipeline import SSEPipeline
 
         try:
-            intake = select_intake(
+            intake = dispatch_intake(
                 upstream_provider=transform.provider,
                 model=transform.model,
                 request_params=transform.request_parameters,
             )
-            render = select_render(listener_format)
+            render = dispatch_render(listener_format=listener_format, model=transform.model)
             pipeline = SSEPipeline(intake=intake, render=render)
-            flow.response.stream = pipeline
+            response.stream = pipeline
             flow.metadata["ccproxy.sse_transformer"] = pipeline
         except Exception:
             logger.warning(
                 "Failed to construct SSEPipeline, falling back to passthrough",
                 exc_info=True,
             )
-            flow.response.stream = True
+            response.stream = True
 
     async def response(self, flow: http.HTTPFlow) -> None:
         try:
@@ -303,6 +282,21 @@ class InspectorAddon:
                         body=response.content,
                         status_code=response.status_code,
                     )
+                # Persistent-loop pipeline owns a daemon thread; explicit
+                # cleanup tears it down promptly. EOS path
+                # (``_flush_and_close``) already closes — this is a no-op for
+                # well-behaved flows and a belt-and-suspenders guard for
+                # client-disconnect / error cases where mitmproxy never emits
+                # the trailing ``b""`` chunk.
+                close_fn = getattr(transformer, "close", None)
+                if callable(close_fn):
+                    try:
+                        close_fn()
+                    except Exception:
+                        logger.debug(
+                            "SSEPipeline close raised on response cleanup",
+                            exc_info=True,
+                        )
 
             started = flow.request.timestamp_start
             ended = response.timestamp_end if response else None

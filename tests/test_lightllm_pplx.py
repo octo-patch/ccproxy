@@ -171,8 +171,6 @@ def test_transform_request_followup_sends_only_new_turn() -> None:
             {"role": "user", "content": "Name a vegetable"},
         ],
         optional_params={"pplx": {"last_backend_uuid": "B1"}},
-        litellm_params={},
-        headers={},
     )
     assert payload["query_str"] == "Name a vegetable"
     assert payload["params"]["dsl_query"] == "Name a vegetable"
@@ -189,8 +187,6 @@ def test_transform_request_first_turn_still_flattens_full_history() -> None:
             {"role": "user", "content": "what is quantum?"},
         ],
         optional_params={},
-        litellm_params={},
-        headers={},
     )
     assert payload["query_str"].startswith("[System]: helpful")
     assert "what is quantum?" in payload["query_str"]
@@ -452,9 +448,9 @@ def test_pplx_thread_config_rejects_invalid_literal() -> None:
     from pydantic import ValidationError
 
     with pytest.raises(ValidationError):
-        PplxThreadConfig(consistency_mode="bogus")  # type: ignore[arg-type]
+        PplxThreadConfig(consistency_mode="bogus")  # type: ignore[arg-type]  # ty: ignore[invalid-argument-type]
     with pytest.raises(ValidationError):
-        PplxThreadConfig(citation_mode="bogus")  # type: ignore[arg-type]
+        PplxThreadConfig(citation_mode="bogus")  # type: ignore[arg-type]  # ty: ignore[invalid-argument-type]
     with pytest.raises(ValidationError):
         PplxThreadConfig(ttl_seconds=-1)
 
@@ -502,45 +498,6 @@ def test_pplx_addon_scan_for_ids() -> None:
 
 def _make_payload_bytes(payload: dict[str, Any]) -> bytes:
     return f"data: {json.dumps(payload)}\n\n".encode()
-
-
-def test_iterator_emits_content_and_reasoning_deltas() -> None:
-    from ccproxy.lightllm.pplx import PerplexityProIterator
-
-    iterator = PerplexityProIterator(streaming_response=iter([]), sync_stream=True, json_mode=False)
-    e1 = {
-        "blocks": [
-            {
-                "intended_usage": "ask_text_0_markdown",
-                "diff_block": {
-                    "field": "markdown_block",
-                    "patches": [
-                        {"path": "/markdown_block", "value": {"answer": "Hi"}},
-                    ],
-                },
-            }
-        ]
-    }
-    e2 = {
-        "blocks": [
-            {
-                "intended_usage": "pro_search_steps",
-                "plan_block": {"goals": [{"description": "searching"}]},
-            }
-        ]
-    }
-    e3 = {"final_sse_message": True, "thread_url_slug": "slug-final"}
-
-    c1 = iterator.chunk_parser(e1)
-    assert c1.choices[0].delta.content == "Hi"
-    assert c1.choices[0].finish_reason is None
-
-    c2 = iterator.chunk_parser(e2)
-    assert getattr(c2.choices[0].delta, "reasoning_content", None) == "searching"
-
-    c3 = iterator.chunk_parser(e3)
-    assert c3.choices[0].finish_reason == "stop"
-    assert getattr(c3, "pplx_thread_url_slug", None) == "slug-final"
 
 
 # --- Step rendering integration tests (plan_block.steps[] + non-spec fields) ---
@@ -728,63 +685,3 @@ def test_text_field_steps_processed_when_no_plan_block() -> None:
     assert len(state.mcp_steps) == 1
 
 
-def test_transform_response_attaches_pplx_mcp_steps_and_uses_display_model() -> None:
-    """Non-streaming: response carries display_model + mcp_steps non-spec field."""
-    from unittest.mock import MagicMock
-
-    import httpx
-    from litellm.types.utils import ModelResponse
-
-    from ccproxy.lightllm.pplx import PerplexityProConfig
-
-    config = PerplexityProConfig()
-    # Build a synthetic SSE body with one MCP_TOOL_INPUT step + terminator
-    event1 = _mcp_event(
-        "MCP_TOOL_INPUT",
-        uuid="resp-1",
-        content={"tool_name": "get_me", "tool_args": {}, "app": "GitHub"},
-    )
-    event2 = {"final_sse_message": True}
-    sse_body = (
-        f"data: {json.dumps(event1)}\n\n"
-        f"data: {json.dumps(event2)}\n\n"
-    )
-    fake_response = MagicMock(spec=httpx.Response)
-    fake_response.text = sse_body
-
-    result = config.transform_response(
-        model="perplexity/best",
-        raw_response=fake_response,
-        model_response=ModelResponse(),
-        logging_obj=MagicMock(),
-        request_data={},
-        messages=[],
-        optional_params={},
-        litellm_params={},
-        encoding=None,
-    )
-    assert result.model == "claude46sonnet"  # display_model wins over requested alias
-    assert getattr(result, "pplx_mcp_steps", None) is not None
-    assert len(result.pplx_mcp_steps) == 1
-    assert result.pplx_mcp_steps[0]["tool_name"] == "get_me"
-    assert getattr(result, "pplx_steps", None) is not None
-
-
-def test_iterator_attaches_non_spec_fields_on_terminal_chunk() -> None:
-    from ccproxy.lightllm.pplx import PerplexityProIterator
-
-    iterator = PerplexityProIterator(streaming_response=iter([]), sync_stream=True)
-    iterator.chunk_parser(
-        _mcp_event(
-            "MCP_TOOL_INPUT",
-            uuid="stream-1",
-            content={"tool_name": "get_me", "tool_args": {}, "app": "GitHub"},
-        )
-    )
-    terminal = iterator.chunk_parser({"final_sse_message": True, "thread_url_slug": "slug-x"})
-    assert terminal is not None
-    assert terminal.choices[0].finish_reason == "stop"
-    assert getattr(terminal, "pplx_thread_url_slug", None) == "slug-x"
-    assert getattr(terminal, "pplx_mcp_steps", None) is not None
-    assert len(terminal.pplx_mcp_steps) == 1
-    assert getattr(terminal, "pplx_steps", None) is not None

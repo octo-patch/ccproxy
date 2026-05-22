@@ -12,24 +12,46 @@ The internal nodes are :class:`pydantic_graph.BaseNode` subclasses with
 in :mod:`ccproxy.pipeline.context` and :mod:`ccproxy.lightllm.outbound` is the
 async-to-sync boundary for mitmproxy addon hooks that must call this layer
 synchronously.
+
+The response-side dispatchers :func:`dispatch_intake` and
+:func:`dispatch_render` mirror :func:`dispatch_load` and :func:`dispatch_dump`
+on the wire-bytes → IR-events → wire-bytes path. They return the per-provider
+async FSM instances directly; the persistent-loop bridge in
+:class:`ccproxy.lightllm.graph.sse_pipeline.SSEPipeline` drives them from
+mitmproxy's sync stream callable.
 """
 
 import asyncio
 import concurrent.futures
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from ccproxy.lightllm.graph.anthropic_dump import render_anthropic_dump
+from ccproxy.lightllm.graph.anthropic_intake import AnthropicResponseIntakeFSM
 from ccproxy.lightllm.graph.anthropic_load import load_anthropic
+from ccproxy.lightllm.graph.anthropic_render import AnthropicResponseRenderFSM
 from ccproxy.lightllm.graph.google_dump import render_google_dump
+from ccproxy.lightllm.graph.google_intake import GoogleResponseIntakeFSM
 from ccproxy.lightllm.graph.openai_dump import render_openai_chat_dump
+from ccproxy.lightllm.graph.openai_intake import OpenAIResponseIntakeFSM
 from ccproxy.lightllm.graph.openai_load import load_openai_chat
+from ccproxy.lightllm.graph.openai_render import OpenAIResponseRenderFSM
 from ccproxy.lightllm.graph.perplexity_dump import render_perplexity_pro_dump
+from ccproxy.lightllm.graph.perplexity_intake import PerplexityResponseIntakeFSM
 from ccproxy.lightllm.parsed import ListenerFormat, ParsedRequest
 
+if TYPE_CHECKING:
+    from pydantic_ai.models import ModelRequestParameters
+
 __all__ = [
+    "AnyAsyncIntakeFSM",
+    "AnyAsyncRenderFSM",
+    "UnsupportedListenerError",
+    "UnsupportedUpstreamError",
     "dispatch_dump",
     "dispatch_dump_sync",
+    "dispatch_intake",
     "dispatch_load",
+    "dispatch_render",
     "load_anthropic",
     "load_openai_chat",
     "render_anthropic_dump",
@@ -40,11 +62,27 @@ __all__ = [
 
 
 _ANTHROPIC_COMPATIBLE = frozenset({"anthropic", "deepseek", "zai"})
-_GOOGLE_COMPATIBLE = frozenset({"google", "gemini", "vertex_ai"})
+_GOOGLE_COMPATIBLE = frozenset({"google", "gemini", "vertex_ai", "vertex_ai_beta"})
+
+
+# Aliases for the union of all response-side FSM types. The Half-B
+# :class:`SSEPipeline` types its ``intake`` / ``render`` parameters against
+# these so any FSM the dispatchers can produce is acceptable.
+AnyAsyncIntakeFSM = (
+    AnthropicResponseIntakeFSM
+    | OpenAIResponseIntakeFSM
+    | GoogleResponseIntakeFSM
+    | PerplexityResponseIntakeFSM
+)
+AnyAsyncRenderFSM = AnthropicResponseRenderFSM | OpenAIResponseRenderFSM
 
 
 class UnsupportedUpstreamError(ValueError):
     """Raised when :func:`dispatch_dump` is asked to render to an unknown provider."""
+
+
+class UnsupportedListenerError(ValueError):
+    """Raised when :func:`dispatch_render` is asked for a listener format it doesn't know."""
 
 
 async def dispatch_load(body: dict[str, Any], *, listener_format: ListenerFormat) -> ParsedRequest:
@@ -72,6 +110,55 @@ async def dispatch_dump(parsed: ParsedRequest, *, provider: str) -> bytes:
     if provider == "perplexity_pro":
         return await render_perplexity_pro_dump(parsed)
     raise UnsupportedUpstreamError(f"no outbound renderer for provider={provider!r}")
+
+
+def dispatch_intake(
+    *,
+    upstream_provider: str,
+    model: str,
+    request_params: "ModelRequestParameters",
+) -> AnyAsyncIntakeFSM:
+    """Dispatch to the right per-upstream response intake FSM.
+
+    Mirrors :func:`dispatch_dump` on the response side: routes
+    Anthropic-compatible providers (anthropic / deepseek / zai) to the
+    Anthropic intake FSM, OpenAI to the OpenAI intake FSM, Google family
+    (google / gemini / vertex_ai / vertex_ai_beta) to the Google intake FSM,
+    and Perplexity Pro to its own intake FSM. Raises
+    :class:`UnsupportedUpstreamError` for anything else — there's no fallback,
+    because an unknown upstream means we have no idea how to parse its SSE.
+    """
+    if upstream_provider in _ANTHROPIC_COMPATIBLE:
+        return AnthropicResponseIntakeFSM(model=model, request_params=request_params)
+    if upstream_provider == "openai":
+        return OpenAIResponseIntakeFSM(model=model, request_params=request_params)
+    if upstream_provider in _GOOGLE_COMPATIBLE:
+        return GoogleResponseIntakeFSM(model=model, request_params=request_params)
+    if upstream_provider == "perplexity_pro":
+        return PerplexityResponseIntakeFSM(model=model, request_params=request_params)
+    raise UnsupportedUpstreamError(
+        f"no response intake for upstream_provider={upstream_provider!r}"
+    )
+
+
+def dispatch_render(
+    *, listener_format: ListenerFormat, model: str = "unknown"
+) -> AnyAsyncRenderFSM:
+    """Dispatch to the right per-listener response render FSM.
+
+    Mirrors :func:`dispatch_load` on the response side: routes
+    ``ANTHROPIC_MESSAGES`` to the Anthropic render FSM and ``OPENAI_CHAT`` to
+    the OpenAI render FSM. Raises :class:`UnsupportedListenerError` for
+    ``UNKNOWN`` — there's no fallback, because an unknown listener format
+    means we have no idea what wire shape to produce.
+    """
+    if listener_format is ListenerFormat.ANTHROPIC_MESSAGES:
+        return AnthropicResponseRenderFSM(model=model)
+    if listener_format is ListenerFormat.OPENAI_CHAT:
+        return OpenAIResponseRenderFSM(model=model)
+    raise UnsupportedListenerError(
+        f"no response render for listener_format={listener_format}"
+    )
 
 
 def dispatch_dump_sync(parsed: ParsedRequest, *, provider: str) -> bytes:

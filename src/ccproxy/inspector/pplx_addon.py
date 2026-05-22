@@ -126,8 +126,8 @@ class PerplexityAddon:
     def _scan_for_ids(raw_body: bytes) -> dict[str, str] | None:
         """Parse SSE events from the raw body; return the accumulated identifier map.
 
-        Iterates events lazily using the same parser as the LiteLLM iterator
-        so streaming and buffered flows share identical extraction logic.
+        Iterates events lazily using the same parser as the FSM intake so
+        streaming and buffered flows share identical extraction logic.
         Late events overwrite earlier values (read_write_token and
         thread_url_slug typically arrive on the final event per
         ``threads-history.md:24-44``).

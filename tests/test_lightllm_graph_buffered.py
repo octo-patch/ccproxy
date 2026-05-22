@@ -1,0 +1,377 @@
+"""Tests for the FSM-driven buffered response transform.
+
+Covers the four provider paths in
+:func:`transform_buffered_response_sync`:
+
+* **Anthropic buffered** — ``BetaMessage`` JSON → synthetic SSE → FSM intake →
+  OpenAI ``ChatCompletion`` JSON.
+* **OpenAI buffered** — ``ChatCompletion`` JSON → synthetic SSE → FSM intake →
+  Anthropic ``BetaMessage`` JSON (the other direction).
+* **Google buffered** — ``GenerateContentResponse`` JSON → one SSE frame →
+  FSM intake → OpenAI ``ChatCompletion`` JSON.
+* **Perplexity buffered** — concatenated SSE → fed directly → FSM intake →
+  OpenAI ``ChatCompletion`` JSON.
+"""
+
+from __future__ import annotations
+
+import json
+from typing import Any
+
+import pytest
+from pydantic_ai.models import ModelRequestParameters
+
+from ccproxy.lightllm.graph.buffered import transform_buffered_response_sync
+from ccproxy.lightllm.parsed import ListenerFormat
+
+# ── Anthropic buffered → OpenAI ChatCompletion ─────────────────────────────
+
+
+def _make_anthropic_text_body(text: str, *, model: str = "claude-3-5-haiku-20241022") -> bytes:
+    return json.dumps(
+        {
+            "id": "msg_buf_test",
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "text", "text": text}],
+            "model": model,
+            "stop_reason": "end_turn",
+            "stop_sequence": None,
+            "usage": {"input_tokens": 10, "output_tokens": 5},
+        }
+    ).encode()
+
+
+def _make_anthropic_tool_body() -> bytes:
+    return json.dumps(
+        {
+            "id": "msg_buf_tool",
+            "type": "message",
+            "role": "assistant",
+            "content": [
+                {"type": "text", "text": "I'll check the weather"},
+                {
+                    "type": "tool_use",
+                    "id": "toolu_abc",
+                    "name": "get_weather",
+                    "input": {"city": "Paris"},
+                },
+            ],
+            "model": "claude-3-5-haiku-20241022",
+            "stop_reason": "tool_use",
+            "stop_sequence": None,
+            "usage": {"input_tokens": 20, "output_tokens": 15},
+        }
+    ).encode()
+
+
+class TestAnthropicBufferedToOpenAI:
+    def test_simple_text(self) -> None:
+        raw = _make_anthropic_text_body("Hello world")
+        out_bytes = transform_buffered_response_sync(
+            raw_bytes=raw,
+            upstream_provider="anthropic",
+            listener_format=ListenerFormat.OPENAI_CHAT,
+            model="claude-3-5-haiku-20241022",
+            request_params=ModelRequestParameters(),
+        )
+        out = json.loads(out_bytes)
+        assert out["object"] == "chat.completion"
+        assert out["choices"][0]["message"]["content"] == "Hello world"
+        assert out["choices"][0]["finish_reason"] == "stop"
+        assert out["choices"][0]["message"]["role"] == "assistant"
+
+    def test_tool_call_extraction(self) -> None:
+        raw = _make_anthropic_tool_body()
+        out_bytes = transform_buffered_response_sync(
+            raw_bytes=raw,
+            upstream_provider="anthropic",
+            listener_format=ListenerFormat.OPENAI_CHAT,
+            model="claude-3-5-haiku-20241022",
+            request_params=ModelRequestParameters(),
+        )
+        out = json.loads(out_bytes)
+        choice = out["choices"][0]
+        # Tool call surfaces in OpenAI shape.
+        tool_calls = choice["message"].get("tool_calls") or []
+        assert len(tool_calls) == 1
+        tc = tool_calls[0]
+        assert tc["function"]["name"] == "get_weather"
+        args = json.loads(tc["function"]["arguments"])
+        assert args == {"city": "Paris"}
+        # Text-and-tool answer carries text + tool_calls; finish_reason is tool_calls.
+        assert "weather" in (choice["message"]["content"] or "")
+        assert choice["finish_reason"] == "tool_calls"
+
+    def test_alias_providers(self) -> None:
+        """The Anthropic synthesizer applies to ``deepseek`` and ``zai`` too."""
+        raw = _make_anthropic_text_body("via deepseek", model="deepseek-chat")
+        for alias in ("deepseek", "zai"):
+            out_bytes = transform_buffered_response_sync(
+                raw_bytes=raw,
+                upstream_provider=alias,
+                listener_format=ListenerFormat.OPENAI_CHAT,
+                model="deepseek-chat",
+                request_params=ModelRequestParameters(),
+            )
+            out = json.loads(out_bytes)
+            assert out["choices"][0]["message"]["content"] == "via deepseek"
+
+# ── OpenAI buffered → Anthropic BetaMessage ────────────────────────────────
+
+
+def _make_openai_chat_completion(content: str) -> bytes:
+    return json.dumps(
+        {
+            "id": "chatcmpl-test",
+            "object": "chat.completion",
+            "created": 1700000000,
+            "model": "gpt-4o",
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": content,
+                    },
+                    "finish_reason": "stop",
+                    "logprobs": None,
+                }
+            ],
+        }
+    ).encode()
+
+
+def _make_openai_tool_completion() -> bytes:
+    return json.dumps(
+        {
+            "id": "chatcmpl-tool",
+            "object": "chat.completion",
+            "created": 1700000000,
+            "model": "gpt-4o",
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": "call_abc",
+                                "type": "function",
+                                "function": {
+                                    "name": "get_time",
+                                    "arguments": '{"timezone": "UTC"}',
+                                },
+                            }
+                        ],
+                    },
+                    "finish_reason": "tool_calls",
+                    "logprobs": None,
+                }
+            ],
+        }
+    ).encode()
+
+
+class TestOpenAIBufferedToAnthropic:
+    def test_simple_text(self) -> None:
+        raw = _make_openai_chat_completion("Hi there")
+        out_bytes = transform_buffered_response_sync(
+            raw_bytes=raw,
+            upstream_provider="openai",
+            listener_format=ListenerFormat.ANTHROPIC_MESSAGES,
+            model="gpt-4o",
+            request_params=ModelRequestParameters(),
+        )
+        out = json.loads(out_bytes)
+        assert out["type"] == "message"
+        assert out["role"] == "assistant"
+        assert out["model"] == "gpt-4o"
+        assert out["stop_reason"] == "end_turn"
+        # Single text block carrying the assembled content.
+        text_blocks = [b for b in out["content"] if b.get("type") == "text"]
+        assert len(text_blocks) == 1
+        assert text_blocks[0]["text"] == "Hi there"
+
+    def test_tool_call_extraction(self) -> None:
+        raw = _make_openai_tool_completion()
+        out_bytes = transform_buffered_response_sync(
+            raw_bytes=raw,
+            upstream_provider="openai",
+            listener_format=ListenerFormat.ANTHROPIC_MESSAGES,
+            model="gpt-4o",
+            request_params=ModelRequestParameters(),
+        )
+        out = json.loads(out_bytes)
+        tool_blocks = [b for b in out["content"] if b.get("type") == "tool_use"]
+        assert len(tool_blocks) == 1
+        tb = tool_blocks[0]
+        assert tb["name"] == "get_time"
+        assert tb["input"] == {"timezone": "UTC"}
+        assert out["stop_reason"] == "tool_use"
+
+
+# ── Google buffered → OpenAI ChatCompletion ────────────────────────────────
+
+
+def _make_google_generate_content_response(text: str) -> bytes:
+    return json.dumps(
+        {
+            "candidates": [
+                {
+                    "content": {
+                        "parts": [{"text": text}],
+                        "role": "model",
+                    },
+                    "finishReason": "STOP",
+                    "index": 0,
+                }
+            ],
+            "usageMetadata": {
+                "promptTokenCount": 10,
+                "candidatesTokenCount": 3,
+                "totalTokenCount": 13,
+            },
+            "modelVersion": "gemini-2.0-flash",
+        }
+    ).encode()
+
+
+def _make_google_cloudcode_wrapped(text: str) -> bytes:
+    """cloudcode-pa wraps the response in {response: {...}}."""
+    inner = json.loads(_make_google_generate_content_response(text))
+    return json.dumps({"response": inner}).encode()
+
+
+class TestGoogleBufferedToOpenAI:
+    def test_simple_text(self) -> None:
+        raw = _make_google_generate_content_response("From Gemini")
+        out_bytes = transform_buffered_response_sync(
+            raw_bytes=raw,
+            upstream_provider="gemini",
+            listener_format=ListenerFormat.OPENAI_CHAT,
+            model="gemini-2.0-flash",
+            request_params=ModelRequestParameters(),
+        )
+        out = json.loads(out_bytes)
+        assert out["object"] == "chat.completion"
+        assert out["choices"][0]["message"]["content"] == "From Gemini"
+
+    def test_cloudcode_envelope_unwrap(self) -> None:
+        """The Google intake folds the cloudcode-pa ``{response: {...}}`` unwrap
+        so the buffered transform inherits the behavior."""
+        raw = _make_google_cloudcode_wrapped("Wrapped reply")
+        out_bytes = transform_buffered_response_sync(
+            raw_bytes=raw,
+            upstream_provider="gemini",
+            listener_format=ListenerFormat.OPENAI_CHAT,
+            model="gemini-2.0-flash",
+            request_params=ModelRequestParameters(),
+        )
+        out = json.loads(out_bytes)
+        assert out["choices"][0]["message"]["content"] == "Wrapped reply"
+
+
+# ── Perplexity buffered (SSE concatenated) → OpenAI ChatCompletion ─────────
+
+
+def _make_perplexity_sse(answer_text: str) -> bytes:
+    """Build a minimal Perplexity SSE concatenated body.
+
+    Each event is one JSON dict per ``data:`` line. The intake parses any
+    valid Perplexity event shape; here we use the diff_block Mode C
+    incremental-append pattern + a final ``final_sse_message`` event.
+    """
+    events: list[dict[str, Any]] = [
+        {
+            "backend_uuid": "be-1",
+            "context_uuid": "ctx-1",
+            "read_write_token": "rw-1",
+            "thread_url_slug": "slug",
+            "blocks": [
+                {
+                    "intended_usage": "answer",
+                    "markdown_block": {
+                        "answer": "",
+                        "chunks": [""],
+                    },
+                    "diff_block": {
+                        "field": "markdown_block",
+                        "patches": [{"path": "/chunks/0", "value": answer_text}],
+                    },
+                }
+            ],
+        },
+        {
+            "final_sse_message": True,
+            "blocks": [
+                {
+                    "intended_usage": "answer",
+                    "markdown_block": {"answer": answer_text},
+                }
+            ],
+        },
+    ]
+    return b"".join(
+        f"data: {json.dumps(e, separators=(',', ':'))}\n\n".encode() for e in events
+    )
+
+
+class TestPerplexityBufferedToOpenAI:
+    def test_simple_text(self) -> None:
+        raw = _make_perplexity_sse("Perplexity answer text")
+        out_bytes = transform_buffered_response_sync(
+            raw_bytes=raw,
+            upstream_provider="perplexity_pro",
+            listener_format=ListenerFormat.OPENAI_CHAT,
+            model="perplexity/best",
+            request_params=ModelRequestParameters(),
+        )
+        out = json.loads(out_bytes)
+        assert out["object"] == "chat.completion"
+        # The answer text flows through the intake's prefix-diff machinery
+        # into a single TextPart on the assembled IR.
+        assert "Perplexity answer text" in (out["choices"][0]["message"]["content"] or "")
+
+
+# ── Error path ─────────────────────────────────────────────────────────────
+
+
+class TestErrorPaths:
+    def test_unsupported_upstream_raises(self) -> None:
+        from ccproxy.lightllm.graph import UnsupportedUpstreamError
+
+        with pytest.raises(UnsupportedUpstreamError, match="no buffered transform"):
+            transform_buffered_response_sync(
+                raw_bytes=b"{}",
+                upstream_provider="not-a-real-provider",
+                listener_format=ListenerFormat.OPENAI_CHAT,
+                model="x",
+                request_params=ModelRequestParameters(),
+            )
+
+    def test_unsupported_listener_raises(self) -> None:
+        from ccproxy.lightllm.graph import UnsupportedListenerError
+
+        with pytest.raises(UnsupportedListenerError, match="no buffered renderer"):
+            transform_buffered_response_sync(
+                raw_bytes=_make_anthropic_text_body("hi"),
+                upstream_provider="anthropic",
+                listener_format=ListenerFormat.UNKNOWN,
+                model="claude-3",
+                request_params=ModelRequestParameters(),
+            )
+
+    def test_unparseable_body_yields_empty_response(self) -> None:
+        out_bytes = transform_buffered_response_sync(
+            raw_bytes=b"not json at all",
+            upstream_provider="anthropic",
+            listener_format=ListenerFormat.OPENAI_CHAT,
+            model="claude-3",
+            request_params=ModelRequestParameters(),
+        )
+        out = json.loads(out_bytes)
+        # Empty body → no parts → a valid but empty ChatCompletion envelope.
+        assert out["object"] == "chat.completion"
+        assert out["choices"][0]["message"]["content"] is None

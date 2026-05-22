@@ -483,8 +483,7 @@ async def _run_inspect(
 
     Embeds mitmweb in-process via WebMaster with two listeners (reverse
     proxy + WireGuard CLI). The three-stage addon chain (inbound → transform
-    → outbound) handles all request routing via lightllm — no LiteLLM
-    subprocess.
+    → outbound) handles all request routing via lightllm.
 
     Returns 0 on clean shutdown.
     """

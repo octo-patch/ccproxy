@@ -16,7 +16,6 @@ classifiers = [
   "Topic :: Security",
 ]
 dependencies = [
-  "litellm>=1.83.0",
   "pydantic>=2.0.0",
   "pydantic-settings>=2.0.0",
   "pyyaml>=6.0",
@@ -30,7 +29,7 @@ dependencies = [
   "mitmproxy>=10.0.0",
   "xepor-ccproxy>=0.7.0",
   "humanize>=4.0.0",
-  "pydantic-ai-slim>=1.85.1",
+  "pydantic-ai-slim[google,openai]>=1.85.1",
   "pydantic-graph>=1.85.1",
   "glom>=24.1.0",
   "mcp>=1.0.0",
@@ -138,7 +137,6 @@ implicit_reexport = true
 
 [[tool.mypy.overrides]]
 module = [
-  "litellm.*",
   "opentelemetry",
   "opentelemetry.*",
 ]
@@ -168,10 +166,19 @@ disallow_any_generics = false
 # modules; pyright handles these correctly so editor IntelliSense is unaffected.
 [[tool.mypy.overrides]]
 module = [
+  "ccproxy.lightllm.graph",
   "ccproxy.lightllm.graph.anthropic_dump",
+  "ccproxy.lightllm.graph.anthropic_intake",
   "ccproxy.lightllm.graph.anthropic_load",
+  "ccproxy.lightllm.graph.anthropic_render",
+  "ccproxy.lightllm.graph.buffered",
+  "ccproxy.lightllm.graph.google_intake",
   "ccproxy.lightllm.graph.openai_dump",
+  "ccproxy.lightllm.graph.openai_intake",
   "ccproxy.lightllm.graph.openai_load",
+  "ccproxy.lightllm.graph.openai_render",
+  "ccproxy.lightllm.graph.perplexity_intake",
+  "ccproxy.lightllm.graph.sse_pipeline",
 ]
 disable_error_code = ["type-arg", "attr-defined", "no-any-return", "misc", "index", "arg-type", "unreachable"]
 

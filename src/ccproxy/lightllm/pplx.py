@@ -1,4 +1,4 @@
-"""Perplexity Pro WebUI subscription as a LiteLLM ``BaseConfig``.
+"""Perplexity Pro WebUI subscription provider.
 
 Routes OpenAI ``/v1/chat/completions`` requests to Perplexity's internal
 ``POST https://www.perplexity.ai/rest/sse/perplexity_ask`` endpoint using
@@ -10,8 +10,8 @@ focus, sources, etc. Streaming responses arrive as schematized SSE events
 (``use_schematized_api: true``, ``send_back_text_in_streaming_api: false``)
 delivering cumulative answer text via ``diff_block.patches[]`` patches on
 ``/markdown_block`` and reasoning text via ``plan_block.goals[].description``.
-``PerplexityProIterator`` prefix-diffs both streams independently and emits
-OpenAI-format delta chunks (``content`` + ``reasoning_content``).
+The FSM intake in :mod:`ccproxy.lightllm.graph.perplexity_intake` prefix-diffs
+both streams independently and emits IR events.
 
 Thread continuation: the inbound ``pplx_thread_inject`` hook resolves
 ``body.metadata.session_id`` (or an L1 cache hit) to identifiers
@@ -35,18 +35,22 @@ import re
 import uuid
 from dataclasses import dataclass, field
 from importlib.resources import files
-from typing import TYPE_CHECKING, Any
-
-from litellm.llms.base_llm.base_model_iterator import BaseModelResponseIterator
-from litellm.llms.base_llm.chat.transformation import BaseConfig, BaseLLMException
-from litellm.types.utils import ModelResponse, ModelResponseStream
+from typing import Any
 
 from ccproxy.lightllm.pplx_steps import _KNOWN_INTENDED_USAGES, render_step
 
-if TYPE_CHECKING:
-    import httpx
-    from litellm.litellm_core_utils.litellm_logging import Logging as LiteLLMLoggingObj
-    from litellm.types.llms.openai import AllMessageValues
+
+class LightllmException(Exception):
+    """ccproxy-internal exception base.
+
+    Carries ``status_code`` so downstream error handlers can map to HTTP
+    responses.
+    """
+
+    def __init__(self, *, status_code: int, message: str) -> None:
+        self.status_code = status_code
+        self.message = message
+        super().__init__(message)
 
 logger = logging.getLogger(__name__)
 
@@ -302,13 +306,11 @@ def _parse_sse_line(line: str | bytes) -> dict[str, Any] | None:
     if isinstance(line, bytes):
         if not line.startswith(b"data: "):
             return None
-        payload = line[6:]
-    elif isinstance(line, str):
+        payload: str | bytes = line[6:]
+    else:
         if not line.startswith("data: "):
             return None
         payload = line[6:]
-    else:
-        return None
 
     if not payload or payload.strip() in (b"[DONE]", "[DONE]"):
         return None
@@ -316,47 +318,6 @@ def _parse_sse_line(line: str | bytes) -> dict[str, Any] | None:
         return json.loads(payload)
     except json.JSONDecodeError:
         return None
-
-
-def _attach_non_spec_fields(response: Any, state: StreamState) -> None:
-    """Stamp Perplexity-only fields onto the OpenAI response object.
-
-    Mirrors how ``pplx_thread_url_slug`` was previously attached: best-effort
-    setattr on a Pydantic model that doesn't declare the field. LiteLLM
-    serialises unknown attrs into the response JSON; standard OpenAI clients
-    ignore them.
-    """
-    slug = state.ids.get("thread_url_slug")
-    if slug:
-        try:
-            response.pplx_thread_url_slug = slug
-        except Exception:
-            pass
-    if state.ids.get("thread_title"):
-        try:
-            response.pplx_thread_title = state.ids["thread_title"]
-        except Exception:
-            pass
-    if state.mcp_steps:
-        try:
-            response.pplx_mcp_steps = state.mcp_steps
-        except Exception:
-            pass
-    if state.all_steps:
-        try:
-            response.pplx_steps = state.all_steps
-        except Exception:
-            pass
-    if state.goals:
-        try:
-            response.pplx_goals = state.goals
-        except Exception:
-            pass
-    if state.followups:
-        try:
-            response.pplx_pending_followups = state.followups
-        except Exception:
-            pass
 
 
 def _consume_step(step: dict[str, Any], state: StreamState) -> str:
@@ -803,7 +764,7 @@ def _thread_to_openai_messages(
     return out
 
 
-class PerplexityException(BaseLLMException):
+class PerplexityException(LightllmException):
     pass
 
 
@@ -818,80 +779,27 @@ class PerplexityClarifyingQuestionsError(PerplexityException):
         message = "Perplexity Deep Research requires clarification: " + "; ".join(
             questions
         )
-        super().__init__(status_code=400, message=message, headers=None)
+        super().__init__(status_code=400, message=message)
         self.questions = questions
 
 
-class PerplexityProConfig(BaseConfig):
-    """LiteLLM ``BaseConfig`` for the Perplexity Pro WebUI subscription path."""
+class PerplexityProConfig:
+    """Perplexity Pro WebUI subscription provider config.
+
+    Builds Perplexity SSE ask payloads from OpenAI-style chat messages.
+    The response side is handled by the FSM intake in
+    :mod:`ccproxy.lightllm.graph.perplexity_intake`.
+    """
 
     @property
     def supports_stream_param_in_request_body(self) -> bool:
         return False
 
-    def get_supported_openai_params(self, model: str) -> list[str]:
-        return ["stream"]
-
-    def map_openai_params(
-        self,
-        non_default_params: dict[str, Any],
-        optional_params: dict[str, Any],
-        model: str,
-        drop_params: bool,
-    ) -> dict[str, Any]:
-        out = dict(optional_params)
-        if "pplx" in non_default_params:
-            out["pplx"] = non_default_params["pplx"]
-        return out
-
-    def validate_environment(
-        self,
-        headers: dict[str, str],
-        model: str,
-        messages: list[AllMessageValues],
-        optional_params: dict[str, Any],
-        litellm_params: dict[str, Any],
-        api_key: str | None = None,
-        api_base: str | None = None,
-    ) -> dict[str, str]:
-        if not api_key:
-            raise ValueError(
-                "Perplexity Pro requires the session-token cookie value as api_key"
-            )
-        out = dict(headers)
-        out["Cookie"] = f"{PERPLEXITY_SESSION_COOKIE}={api_key}"
-        out["User-Agent"] = PERPLEXITY_BROWSER_UA
-        out["Origin"] = PERPLEXITY_URL_BASE
-        out["Referer"] = f"{PERPLEXITY_URL_BASE}/"
-        out["Accept"] = "text/event-stream, application/json"
-        out["Content-Type"] = "application/json"
-        out["x-perplexity-request-reason"] = "perplexity-query-state-provider"
-        out["x-app-apiversion"] = PERPLEXITY_API_VERSION
-        out["x-app-apiclient"] = "default"
-        out["x-request-id"] = str(uuid.uuid4())
-        out["sec-fetch-dest"] = "empty"
-        out["sec-fetch-mode"] = "cors"
-        out["sec-fetch-site"] = "same-origin"
-        return out
-
-    def get_complete_url(
-        self,
-        api_base: str | None,
-        api_key: str | None,
-        model: str,
-        optional_params: dict[str, Any],
-        litellm_params: dict[str, Any],
-        stream: bool | None = None,
-    ) -> str:
-        return PERPLEXITY_URL
-
     def transform_request(
         self,
         model: str,
-        messages: list[AllMessageValues],
+        messages: list[Any],
         optional_params: dict[str, Any],
-        litellm_params: dict[str, Any],
-        headers: dict[str, str],
     ) -> dict[str, Any]:
         raw_extras = optional_params.get("pplx") or {}
         extras: dict[str, Any] = raw_extras if isinstance(raw_extras, dict) else {}
@@ -909,143 +817,9 @@ class PerplexityProConfig(BaseConfig):
             extras=extras,
         )
 
-    def transform_response(
-        self,
-        model: str,
-        raw_response: httpx.Response,
-        model_response: ModelResponse,
-        logging_obj: LiteLLMLoggingObj,
-        request_data: dict[str, Any],
-        messages: list[AllMessageValues],
-        optional_params: dict[str, Any],
-        litellm_params: dict[str, Any],
-        encoding: Any,
-        api_key: str | None = None,
-        json_mode: bool | None = None,
-    ) -> ModelResponse:
-        state = StreamState()
-        for raw_line in raw_response.text.splitlines():
-            event = _parse_sse_line(raw_line)
-            if event is None:
-                continue
-            try:
-                _extract_deltas(event, state)
-            except PerplexityClarifyingQuestionsError:
-                raise
-
-        from litellm.types.utils import Choices, Message
-
-        message = Message(role="assistant", content=state.answer_seen)
-        combined_reasoning = "\n".join(
-            part for part in (state.reasoning_seen, state.step_reasoning.strip()) if part
-        )
-        if combined_reasoning:
-            try:
-                message.reasoning_content = combined_reasoning  # type: ignore[attr-defined]
-            except Exception:
-                pass
-
-        model_response.id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
-        # Use the upstream-reported `display_model` so clients see which actual
-        # model fired (e.g. "claude46sonnet") instead of the requested alias.
-        model_response.model = state.ids.get("display_model") or model
-        model_response.choices = [
-            Choices(index=0, message=message, finish_reason="stop")
-        ]
-
-        _attach_non_spec_fields(model_response, state)
-        return model_response
-
     def get_error_class(
         self,
         error_message: str,
         status_code: int,
-        headers: Any,
-    ) -> BaseLLMException:
-        return PerplexityException(
-            status_code=status_code, message=error_message, headers=headers
-        )
-
-    def get_model_response_iterator(
-        self,
-        streaming_response: Any,
-        sync_stream: bool,
-        json_mode: bool | None = False,
-    ) -> Any:
-        return PerplexityProIterator(
-            streaming_response=iter([]),
-            sync_stream=sync_stream,
-            json_mode=json_mode,
-        )
-
-
-class PerplexityProIterator(BaseModelResponseIterator):
-    """Stateful Perplexity SSE → OpenAI delta chunk parser.
-
-    Each upstream event is parsed by ``_extract_deltas`` against ``_state``;
-    the resulting ``(answer_delta, reasoning_delta)`` becomes one OpenAI
-    ``ModelResponseStream`` chunk. On the final event (``final_sse_message``
-    or ``final``), the captured ``thread_url_slug`` is stamped as a non-spec
-    top-level field on the response so cooperating clients can echo it back
-    via ``metadata.session_id`` on the next turn.
-    """
-
-    def __init__(
-        self,
-        streaming_response: Any,
-        sync_stream: bool,
-        json_mode: bool | None = False,
-    ) -> None:
-        super().__init__(
-            streaming_response=streaming_response,
-            sync_stream=sync_stream,
-            json_mode=json_mode,
-        )
-        self._state = StreamState()
-        self._terminated = False
-
-    def chunk_parser(self, chunk: dict[str, Any]) -> ModelResponseStream | None:
-        if self._terminated:
-            return None
-
-        try:
-            answer_delta, reasoning_delta = _extract_deltas(chunk, self._state)
-        except PerplexityClarifyingQuestionsError as e:
-            answer_delta = e.message
-            reasoning_delta = None
-            self._state.final = True
-
-        from litellm.types.utils import Delta, StreamingChoices
-
-        delta = Delta()
-        if answer_delta:
-            delta.content = answer_delta
-        if reasoning_delta:
-            try:
-                delta.reasoning_content = reasoning_delta  # type: ignore[attr-defined]
-            except Exception:
-                pass
-
-        if self._state.final:
-            finish_reason: str | None = "stop"
-            self._terminated = True
-        else:
-            finish_reason = None
-
-        choice = StreamingChoices(
-            index=0,
-            delta=delta,
-            finish_reason=finish_reason,
-        )
-        response = ModelResponseStream(choices=[choice])
-
-        if self._state.final:
-            # Stamp the upstream-reported model so clients see what actually fired
-            display_model = self._state.ids.get("display_model")
-            if display_model:
-                try:
-                    response.model = display_model  # type: ignore[assignment]
-                except Exception:
-                    pass
-            _attach_non_spec_fields(response, self._state)
-        return response
+    ) -> PerplexityException:
+        return PerplexityException(status_code=status_code, message=error_message)

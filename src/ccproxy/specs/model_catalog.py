@@ -1,7 +1,7 @@
 """OpenAI-compatible ``GET /v1/models`` catalog.
 
 Defined by OpenAI; adopted by Anthropic, Google Gemini, OpenRouter, vLLM,
-Ollama, LiteLLM, etc. Response shape::
+Ollama, etc. Response shape::
 
     {
       "object": "list",

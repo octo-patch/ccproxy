@@ -20,7 +20,7 @@ hook implements the three-mode resolution chain:
    ``query_source: "home"`` (fresh thread).
 
 Resolved identifiers go into ``ctx._body["pplx"]`` so they flow through
-LiteLLM's ``map_openai_params`` → ``transform_request`` →
+:class:`PerplexityProConfig.transform_request` →
 ``_build_pplx_payload(extras=optional_params["pplx"])`` chain.
 """
 
@@ -175,7 +175,6 @@ def pplx_thread_inject(ctx: Context, _: dict[str, Any]) -> Context:
                         f"Verify the slug or remove metadata.session_id to start a "
                         f"new thread."
                     ),
-                    headers=None,
                 )
             ids = _extract_latest_identifiers(thread)
             if ids is not None:
@@ -214,7 +213,6 @@ def pplx_thread_inject(ctx: Context, _: dict[str, Any]) -> Context:
                         f"({divergence}). Re-import the thread or remove "
                         f"metadata.session_id."
                     ),
-                    headers=None,
                 )
             if mode == "warn":
                 flow.metadata["ccproxy.pplx.divergence"] = divergence

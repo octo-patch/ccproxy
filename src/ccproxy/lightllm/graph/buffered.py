@@ -1,0 +1,641 @@
+"""Buffered (non-streaming) cross-provider response transform via FSM.
+
+Reuses the four per-upstream intake FSMs (Anthropic / OpenAI / Google /
+Perplexity) shipped under :mod:`ccproxy.lightllm.graph`.
+
+Two structural cases per upstream:
+
+1. **Provider-streaming body, client-buffered listener** — the upstream
+   always emits SSE (Perplexity Pro, some Gemini OAuth flows). The body is
+   concatenated SSE chunks. The intake FSM handles it natively; feed the
+   whole body + close().
+
+2. **Provider-buffered body, client-buffered listener** — Anthropic
+   ``stream: false`` (``BetaMessage`` JSON), OpenAI ``stream: false``
+   (``ChatCompletion`` JSON), Google ``:generateContent``
+   (``GenerateContentResponse`` JSON). The JSON shape differs from the
+   streaming-event shape so the intake can't parse it directly — we
+   synthesize a sequence of streaming events that the intake WILL accept
+   and feed those synthetic SSE frames through.
+
+Per-provider conversion strategy:
+
+* **Anthropic** (anthropic / deepseek / zai): parse ``BetaMessage`` JSON,
+  synthesize an event stream the existing :class:`AnthropicResponseIntakeFSM`
+  would emit — one ``message_start`` + (per content block) a
+  ``content_block_start`` + a single ``content_block_delta`` covering the
+  block's full content + a ``content_block_stop``, then ``message_delta``
+  + ``message_stop``. Encode each synthesized event as an SSE frame and
+  feed the whole batch.
+* **OpenAI**: parse ``ChatCompletion`` JSON, build a single
+  ``ChatCompletionChunk``-shaped frame whose ``delta`` carries the entire
+  ``message.content`` + ``tool_calls`` + ``finish_reason``. Single SSE frame.
+* **Google / Gemini / Vertex AI**: the buffered body is already a
+  ``GenerateContentResponse`` — the same shape the streaming intake parses
+  (``cloudcode-pa`` envelope unwrap is folded into the intake). Wrap as
+  one SSE frame; the FSM handles the rest.
+* **Perplexity Pro**: the buffered body IS concatenated SSE — feed
+  directly without synthesis.
+
+Output assembly:
+
+Unlike the streaming pipeline (which drives an SSE render FSM and emits
+listener SSE), buffered transforms must emit a single JSON object — the
+buffered shape the listener client expects. The function pulls the final
+assembled :class:`ModelResponsePartsManager.get_parts()` list after the
+intake drains, then serializes those parts into the listener's buffered
+JSON shape:
+
+* :data:`ListenerFormat.OPENAI_CHAT` → OpenAI ``ChatCompletion`` JSON.
+* :data:`ListenerFormat.ANTHROPIC_MESSAGES` → Anthropic ``BetaMessage``
+  JSON.
+
+The function is sync. For one-shot per-response use the simpler per-call
+asyncio-loop pattern; the streaming side's persistent-loop pattern is
+unjustified overhead here.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import concurrent.futures
+import json
+import logging
+import time
+import uuid
+from typing import TYPE_CHECKING, Any
+
+from pydantic_ai.messages import TextPart, ThinkingPart, ToolCallPart
+
+from ccproxy.lightllm.graph import (
+    _ANTHROPIC_COMPATIBLE,
+    _GOOGLE_COMPATIBLE,
+    UnsupportedListenerError,
+    UnsupportedUpstreamError,
+    dispatch_intake,
+)
+from ccproxy.lightllm.parsed import ListenerFormat
+
+if TYPE_CHECKING:
+    from pydantic_ai.messages import ModelResponsePart
+    from pydantic_ai.models import ModelRequestParameters
+
+    from ccproxy.lightllm.graph import AnyAsyncIntakeFSM
+
+logger = logging.getLogger(__name__)
+
+
+# ── SSE frame encoding helper ──────────────────────────────────────────────
+
+
+def _frame(event_dict: dict[str, Any], *, event_name: str | None = None) -> bytes:
+    """Encode one event dict as an SSE frame.
+
+    Anthropic frames are conventionally ``event: <name>\\ndata: <json>\\n\\n``;
+    OpenAI / Gemini / Perplexity frames are ``data: <json>\\n\\n``. The intake
+    parsers accept both, but we honor the convention per provider so
+    inspection of the synthesized bytes is unsurprising.
+    """
+    payload = json.dumps(event_dict, separators=(",", ":"))
+    if event_name is not None:
+        return f"event: {event_name}\ndata: {payload}\n\n".encode()
+    return f"data: {payload}\n\n".encode()
+
+
+# ── Anthropic: BetaMessage → synthetic event stream ────────────────────────
+
+
+def _synthesize_anthropic_sse(body: dict[str, Any]) -> bytes:
+    """Convert a buffered ``BetaMessage`` JSON dict into the synthetic SSE bytes
+    the :class:`AnthropicResponseIntakeFSM` would consume.
+
+    Mirrors what Anthropic itself would emit for ``stream: true``. Per content
+    block we emit one ``content_block_start`` (carrying the *empty* block
+    descriptor — matches the wire spec) + one ``content_block_delta`` (full
+    content as the single delta) + one ``content_block_stop``. For
+    ``redacted_thinking`` we attach the opaque ``data`` directly on the start
+    event since there's no streaming delta variant for it.
+    """
+    message_obj: dict[str, Any] = {
+        "id": body.get("id", "msg_buffered"),
+        "type": "message",
+        "role": body.get("role", "assistant"),
+        "content": [],
+        "model": body.get("model", "unknown"),
+        "stop_reason": None,
+        "stop_sequence": None,
+        "usage": body.get("usage", {"input_tokens": 0, "output_tokens": 0}),
+    }
+    frames: list[bytes] = [
+        _frame(
+            {"type": "message_start", "message": message_obj},
+            event_name="message_start",
+        )
+    ]
+
+    for idx, block in enumerate(body.get("content") or []):
+        if not isinstance(block, dict):
+            continue
+        btype = block.get("type")
+        if btype == "text":
+            start_block: dict[str, Any] = {"type": "text", "text": ""}
+            delta_event: dict[str, Any] | None = {
+                "type": "text_delta",
+                "text": block.get("text", ""),
+            }
+        elif btype == "thinking":
+            # Emit content + signature deltas separately so the intake walks
+            # both BetaThinkingDelta and BetaSignatureDelta branches.
+            start_block = {"type": "thinking", "thinking": "", "signature": ""}
+            content_text = block.get("thinking", "")
+            signature = block.get("signature", "")
+            frames.append(
+                _frame(
+                    {
+                        "type": "content_block_start",
+                        "index": idx,
+                        "content_block": start_block,
+                    },
+                    event_name="content_block_start",
+                )
+            )
+            if content_text:
+                frames.append(
+                    _frame(
+                        {
+                            "type": "content_block_delta",
+                            "index": idx,
+                            "delta": {
+                                "type": "thinking_delta",
+                                "thinking": content_text,
+                            },
+                        },
+                        event_name="content_block_delta",
+                    )
+                )
+            if signature:
+                frames.append(
+                    _frame(
+                        {
+                            "type": "content_block_delta",
+                            "index": idx,
+                            "delta": {
+                                "type": "signature_delta",
+                                "signature": signature,
+                            },
+                        },
+                        event_name="content_block_delta",
+                    )
+                )
+            frames.append(
+                _frame(
+                    {"type": "content_block_stop", "index": idx},
+                    event_name="content_block_stop",
+                )
+            )
+            continue
+        elif btype == "redacted_thinking":
+            # No streaming delta variant — pass the opaque ``data`` on start.
+            start_block = {
+                "type": "redacted_thinking",
+                "data": block.get("data", ""),
+            }
+            frames.append(
+                _frame(
+                    {
+                        "type": "content_block_start",
+                        "index": idx,
+                        "content_block": start_block,
+                    },
+                    event_name="content_block_start",
+                )
+            )
+            frames.append(
+                _frame(
+                    {"type": "content_block_stop", "index": idx},
+                    event_name="content_block_stop",
+                )
+            )
+            continue
+        elif btype == "tool_use":
+            start_block = {
+                "type": "tool_use",
+                "id": block.get("id", ""),
+                "name": block.get("name", ""),
+                "input": {},
+            }
+            # Wire deltas carry the JSON-serialized args as ``partial_json``.
+            input_obj = block.get("input") or {}
+            input_json = json.dumps(input_obj, separators=(",", ":"))
+            delta_event = (
+                {"type": "input_json_delta", "partial_json": input_json}
+                if input_obj
+                else None
+            )
+        else:
+            # Unknown block — pass through as a content_block_start with the
+            # original payload; the intake's discriminated TypeAdapter will
+            # skip what it can't parse.
+            frames.append(
+                _frame(
+                    {
+                        "type": "content_block_start",
+                        "index": idx,
+                        "content_block": block,
+                    },
+                    event_name="content_block_start",
+                )
+            )
+            frames.append(
+                _frame(
+                    {"type": "content_block_stop", "index": idx},
+                    event_name="content_block_stop",
+                )
+            )
+            continue
+
+        frames.append(
+            _frame(
+                {
+                    "type": "content_block_start",
+                    "index": idx,
+                    "content_block": start_block,
+                },
+                event_name="content_block_start",
+            )
+        )
+        if delta_event is not None:
+            frames.append(
+                _frame(
+                    {
+                        "type": "content_block_delta",
+                        "index": idx,
+                        "delta": delta_event,
+                    },
+                    event_name="content_block_delta",
+                )
+            )
+        frames.append(
+            _frame(
+                {"type": "content_block_stop", "index": idx},
+                event_name="content_block_stop",
+            )
+        )
+
+    frames.append(
+        _frame(
+            {
+                "type": "message_delta",
+                "delta": {
+                    "stop_reason": body.get("stop_reason"),
+                    "stop_sequence": body.get("stop_sequence"),
+                },
+                "usage": body.get("usage", {"output_tokens": 0}),
+            },
+            event_name="message_delta",
+        )
+    )
+    frames.append(_frame({"type": "message_stop"}, event_name="message_stop"))
+    return b"".join(frames)
+
+
+# ── OpenAI: ChatCompletion → synthetic ChatCompletionChunk ─────────────────
+
+
+def _synthesize_openai_sse(body: dict[str, Any]) -> bytes:
+    """Convert a buffered ``ChatCompletion`` JSON dict into a single synthetic
+    ``ChatCompletionChunk`` SSE frame.
+
+    The chunk's ``delta`` carries the entire ``message.content`` and any
+    ``tool_calls``; ``finish_reason`` rides on the same chunk. The intake
+    drains it via ``handle_text_delta`` / ``handle_tool_call_delta`` exactly
+    like a single-event streaming response.
+    """
+    choices = body.get("choices") or []
+    if not choices:
+        return b""
+    choice = choices[0]
+    message = choice.get("message") or {}
+
+    delta: dict[str, Any] = {"role": message.get("role", "assistant")}
+    content = message.get("content")
+    if content:
+        delta["content"] = content
+    refusal = message.get("refusal")
+    if refusal:
+        delta["refusal"] = refusal
+
+    raw_tool_calls = message.get("tool_calls") or []
+    if raw_tool_calls:
+        out_tool_calls: list[dict[str, Any]] = []
+        for tc_idx, tc in enumerate(raw_tool_calls):
+            if not isinstance(tc, dict):
+                continue
+            fn = tc.get("function") or {}
+            args = fn.get("arguments", "")
+            if not isinstance(args, str):
+                args = json.dumps(args, separators=(",", ":"))
+            out_tool_calls.append(
+                {
+                    "index": tc_idx,
+                    "id": tc.get("id"),
+                    "type": tc.get("type", "function"),
+                    "function": {
+                        "name": fn.get("name", ""),
+                        "arguments": args,
+                    },
+                }
+            )
+        delta["tool_calls"] = out_tool_calls
+
+    chunk_dict: dict[str, Any] = {
+        "id": body.get("id", "chatcmpl-buffered"),
+        "object": "chat.completion.chunk",
+        "created": body.get("created", 0),
+        "model": body.get("model", "unknown"),
+        "choices": [
+            {
+                "index": choice.get("index", 0),
+                "delta": delta,
+                "finish_reason": choice.get("finish_reason"),
+                "logprobs": choice.get("logprobs"),
+            }
+        ],
+    }
+    return _frame(chunk_dict) + b"data: [DONE]\n\n"
+
+
+# ── Google: GenerateContentResponse → single SSE frame ─────────────────────
+
+
+def _synthesize_google_sse(body: dict[str, Any]) -> bytes:
+    """Wrap a buffered ``GenerateContentResponse`` JSON dict as one SSE frame.
+
+    Standard ``generateContent`` and streaming ``streamGenerateContent`` emit
+    structurally identical per-chunk payloads — both are
+    ``GenerateContentResponse``. The intake's parser doesn't care whether
+    there's one chunk or many. The intake also folds the cloudcode-pa
+    ``{response: {...}}`` envelope unwrap, so passing either shape is safe.
+    """
+    return _frame(body)
+
+
+# ── IR parts → listener-buffered JSON ──────────────────────────────────────
+
+
+_OPENAI_FINISH_BY_PART: dict[type, str] = {
+    ToolCallPart: "tool_calls",
+}
+
+
+def _parts_to_openai_chat_completion(
+    *,
+    parts: list[ModelResponsePart],
+    model: str,
+    provider_response_id: str | None = None,
+    finish_reason: str | None = None,
+) -> dict[str, Any]:
+    """Serialize IR parts into an OpenAI ``ChatCompletion`` JSON dict.
+
+    One ``choice`` with a ``message`` carrying assembled text + tool_calls
+    + finish_reason.
+    """
+    content_chunks: list[str] = []
+    out_tool_calls: list[dict[str, Any]] = []
+    for part in parts:
+        if isinstance(part, TextPart):
+            if part.content:
+                content_chunks.append(part.content)
+        elif isinstance(part, ToolCallPart):
+            args = part.args
+            args_str = (
+                args
+                if isinstance(args, str)
+                else json.dumps(args or {}, separators=(",", ":"))
+            )
+            out_tool_calls.append(
+                {
+                    "id": part.tool_call_id,
+                    "type": "function",
+                    "function": {
+                        "name": part.tool_name,
+                        "arguments": args_str,
+                    },
+                }
+            )
+
+    content_str = "".join(content_chunks) if content_chunks else None
+    resolved_finish = finish_reason or ("tool_calls" if out_tool_calls else "stop")
+    message: dict[str, Any] = {
+        "role": "assistant",
+        "content": content_str,
+    }
+    if out_tool_calls:
+        message["tool_calls"] = out_tool_calls
+
+    return {
+        "id": provider_response_id or f"chatcmpl-{uuid.uuid4().hex[:24]}",
+        "object": "chat.completion",
+        "created": int(time.time()),
+        "model": model,
+        "choices": [
+            {
+                "index": 0,
+                "message": message,
+                "finish_reason": resolved_finish,
+                "logprobs": None,
+            }
+        ],
+    }
+
+
+def _parts_to_anthropic_message(
+    *,
+    parts: list[ModelResponsePart],
+    model: str,
+    provider_response_id: str | None = None,
+    stop_reason: str | None = None,
+) -> dict[str, Any]:
+    """Serialize IR parts into an Anthropic ``BetaMessage`` JSON dict."""
+    blocks: list[dict[str, Any]] = []
+    for part in parts:
+        if isinstance(part, TextPart):
+            if part.content:
+                blocks.append({"type": "text", "text": part.content})
+        elif isinstance(part, ThinkingPart):
+            if part.id == "redacted_thinking":
+                blocks.append(
+                    {"type": "redacted_thinking", "data": part.signature or ""}
+                )
+            else:
+                blocks.append(
+                    {
+                        "type": "thinking",
+                        "thinking": part.content or "",
+                        "signature": part.signature or "",
+                    }
+                )
+        elif isinstance(part, ToolCallPart):
+            args = part.args
+            input_obj = args if isinstance(args, dict) else (json.loads(args) if isinstance(args, str) and args else {})
+            blocks.append(
+                {
+                    "type": "tool_use",
+                    "id": part.tool_call_id,
+                    "name": part.tool_name,
+                    "input": input_obj,
+                }
+            )
+
+    resolved_stop = stop_reason or (
+        "tool_use" if any(b.get("type") == "tool_use" for b in blocks) else "end_turn"
+    )
+    return {
+        "id": provider_response_id or f"msg_{uuid.uuid4().hex[:24]}",
+        "type": "message",
+        "role": "assistant",
+        "content": blocks,
+        "model": model,
+        "stop_reason": resolved_stop,
+        "stop_sequence": None,
+        "usage": {"input_tokens": 0, "output_tokens": 0},
+    }
+
+
+# ── Public sync entry point ────────────────────────────────────────────────
+
+
+def transform_buffered_response_sync(
+    *,
+    raw_bytes: bytes,
+    upstream_provider: str,
+    listener_format: ListenerFormat,
+    model: str,
+    request_params: ModelRequestParameters,
+) -> bytes:
+    """Transform a buffered upstream response into listener-buffered JSON bytes.
+
+    Provider routing:
+
+    * Anthropic-compatible (anthropic / deepseek / zai) → parse
+      ``BetaMessage`` JSON → synthesize SSE → feed Anthropic intake FSM.
+    * OpenAI → parse ``ChatCompletion`` JSON → synthesize one
+      ``ChatCompletionChunk`` SSE frame → feed OpenAI intake FSM.
+    * Google family (google / gemini / vertex_ai / vertex_ai_beta) → parse
+      ``GenerateContentResponse`` JSON → wrap as one SSE frame → feed
+      Google intake FSM (folds cloudcode-pa envelope unwrap internally).
+    * Perplexity Pro → body is already concatenated SSE → feed directly.
+
+    Output assembly: pull ``parts_manager.get_parts()`` from the intake
+    after the synthetic SSE drains, then serialize those parts into the
+    listener's buffered JSON shape (OpenAI ``ChatCompletion`` or Anthropic
+    ``BetaMessage``).
+    """
+    if upstream_provider in _ANTHROPIC_COMPATIBLE:
+        body = _parse_json_body(raw_bytes)
+        synthetic_sse = _synthesize_anthropic_sse(body) if isinstance(body, dict) else b""
+    elif upstream_provider == "openai":
+        body = _parse_json_body(raw_bytes)
+        synthetic_sse = _synthesize_openai_sse(body) if isinstance(body, dict) else b""
+    elif upstream_provider in _GOOGLE_COMPATIBLE:
+        body = _parse_json_body(raw_bytes)
+        synthetic_sse = _synthesize_google_sse(body) if isinstance(body, dict) else b""
+    elif upstream_provider == "perplexity_pro":
+        synthetic_sse = raw_bytes
+    else:
+        raise UnsupportedUpstreamError(
+            f"no buffered transform for upstream_provider={upstream_provider!r}"
+        )
+
+    intake = dispatch_intake(
+        upstream_provider=upstream_provider,
+        model=model,
+        request_params=request_params,
+    )
+    parts = _run_intake_one_shot(intake=intake, raw=synthetic_sse)
+
+    if listener_format is ListenerFormat.OPENAI_CHAT:
+        out_dict = _parts_to_openai_chat_completion(
+            parts=parts,
+            model=model,
+            provider_response_id=_intake_provider_response_id(intake),
+            finish_reason=_intake_finish_reason(intake),
+        )
+    elif listener_format is ListenerFormat.ANTHROPIC_MESSAGES:
+        out_dict = _parts_to_anthropic_message(parts=parts, model=model)
+    else:
+        raise UnsupportedListenerError(
+            f"no buffered renderer for listener_format={listener_format}"
+        )
+
+    return json.dumps(out_dict, separators=(",", ":")).encode()
+
+
+# ── Helpers ────────────────────────────────────────────────────────────────
+
+
+def _parse_json_body(raw_bytes: bytes) -> Any:
+    if not raw_bytes:
+        return {}
+    try:
+        return json.loads(raw_bytes)
+    except (ValueError, TypeError):
+        logger.debug("buffered transform: unparseable upstream body; treating as empty")
+        return {}
+
+
+def _intake_provider_response_id(intake: AnyAsyncIntakeFSM) -> str | None:
+    """Pull the upstream response id from the intake if it tracks one (OpenAI only)."""
+    return getattr(intake, "provider_response_id", None)
+
+
+def _intake_finish_reason(intake: AnyAsyncIntakeFSM) -> str | None:
+    """Pull a finish-reason hint from the intake when available (OpenAI only)."""
+    fr = getattr(intake, "finish_reason", None)
+    if fr is None:
+        return None
+    # pydantic-ai's FinishReason includes ``tool_call`` (singular); the
+    # OpenAI wire uses ``tool_calls``.
+    return "tool_calls" if fr == "tool_call" else str(fr)
+
+
+# ── Sync driver — one-shot asyncio loop ────────────────────────────────────
+
+
+def _run_intake_one_shot(
+    *,
+    intake: AnyAsyncIntakeFSM,
+    raw: bytes,
+) -> list[ModelResponsePart]:
+    """Drive ``intake.feed(raw)`` then ``intake.close()`` synchronously and
+    return the final assembled parts list.
+
+    Mirrors the worker-thread bridge used by :func:`dispatch_dump_sync` —
+    a private asyncio loop on this thread if no loop is running, otherwise
+    a worker thread that owns its own loop. One-shot per response, no
+    persistent loop overhead.
+    """
+
+    async def _async() -> list[ModelResponsePart]:
+        await intake.feed(raw)
+        await intake.close()
+        return list(intake.parts_manager.get_parts())
+
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(_async())
+        finally:
+            loop.close()
+
+    def _worker() -> list[ModelResponsePart]:
+        worker_loop = asyncio.new_event_loop()
+        try:
+            return worker_loop.run_until_complete(_async())
+        finally:
+            worker_loop.close()
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        return pool.submit(_worker).result()

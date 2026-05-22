@@ -1,4 +1,4 @@
-"""Tests for ``ccproxy.lightllm.response.render_anthropic.AnthropicResponseRender``.
+"""Tests for the Anthropic Messages SSE renderer FSM.
 
 Covers:
 - Empty stream — just ``close()`` — emits ``message_start`` + ``message_delta``
@@ -12,18 +12,24 @@ Covers:
 - Redacted thinking — verifies the ``redacted_thinking`` block descriptor.
 - Tool call with JSON args — verifies ``tool_use`` block start and
   ``input_json_delta`` deltas.
-- Roundtrip property — render IR events from
-  ``AnthropicResponseIntake.feed`` of a captured SSE byte stream, feed the
-  rendered bytes back into a fresh intake, assert the resulting
-  ``ModelResponse`` is structurally equal.
+- Roundtrip property — render IR events from the intake FSM of a captured
+  SSE byte stream, feed the rendered bytes back into a fresh intake, assert
+  the resulting parts are structurally equal.
+
+The production FSMs are async; ``_AnthropicRenderFSMAdapter`` /
+``_AnthropicIntakeFSMAdapter`` wrap them with one-fresh-loop-per-call sync
+surfaces (the persistent-loop bridge lives in :class:`SSEPipeline` for
+production).
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
-from collections.abc import Iterable
-from typing import Any
+from collections.abc import Callable, Iterable
+from typing import Any, Protocol
 
+import pytest
 from pydantic_ai.messages import (
     FinalResultEvent,
     ModelResponseStreamEvent,
@@ -39,8 +45,64 @@ from pydantic_ai.messages import (
 )
 from pydantic_ai.models import ModelRequestParameters
 
-from ccproxy.lightllm.response.intake_anthropic import AnthropicResponseIntake
-from ccproxy.lightllm.response.render_anthropic import AnthropicResponseRender
+from ccproxy.lightllm.graph.anthropic_intake import AnthropicResponseIntakeFSM
+from ccproxy.lightllm.graph.anthropic_render import AnthropicResponseRenderFSM
+
+# ---------------------------------------------------------------------------
+# Adapters
+# ---------------------------------------------------------------------------
+
+
+class _RenderLike(Protocol):
+    """Sync-callable surface around the async FSM render."""
+
+    name: str
+
+    def render(self, event: ModelResponseStreamEvent) -> bytes: ...
+
+    def close(self) -> bytes: ...
+
+
+class _AnthropicRenderFSMAdapter:
+    """Sync-facing adapter around the async :class:`AnthropicResponseRenderFSM`.
+
+    The production FSM is async (the persistent-loop bridge lives in
+    :class:`SSEPipeline`). For tests, one fresh asyncio loop per
+    ``render`` / ``close`` call is fine — tests aren't on a hot path.
+    """
+
+    name = "anthropic_messages"
+
+    def __init__(self, *, model: str = "unknown") -> None:
+        self._fsm = AnthropicResponseRenderFSM(model=model)
+
+    def render(self, event: ModelResponseStreamEvent) -> bytes:
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(self._fsm.render(event))
+        finally:
+            loop.close()
+
+    def close(self) -> bytes:
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(self._fsm.close())
+        finally:
+            loop.close()
+
+
+_RenderFactory = Callable[[], _RenderLike]
+
+
+@pytest.fixture
+def render_factory() -> _RenderFactory:
+    """Factory for the FSM render wrapped in a sync adapter."""
+
+    def _make() -> _RenderLike:
+        return _AnthropicRenderFSMAdapter(model="claude-3-haiku-20240307")
+
+    return _make
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -67,8 +129,8 @@ def _parse_sse(data: bytes) -> list[tuple[str, dict[str, Any]]]:
     return frames
 
 
-def _render_all(events: Iterable[ModelResponseStreamEvent]) -> bytes:
-    render = AnthropicResponseRender(model="claude-3-haiku-20240307")
+def _render_all(events: Iterable[ModelResponseStreamEvent], render_factory: _RenderFactory) -> bytes:
+    render = render_factory()
     out = bytearray()
     for ev in events:
         out += render.render(ev)
@@ -85,8 +147,8 @@ def _frame_anthropic_sse(events: list[dict[str, Any]]) -> bytes:
 # ---------------------------------------------------------------------------
 
 
-def test_empty_stream_emits_message_start_delta_stop() -> None:
-    render = AnthropicResponseRender(model="claude-3-haiku-20240307")
+def test_empty_stream_emits_message_start_delta_stop(render_factory: _RenderFactory) -> None:
+    render = render_factory()
     out = render.close()
     frames = _parse_sse(out)
     names = [name for name, _ in frames]
@@ -114,13 +176,13 @@ def test_empty_stream_emits_message_start_delta_stop() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_single_text_part_emits_full_block_lifecycle() -> None:
+def test_single_text_part_emits_full_block_lifecycle(render_factory: _RenderFactory) -> None:
     events: list[ModelResponseStreamEvent] = [
         PartStartEvent(index=0, part=TextPart(content="")),
         PartDeltaEvent(index=0, delta=TextPartDelta(content_delta="hello")),
         PartEndEvent(index=0, part=TextPart(content="hello")),
     ]
-    out = _render_all(events)
+    out = _render_all(events, render_factory)
     frames = _parse_sse(out)
     names = [name for name, _ in frames]
     assert names == [
@@ -155,7 +217,7 @@ def test_single_text_part_emits_full_block_lifecycle() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_multi_block_closes_previous_when_new_part_starts_without_end() -> None:
+def test_multi_block_closes_previous_when_new_part_starts_without_end(render_factory: _RenderFactory) -> None:
     """A ``PartStartEvent`` arriving while a block is open closes the previous block first."""
     events: list[ModelResponseStreamEvent] = [
         PartStartEvent(index=0, part=TextPart(content="")),
@@ -170,7 +232,7 @@ def test_multi_block_closes_previous_when_new_part_starts_without_end() -> None:
             part=ToolCallPart(tool_name="get_weather", args='{"city":"Paris"}', tool_call_id="toolu_01XYZ"),
         ),
     ]
-    out = _render_all(events)
+    out = _render_all(events, render_factory)
     frames = _parse_sse(out)
     names = [name for name, _ in frames]
     assert names == [
@@ -210,14 +272,14 @@ def test_multi_block_closes_previous_when_new_part_starts_without_end() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_thinking_block_emits_thinking_then_signature_deltas() -> None:
+def test_thinking_block_emits_thinking_then_signature_deltas(render_factory: _RenderFactory) -> None:
     events: list[ModelResponseStreamEvent] = [
         PartStartEvent(index=0, part=ThinkingPart(content="")),
         PartDeltaEvent(index=0, delta=ThinkingPartDelta(content_delta="reasoning")),
         PartDeltaEvent(index=0, delta=ThinkingPartDelta(signature_delta="abc123")),
         PartEndEvent(index=0, part=ThinkingPart(content="reasoning", signature="abc123")),
     ]
-    out = _render_all(events)
+    out = _render_all(events, render_factory)
     frames = _parse_sse(out)
     names = [name for name, _ in frames]
     assert names == [
@@ -257,7 +319,7 @@ def test_thinking_block_emits_thinking_then_signature_deltas() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_redacted_thinking_block_uses_redacted_thinking_type() -> None:
+def test_redacted_thinking_block_uses_redacted_thinking_type(render_factory: _RenderFactory) -> None:
     events: list[ModelResponseStreamEvent] = [
         PartStartEvent(
             index=0,
@@ -268,7 +330,7 @@ def test_redacted_thinking_block_uses_redacted_thinking_type() -> None:
             part=ThinkingPart(content="", id="redacted_thinking", signature="opaque_blob"),
         ),
     ]
-    out = _render_all(events)
+    out = _render_all(events, render_factory)
     frames = _parse_sse(out)
     names = [name for name, _ in frames]
     assert names == [
@@ -292,7 +354,7 @@ def test_redacted_thinking_block_uses_redacted_thinking_type() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_tool_call_with_dict_args_delta_json_encodes_partial_json() -> None:
+def test_tool_call_with_dict_args_delta_json_encodes_partial_json(render_factory: _RenderFactory) -> None:
     events: list[ModelResponseStreamEvent] = [
         PartStartEvent(
             index=0,
@@ -304,7 +366,7 @@ def test_tool_call_with_dict_args_delta_json_encodes_partial_json() -> None:
             part=ToolCallPart(tool_name="get_weather", args={"city": "Paris"}, tool_call_id="toolu_002"),
         ),
     ]
-    out = _render_all(events)
+    out = _render_all(events, render_factory)
     frames = _parse_sse(out)
     names = [name for name, _ in frames]
     assert names == [
@@ -330,11 +392,51 @@ def test_tool_call_with_dict_args_delta_json_encodes_partial_json() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _new_intake() -> AnthropicResponseIntake:
-    return AnthropicResponseIntake(
-        model="claude-3-haiku-20240307",
-        request_params=ModelRequestParameters(),
-    )
+class _IntakeLike(Protocol):
+    """Sync-callable surface around the async FSM intake."""
+
+    def feed(self, data: bytes) -> Iterable[ModelResponseStreamEvent]: ...
+
+    def close(self) -> Iterable[ModelResponseStreamEvent]: ...
+
+    @property
+    def parts_manager(self) -> Any: ...
+
+
+class _AnthropicIntakeFSMAdapter:
+    """Sync-facing adapter around the async :class:`AnthropicResponseIntakeFSM`."""
+
+    def __init__(self) -> None:
+        self._fsm = AnthropicResponseIntakeFSM(
+            model="claude-3-haiku-20240307",
+            request_params=ModelRequestParameters(),
+        )
+
+    @property
+    def parts_manager(self) -> Any:
+        return self._fsm.parts_manager
+
+    def feed(self, data: bytes) -> list[ModelResponseStreamEvent]:
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(self._fsm.feed(data))
+        finally:
+            loop.close()
+
+    def close(self) -> list[ModelResponseStreamEvent]:
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(self._fsm.close())
+        finally:
+            loop.close()
+
+
+def _new_intake() -> _IntakeLike:
+    return _AnthropicIntakeFSMAdapter()
+
+
+def _new_render() -> _RenderLike:
+    return _AnthropicRenderFSMAdapter(model="claude-3-haiku-20240307")
 
 
 CAPTURED_TEXT_STREAM: list[dict[str, Any]] = [
@@ -436,13 +538,23 @@ def _summary_from_intake(sse: bytes) -> list[tuple[str, str]]:
     return summary
 
 
+def _render_events(events: Iterable[ModelResponseStreamEvent]) -> bytes:
+    """Drive a one-off render of an event sequence."""
+    render = _new_render()
+    out = bytearray()
+    for ev in events:
+        out += render.render(ev)
+    out += render.close()
+    return bytes(out)
+
+
 def test_roundtrip_text_stream_preserves_semantics() -> None:
     sse = _frame_anthropic_sse(CAPTURED_TEXT_STREAM)
     original_summary = _summary_from_intake(sse)
 
     # Parse → render → parse again and confirm equivalence.
     ir_events = _ir_events_from_sse(sse)
-    rendered = _render_all(ir_events)
+    rendered = _render_events(ir_events)
     roundtrip_summary = _summary_from_intake(rendered)
 
     assert original_summary == roundtrip_summary
@@ -454,7 +566,7 @@ def test_roundtrip_tool_stream_preserves_semantics() -> None:
     original_summary = _summary_from_intake(sse)
 
     ir_events = _ir_events_from_sse(sse)
-    rendered = _render_all(ir_events)
+    rendered = _render_events(ir_events)
     roundtrip_summary = _summary_from_intake(rendered)
 
     assert original_summary == roundtrip_summary
@@ -466,7 +578,7 @@ def test_roundtrip_tool_stream_preserves_semantics() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_final_result_event_emits_no_bytes() -> None:
-    render = AnthropicResponseRender(model="claude-3-haiku-20240307")
+def test_final_result_event_emits_no_bytes(render_factory: _RenderFactory) -> None:
+    render = render_factory()
     out = render.render(FinalResultEvent(tool_name=None, tool_call_id=None))
     assert out == b""

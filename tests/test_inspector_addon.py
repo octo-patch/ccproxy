@@ -491,7 +491,9 @@ class TestResponseHeadersEdgeCases:
 
     @pytest.mark.asyncio
     async def test_responseheaders_sse_transformer_error_with_transform_mode(self) -> None:
-        """When mode=transform and make_sse_transformer raises, fall back to passthrough."""
+        """When mode=transform and SSEPipeline construction raises, fall back to passthrough."""
+        from pydantic_ai.models import ModelRequestParameters
+
         addon = InspectorAddon()
         meta = TransformMeta(
             provider="anthropic",
@@ -499,13 +501,18 @@ class TestResponseHeadersEdgeCases:
             request_data={"messages": []},
             is_streaming=True,
             mode="transform",
+            listener_format="openai_chat",
+            request_parameters=ModelRequestParameters(),
         )
         record = FlowRecord(direction="inbound", transform=meta)
         flow = MagicMock()
         flow.response.headers = {"content-type": "text/event-stream"}
         flow.metadata = {InspectorMeta.RECORD: record}
 
-        with patch("ccproxy.lightllm.dispatch.make_sse_transformer", side_effect=RuntimeError("fail")):
+        with patch(
+            "ccproxy.lightllm.graph.dispatch_intake",
+            side_effect=RuntimeError("fail"),
+        ):
             await addon.responseheaders(flow)
 
         assert flow.response.stream is True

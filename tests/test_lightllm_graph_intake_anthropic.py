@@ -1,4 +1,4 @@
-"""Tests for ``ccproxy.lightllm.response.intake_anthropic.AnthropicResponseIntake``.
+"""Tests for the Anthropic Messages SSE intake FSM.
 
 Covers:
 - Synthetic SSE roundtrip with a representative event mix.
@@ -11,16 +11,22 @@ Covers:
 - Thinking block sequence: ``thinking`` start + ``thinking_delta`` + stop
   produces a ``ThinkingPart``.
 - ``upstream_raw_bytes`` is a byte-for-byte tee of all fed data.
+
+The production FSM is async; ``_AnthropicFSMAdapter`` wraps it with a
+one-fresh-loop-per-call sync surface for tests (the persistent-loop bridge
+lives in :class:`SSEPipeline` for production).
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Protocol
 
 import pytest
+from pydantic_ai._parts_manager import ModelResponsePartsManager
 from pydantic_ai.messages import (
     ModelResponseStreamEvent,
     PartDeltaEvent,
@@ -32,7 +38,7 @@ from pydantic_ai.messages import (
 )
 from pydantic_ai.models import ModelRequestParameters
 
-from ccproxy.lightllm.response.intake_anthropic import AnthropicResponseIntake
+from ccproxy.lightllm.graph.anthropic_intake import AnthropicResponseIntakeFSM
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -48,14 +54,70 @@ def _frames(events: Iterable[dict[str, Any]]) -> bytes:
     return b"".join(_frame(e) for e in events)
 
 
-def _new_intake() -> AnthropicResponseIntake:
-    return AnthropicResponseIntake(
-        model="claude-3-haiku-20240307",
-        request_params=ModelRequestParameters(),
-    )
+class _IntakeLike(Protocol):
+    """Sync-callable surface around the async FSM intake."""
+
+    upstream_raw_bytes: bytearray
+
+    @property
+    def parts_manager(self) -> ModelResponsePartsManager: ...
+
+    def feed(self, data: bytes) -> Iterable[ModelResponseStreamEvent]: ...
+
+    def close(self) -> Iterable[ModelResponseStreamEvent]: ...
 
 
-def _drive(intake: AnthropicResponseIntake, data: bytes, chunk_size: int) -> list[ModelResponseStreamEvent]:
+class _AnthropicFSMAdapter:
+    """Sync-facing adapter around the async :class:`AnthropicResponseIntakeFSM`.
+
+    The production FSM is async (the persistent-loop bridge lives in
+    :class:`SSEPipeline`). For tests, one fresh asyncio loop per
+    ``feed`` / ``close`` call is fine — tests aren't on a hot path.
+    """
+
+    def __init__(self, *, model: str, request_params: ModelRequestParameters) -> None:
+        self._fsm = AnthropicResponseIntakeFSM(model=model, request_params=request_params)
+
+    @property
+    def parts_manager(self) -> ModelResponsePartsManager:
+        return self._fsm.parts_manager
+
+    @property
+    def upstream_raw_bytes(self) -> bytearray:
+        return self._fsm.upstream_raw_bytes
+
+    def feed(self, data: bytes) -> list[ModelResponseStreamEvent]:
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(self._fsm.feed(data))
+        finally:
+            loop.close()
+
+    def close(self) -> list[ModelResponseStreamEvent]:
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(self._fsm.close())
+        finally:
+            loop.close()
+
+
+_IntakeFactory = Callable[[], _IntakeLike]
+
+
+@pytest.fixture
+def intake_factory() -> _IntakeFactory:
+    """Factory for the FSM intake wrapped in a sync adapter."""
+
+    def _make() -> _IntakeLike:
+        return _AnthropicFSMAdapter(
+            model="claude-3-haiku-20240307",
+            request_params=ModelRequestParameters(),
+        )
+
+    return _make
+
+
+def _drive(intake: _IntakeLike, data: bytes, chunk_size: int) -> list[ModelResponseStreamEvent]:
     """Feed ``data`` to ``intake`` in chunks of ``chunk_size`` bytes."""
     events: list[ModelResponseStreamEvent] = []
     for start in range(0, len(data), chunk_size):
@@ -245,8 +307,8 @@ THINKING_STREAM = StreamFixture(
 
 
 class TestRoundtrip:
-    def test_text_stream_roundtrips_to_concatenated_text(self) -> None:
-        intake = _new_intake()
+    def test_text_stream_roundtrips_to_concatenated_text(self, intake_factory: _IntakeFactory) -> None:
+        intake = intake_factory()
         sse = _frames(TEXT_STREAM.events)
 
         events = list(intake.feed(sse))
@@ -264,8 +326,8 @@ class TestRoundtrip:
         assert any(isinstance(e, PartStartEvent) for e in events)
         assert any(isinstance(e, PartDeltaEvent) for e in events)
 
-    def test_tool_use_stream_assembles_tool_call_part(self) -> None:
-        intake = _new_intake()
+    def test_tool_use_stream_assembles_tool_call_part(self, intake_factory: _IntakeFactory) -> None:
+        intake = intake_factory()
         sse = _frames(TOOL_USE_STREAM.events)
 
         list(intake.feed(sse))
@@ -280,8 +342,8 @@ class TestRoundtrip:
         # Args accumulate as the concatenated JSON string of all input_json_delta payloads.
         assert tool_part.args == '{"city": "Paris"}'
 
-    def test_thinking_stream_assembles_thinking_part(self) -> None:
-        intake = _new_intake()
+    def test_thinking_stream_assembles_thinking_part(self, intake_factory: _IntakeFactory) -> None:
+        intake = intake_factory()
         sse = _frames(THINKING_STREAM.events)
 
         list(intake.feed(sse))
@@ -308,13 +370,15 @@ class TestRoundtrip:
         pytest.param(THINKING_STREAM, id=THINKING_STREAM.name),
     ],
 )
-def test_chunk_boundaries_do_not_affect_ir_events(fixture: StreamFixture) -> None:
+def test_chunk_boundaries_do_not_affect_ir_events(
+    fixture: StreamFixture, intake_factory: _IntakeFactory
+) -> None:
     """Feeding the same byte stream in different chunk sizes yields identical IR events."""
     sse = _frames(fixture.events)
 
     summaries: list[list[tuple[str, int, str]]] = []
     for chunk_size in (1, 16, len(sse)):
-        intake = _new_intake()
+        intake = intake_factory()
         events = _drive(intake, sse, chunk_size)
         summaries.append(_summarize(events))
 
@@ -328,8 +392,8 @@ def test_chunk_boundaries_do_not_affect_ir_events(fixture: StreamFixture) -> Non
 
 
 class TestPartialFrameHandling:
-    def test_half_frame_buffered_until_completion(self) -> None:
-        intake = _new_intake()
+    def test_half_frame_buffered_until_completion(self, intake_factory: _IntakeFactory) -> None:
+        intake = intake_factory()
         # message_start has no SSE-level IR emission, but content_block_delta does — use that.
         block_start = _frame(
             {
@@ -366,8 +430,8 @@ class TestPartialFrameHandling:
 # ---------------------------------------------------------------------------
 
 
-def test_upstream_raw_bytes_is_byte_for_byte_tee() -> None:
-    intake = _new_intake()
+def test_upstream_raw_bytes_is_byte_for_byte_tee(intake_factory: _IntakeFactory) -> None:
+    intake = intake_factory()
     sse = _frames(TEXT_STREAM.events)
 
     # Feed in irregular chunks
@@ -394,8 +458,10 @@ def test_upstream_raw_bytes_is_byte_for_byte_tee() -> None:
         pytest.param(b"\r\n\r\n", "crlf_crlf", id="crlf_crlf_separator"),
     ],
 )
-def test_both_sse_separators_are_recognized(separator: bytes, label: str) -> None:
-    intake = _new_intake()
+def test_both_sse_separators_are_recognized(
+    separator: bytes, label: str, intake_factory: _IntakeFactory
+) -> None:
+    intake = intake_factory()
     payload = json.dumps(
         {
             "type": "content_block_start",
@@ -415,17 +481,20 @@ def test_both_sse_separators_are_recognized(separator: bytes, label: str) -> Non
 # ---------------------------------------------------------------------------
 
 
-def test_empty_feed_yields_nothing() -> None:
-    intake = _new_intake()
+def test_empty_feed_yields_nothing(intake_factory: _IntakeFactory) -> None:
+    intake = intake_factory()
     assert list(intake.feed(b"")) == []
     assert list(intake.close()) == []
     assert bytes(intake.upstream_raw_bytes) == b""
 
 
-def test_unparseable_frame_is_skipped_without_crashing(caplog: pytest.LogCaptureFixture) -> None:
-    intake = _new_intake()
+def test_unparseable_frame_is_skipped_without_crashing(
+    intake_factory: _IntakeFactory, caplog: pytest.LogCaptureFixture
+) -> None:
+    intake = intake_factory()
     bad = b"event: broken\ndata: {not valid json}\n\n"
 
-    events = list(intake.feed(bad))
+    with caplog.at_level("DEBUG"):
+        events = list(intake.feed(bad))
     assert events == []
-    # The intake debug-logs the failure rather than crashing.
+    assert any("skipping unparseable frame" in r.message for r in caplog.records)

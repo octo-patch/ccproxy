@@ -30,7 +30,7 @@ def _make_flow(
     body: dict[str, Any] | None = None,
     direction: str = "inbound",
     proxy_mode: Any = None,
-) -> MagicMock:
+) -> Any:
     """Build a mock HTTPFlow for testing transform routes."""
     flow = MagicMock()
     flow.request.pretty_host = host
@@ -89,7 +89,7 @@ def _make_provider(
 
 
 class TestResolveTransformTarget:
-    def test_matches_host_and_path(self, cleanup: None) -> None:
+    def test_matches_host_and_path(self) -> None:
         _make_config_with_transforms(
             [
                 {
@@ -102,10 +102,10 @@ class TestResolveTransformTarget:
         )
         flow = _make_flow(host="api.openai.com", path="/v1/chat/completions")
         target = _resolve_transform_target(flow)
-        assert target is not None
+        assert isinstance(target, TransformOverride)
         assert target.dest_provider == "anthropic"
 
-    def test_no_match_different_host(self, cleanup: None) -> None:
+    def test_no_match_different_host(self) -> None:
         _make_config_with_transforms(
             [
                 {
@@ -119,7 +119,7 @@ class TestResolveTransformTarget:
         flow = _make_flow(host="api.anthropic.com", path="/v1/messages")
         assert _resolve_transform_target(flow) is None
 
-    def test_no_match_different_path(self, cleanup: None) -> None:
+    def test_no_match_different_path(self) -> None:
         _make_config_with_transforms(
             [
                 {
@@ -133,12 +133,12 @@ class TestResolveTransformTarget:
         flow = _make_flow(host="api.openai.com", path="/v1/embeddings")
         assert _resolve_transform_target(flow) is None
 
-    def test_empty_transforms(self, cleanup: None) -> None:
+    def test_empty_transforms(self) -> None:
         _make_config_with_transforms([])
         flow = _make_flow()
         assert _resolve_transform_target(flow) is None
 
-    def test_first_match_wins(self, cleanup: None) -> None:
+    def test_first_match_wins(self) -> None:
         _make_config_with_transforms(
             [
                 {
@@ -157,10 +157,10 @@ class TestResolveTransformTarget:
         )
         flow = _make_flow()
         target = _resolve_transform_target(flow)
-        assert target is not None
+        assert isinstance(target, TransformOverride)
         assert target.dest_model == "claude-first"
 
-    def test_path_prefix_match(self, cleanup: None) -> None:
+    def test_path_prefix_match(self) -> None:
         _make_config_with_transforms(
             [
                 {
@@ -175,7 +175,7 @@ class TestResolveTransformTarget:
         target = _resolve_transform_target(flow)
         assert target is not None
 
-    def test_match_model(self, cleanup: None) -> None:
+    def test_match_model(self) -> None:
         _make_config_with_transforms(
             [
                 {
@@ -189,10 +189,10 @@ class TestResolveTransformTarget:
         flow = _make_flow(body={"model": "gpt-4o", "messages": [{"role": "user", "content": "hi"}]})
         body = json.loads(flow.request.content)
         target = _resolve_transform_target(flow, body)
-        assert target is not None
+        assert isinstance(target, TransformOverride)
         assert target.dest_provider == "anthropic"
 
-    def test_match_model_no_match(self, cleanup: None) -> None:
+    def test_match_model_no_match(self) -> None:
         _make_config_with_transforms(
             [
                 {
@@ -207,7 +207,7 @@ class TestResolveTransformTarget:
         body = json.loads(flow.request.content)
         assert _resolve_transform_target(flow, body) is None
 
-    def test_null_match_host_matches_any(self, cleanup: None) -> None:
+    def test_null_match_host_matches_any(self) -> None:
         _make_config_with_transforms(
             [
                 {
@@ -225,7 +225,7 @@ class TestResolveTransformTarget:
 class TestSentinelResolvedProvider:
     """Resolve target via flow.metadata['ccproxy.oauth_provider'] when no override matches."""
 
-    def test_returns_provider_for_known_sentinel(self, cleanup: None) -> None:
+    def test_returns_provider_for_known_sentinel(self) -> None:
         provider = _make_provider(host="api.anthropic.com", path="/v1/messages", provider="anthropic")
         _make_config_with_providers({"anthropic": provider})
 
@@ -236,18 +236,18 @@ class TestSentinelResolvedProvider:
         assert isinstance(target, Provider)
         assert target is provider
 
-    def test_returns_none_when_no_override_and_no_sentinel(self, cleanup: None) -> None:
+    def test_returns_none_when_no_override_and_no_sentinel(self) -> None:
         _make_config_with_providers({})
         flow = _make_flow(host="proxy.local", path="/v1/chat/completions")
         assert _resolve_transform_target(flow) is None
 
-    def test_returns_none_when_sentinel_provider_not_registered(self, cleanup: None) -> None:
+    def test_returns_none_when_sentinel_provider_not_registered(self) -> None:
         _make_config_with_providers({})
         flow = _make_flow(host="proxy.local", path="/v1/chat/completions")
         flow.metadata["ccproxy.oauth_provider"] = "anthropic"
         assert _resolve_transform_target(flow) is None
 
-    def test_override_wins_over_sentinel(self, cleanup: None) -> None:
+    def test_override_wins_over_sentinel(self) -> None:
         """First-match override beats the sentinel-resolved Provider fallback."""
         from ccproxy.config import CCProxyConfig
 
@@ -273,7 +273,7 @@ class TestSentinelResolvedProvider:
 
 
 class TestHandleTransform:
-    def test_skips_outbound_flows(self, cleanup: None) -> None:
+    def test_skips_outbound_flows(self) -> None:
         _make_config_with_transforms(
             [
                 {
@@ -296,7 +296,7 @@ class TestHandleTransform:
         router.request(flow)
         assert flow.request.content == original_content
 
-    def test_skips_unmatched_flows(self, cleanup: None) -> None:
+    def test_skips_unmatched_flows(self) -> None:
         _make_config_with_transforms(
             [
                 {
@@ -320,12 +320,9 @@ class TestHandleTransform:
         assert flow.request.content == original_content
 
     @patch("ccproxy.lightllm.graph.dispatch_dump_sync")
-    @patch("ccproxy.lightllm.transform_to_provider")
     def test_rewrites_matched_flow(
         self,
-        mock_transform: MagicMock,
         mock_render: MagicMock,
-        cleanup: None,
     ) -> None:
         # transform action with an override requires a registered Provider entry
         # for dest_provider so the handler can resolve the destination format.
@@ -346,13 +343,6 @@ class TestHandleTransform:
             },
         )
         set_config_instance(config)
-        # transform_to_provider still drives URL + headers via the Phase 8
-        # transitional shim; render_outbound_sync owns the body.
-        mock_transform.return_value = (
-            "https://api.anthropic.com/v1/messages",
-            {"x-api-key": "test-key", "anthropic-version": "2023-06-01"},
-            b"unused-body",
-        )
         mock_render.return_value = b'{"model": "claude-3-5-sonnet-20241022", "messages": []}'
 
         router = InspectorRouter(
@@ -365,20 +355,19 @@ class TestHandleTransform:
         flow = _make_flow()
         router.request(flow)
 
+        # URL came from the bound Provider's host + path (no {action} for /v1/messages).
         assert flow.request.host == "api.anthropic.com"
         assert flow.request.port == 443
         assert flow.request.scheme == "https"
         assert flow.request.path == "/v1/messages"
-        assert flow.request.headers["x-api-key"] == "test-key"
+        # Anthropic-compatible upstream gets the anthropic-version floor.
+        assert flow.request.headers.get("anthropic-version") == "2023-06-01"
         assert flow.request.content == b'{"model": "claude-3-5-sonnet-20241022", "messages": []}'
 
     @patch("ccproxy.lightllm.graph.dispatch_dump_sync")
-    @patch("ccproxy.lightllm.transform_to_provider")
     def test_passes_messages_and_params(
         self,
-        mock_transform: MagicMock,
         mock_render: MagicMock,
-        cleanup: None,
     ) -> None:
         config = CCProxyConfig(
             inspector=InspectorConfig(
@@ -397,7 +386,6 @@ class TestHandleTransform:
             },
         )
         set_config_instance(config)
-        mock_transform.return_value = ("https://api.anthropic.com/v1/messages", {}, b"{}")
         mock_render.return_value = b"{}"
 
         flow = _make_flow(
@@ -417,15 +405,14 @@ class TestHandleTransform:
         register_transform_routes(router)
         router.request(flow)
 
-        mock_transform.assert_called_once()
-        call_kwargs = mock_transform.call_args
-        assert (
-            call_kwargs.kwargs.get("model")
-            or call_kwargs[1].get("model")
-            or call_kwargs[0][0] == "claude-3-5-sonnet-20241022"
-        )
+        # dispatch_dump_sync gets the parsed IR with the overridden model.
+        mock_render.assert_called_once()
+        call = mock_render.call_args
+        parsed_arg = call.args[0]
+        assert parsed_arg.model == "claude-3-5-sonnet-20241022"
+        assert call.kwargs.get("provider") == "anthropic"
 
-    def test_reverse_proxy_unmatched_returns_501(self, cleanup: None) -> None:
+    def test_reverse_proxy_unmatched_returns_501(self) -> None:
         _make_config_with_transforms(
             [
                 {
@@ -454,7 +441,7 @@ class TestHandleTransform:
         body = json.loads(flow.response.content)
         assert body["error"]["type"] == "not_implemented_error"
 
-    def test_wireguard_unmatched_passes_through(self, cleanup: None) -> None:
+    def test_wireguard_unmatched_passes_through(self) -> None:
         _make_config_with_transforms(
             [
                 {
@@ -482,7 +469,7 @@ class TestHandleTransform:
         assert flow.response is None
         assert flow.request.content == original_content
 
-    def test_passthrough_mode_leaves_flow_unchanged(self, cleanup: None) -> None:
+    def test_passthrough_mode_leaves_flow_unchanged(self) -> None:
         _make_config_with_transforms(
             [
                 {
@@ -516,7 +503,7 @@ class TestHandleTransform:
 class TestSafetyNet:
     """Tests for the localhost:1 safety net in handle_transform."""
 
-    def test_catches_unrewritten_reverse_proxy_destination(self, cleanup: None) -> None:
+    def test_catches_unrewritten_reverse_proxy_destination(self) -> None:
         """Reverse proxy flow still targeting localhost:1 after transform gets 502."""
         _make_config_with_transforms(
             [
@@ -543,7 +530,6 @@ class TestSafetyNet:
         )
         flow.request.host = "localhost"
         flow.request.port = 1
-        flow.response = None
         router.request(flow)
 
         assert flow.response is not None
@@ -573,7 +559,7 @@ class TestHandleRedirect:
         flow.metadata[InspectorMeta.RECORD] = record
         return flow
 
-    def test_redirect_rewrites_host_and_port(self, cleanup: None) -> None:
+    def test_redirect_rewrites_host_and_port(self) -> None:
         self._make_redirect_config()
         router = InspectorRouter(name="test_redir", request_passthrough=True, response_passthrough=True)
         register_transform_routes(router)
@@ -585,7 +571,7 @@ class TestHandleRedirect:
         assert flow.request.port == 443
         assert flow.request.scheme == "https"
 
-    def test_redirect_with_dest_path_override(self, cleanup: None) -> None:
+    def test_redirect_with_dest_path_override(self) -> None:
         self._make_redirect_config({"dest_path": "/v2/override"})
         router = InspectorRouter(name="test_redir", request_passthrough=True, response_passthrough=True)
         register_transform_routes(router)
@@ -595,7 +581,7 @@ class TestHandleRedirect:
 
         assert flow.request.path == "/v2/override"
 
-    def test_redirect_missing_dest_host_passthrough(self, cleanup: None) -> None:
+    def test_redirect_missing_dest_host_passthrough(self) -> None:
         # No dest_host AND no providers entry for "anthropic" → handler returns
         # without rewriting; flow.request.host stays at the inbound value.
         _make_config_with_transforms(
@@ -619,7 +605,7 @@ class TestHandleRedirect:
         # Falls back to passthrough (host unchanged)
         assert flow.request.host == original_host
 
-    def test_redirect_stores_transform_meta(self, cleanup: None) -> None:
+    def test_redirect_stores_transform_meta(self) -> None:
         self._make_redirect_config()
         router = InspectorRouter(name="test_redir", request_passthrough=True, response_passthrough=True)
         register_transform_routes(router)
@@ -631,7 +617,7 @@ class TestHandleRedirect:
         assert record.transform is not None
         assert record.transform.provider == "anthropic"
 
-    def test_redirect_injects_api_key(self, cleanup: None) -> None:
+    def test_redirect_injects_api_key(self) -> None:
         """Override-driven redirect injects Authorization from the bound Provider."""
         config = CCProxyConfig(
             inspector=InspectorConfig(
@@ -665,17 +651,15 @@ class TestHandleRedirect:
         assert flow.request.headers.get("authorization") == "Bearer injected-token"
 
 
-class TestContextCacheInTransform:
-    """Tests for Gemini context cache integration in _handle_transform."""
+class TestGeminiTransform:
+    """Tests for the unified Gemini transform path via dispatch_dump_sync."""
 
-    @patch("ccproxy.lightllm.transform_to_provider")
-    @patch("ccproxy.lightllm.context_cache.resolve_cached_content")
-    def test_gemini_calls_resolve_cached_content(
+    @patch("ccproxy.lightllm.graph.dispatch_dump_sync")
+    def test_gemini_streaming_action(
         self,
-        mock_cache: MagicMock,
-        mock_transform: MagicMock,
-        cleanup: None,
+        mock_render: MagicMock,
     ) -> None:
+        """A streaming Gemini transform produces ``:streamGenerateContent`` in the URL."""
         config = CCProxyConfig(
             inspector=InspectorConfig(
                 transforms=[
@@ -690,45 +674,40 @@ class TestContextCacheInTransform:
             ),
             providers={
                 "gemini": _make_provider(
-                    host="generativelanguage.googleapis.com",
-                    path="/v1beta",
+                    host="cloudcode-pa.googleapis.com",
+                    path="/v1internal:{action}",
                     provider="gemini",
                 ),
             },
         )
         set_config_instance(config)
+        mock_render.return_value = b'{"contents": []}'
 
-        mock_cache.return_value = (
-            [{"role": "user", "content": "filtered"}],
-            {"model": "gemini-2.0-flash"},
-            "cachedContents/abc123",
-        )
-        mock_transform.return_value = ("https://gemini.googleapis.com/v1", {}, b"{}")
-
-        router = InspectorRouter(name="test_cache", request_passthrough=True, response_passthrough=True)
+        router = InspectorRouter(name="test_gemini", request_passthrough=True, response_passthrough=True)
         register_transform_routes(router)
 
         flow = _make_flow(
             body={
                 "model": "gpt-4o",
                 "messages": [{"role": "user", "content": "hello"}],
+                "stream": True,
             }
         )
         router.request(flow)
 
-        mock_cache.assert_called_once()
-        mock_transform.assert_called_once()
-        # cached_content should be passed to transform_to_provider
-        assert mock_transform.call_args.kwargs.get("cached_content") == "cachedContents/abc123"
+        assert flow.request.host == "cloudcode-pa.googleapis.com"
+        assert flow.request.path == "/v1internal:streamGenerateContent"
+        # Non-Anthropic upstream: no anthropic-version floor.
+        assert "anthropic-version" not in flow.request.headers
+        mock_render.assert_called_once()
+        assert mock_render.call_args.kwargs.get("provider") == "gemini"
 
-    @patch("ccproxy.lightllm.transform_to_provider")
-    @patch("ccproxy.lightllm.context_cache.resolve_cached_content", side_effect=RuntimeError("cache boom"))
-    def test_gemini_cache_failure_graceful(
+    @patch("ccproxy.lightllm.graph.dispatch_dump_sync")
+    def test_gemini_non_streaming_action(
         self,
-        mock_cache: MagicMock,
-        mock_transform: MagicMock,
-        cleanup: None,
+        mock_render: MagicMock,
     ) -> None:
+        """A non-streaming Gemini transform produces ``:generateContent``."""
         config = CCProxyConfig(
             inspector=InspectorConfig(
                 transforms=[
@@ -743,17 +722,16 @@ class TestContextCacheInTransform:
             ),
             providers={
                 "gemini": _make_provider(
-                    host="generativelanguage.googleapis.com",
-                    path="/v1beta",
+                    host="cloudcode-pa.googleapis.com",
+                    path="/v1internal:{action}",
                     provider="gemini",
                 ),
             },
         )
         set_config_instance(config)
+        mock_render.return_value = b'{"contents": []}'
 
-        mock_transform.return_value = ("https://gemini.googleapis.com/v1", {}, b"{}")
-
-        router = InspectorRouter(name="test_cache", request_passthrough=True, response_passthrough=True)
+        router = InspectorRouter(name="test_gemini", request_passthrough=True, response_passthrough=True)
         register_transform_routes(router)
 
         flow = _make_flow(
@@ -764,50 +742,17 @@ class TestContextCacheInTransform:
         )
         router.request(flow)
 
-        # Transform still proceeds despite cache failure
-        mock_transform.assert_called_once()
-        assert mock_transform.call_args.kwargs.get("cached_content") is None
-
-    @patch("ccproxy.lightllm.transform_to_provider")
-    def test_non_gemini_skips_context_cache(
-        self,
-        mock_transform: MagicMock,
-        cleanup: None,
-    ) -> None:
-        config = CCProxyConfig(
-            inspector=InspectorConfig(
-                transforms=[
-                    TransformOverride(
-                        action="transform",
-                        match_host="api.openai.com",
-                        match_path="/",
-                        dest_provider="anthropic",
-                        dest_model="claude-3",
-                    )
-                ]
-            ),
-            providers={
-                "anthropic": _make_provider(host="api.anthropic.com", provider="anthropic"),
-            },
-        )
-        set_config_instance(config)
-
-        mock_transform.return_value = ("https://api.anthropic.com/v1/messages", {}, b"{}")
-
-        router = InspectorRouter(name="test_cache", request_passthrough=True, response_passthrough=True)
-        register_transform_routes(router)
-
-        flow = _make_flow()
-        with patch("ccproxy.lightllm.context_cache.resolve_cached_content") as mock_cache:
-            router.request(flow)
-            mock_cache.assert_not_called()
+        assert flow.request.path == "/v1internal:generateContent"
 
 
 class TestResponseTransformExceptionHandling:
     """Tests for response-phase exception handling."""
 
-    @patch("ccproxy.lightllm.transform_to_openai", side_effect=RuntimeError("transform exploded"))
-    def test_transform_exception_passes_through(self, mock_transform: MagicMock, cleanup: None) -> None:
+    @patch(
+        "ccproxy.lightllm.graph.buffered.transform_buffered_response_sync",
+        side_effect=RuntimeError("transform exploded"),
+    )
+    def test_transform_exception_passes_through(self, _mock_transform: MagicMock) -> None:
         config = CCProxyConfig()
         set_config_instance(config)
 

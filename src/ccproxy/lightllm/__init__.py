@@ -1,28 +1,36 @@
 """lightllm — ccproxy's wire layer.
 
-Historically a connector into LiteLLM's BaseConfig. Mid-refactor (see
-``plans/reshape-wire-py-as-lexical-graham.md``): this package is the home
-of the pydantic-ai-mediated wire translation layer that replaces the
-LiteLLM-based one. The module name is preserved across the cut.
+Pydantic-ai-mediated wire translation between client listener formats
+and upstream provider formats. The per-provider FSMs live in
+:mod:`ccproxy.lightllm.graph`; the dispatchers re-exported here are the
+public entry points for the rest of ccproxy.
 """
 
-from ccproxy.lightllm.dispatch import (
-    MitmResponseShim,
-    SSETransformer,
-    make_sse_transformer,
-    transform_to_openai,
-    transform_to_provider,
+from ccproxy.lightllm.graph import (
+    UnsupportedUpstreamError,
+    dispatch_dump,
+    dispatch_dump_sync,
+    dispatch_intake,
+    dispatch_load,
+    dispatch_render,
 )
 from ccproxy.lightllm.parsed import ListenerFormat, ParsedRequest
-from ccproxy.lightllm.registry import get_config
+from ccproxy.lightllm.pplx import (
+    LightllmException,
+    PerplexityException,
+    PerplexityProConfig,
+)
 
 __all__ = [
+    "LightllmException",
     "ListenerFormat",
-    "MitmResponseShim",
     "ParsedRequest",
-    "SSETransformer",
-    "get_config",
-    "make_sse_transformer",
-    "transform_to_openai",
-    "transform_to_provider",
+    "PerplexityException",
+    "PerplexityProConfig",
+    "UnsupportedUpstreamError",
+    "dispatch_dump",
+    "dispatch_dump_sync",
+    "dispatch_intake",
+    "dispatch_load",
+    "dispatch_render",
 ]

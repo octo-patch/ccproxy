@@ -113,17 +113,18 @@ class GeminiAddon:
         """Install ``EnvelopeUnwrapStream`` for streaming Gemini redirect flows.
 
         :class:`~ccproxy.inspector.addon.InspectorAddon`'s ``responseheaders``
-        runs first and may have:
+        runs first. For transform-mode flows it installs an ``SSEPipeline``
+        on ``flow.response.stream`` that already includes envelope unwrap
+        (the FSM intake folds the cloudcode-pa wrapper handling in). For
+        redirect-mode same-format flows it leaves ``flow.response.stream``
+        as the default boolean — those flows still need this addon to install
+        :class:`~ccproxy.hooks.gemini_envelope.EnvelopeUnwrapStream`.
 
-        a. installed an SSE transformer for transform-mode (LiteLLM) — leave it alone
-        b. set ``stream=True`` for non-Gemini SSE — leave it alone
-
-        For Gemini redirect-mode streaming flows the InspectorAddon returns
-        without touching ``flow.response.stream``; this addon defers stream
-        setup on a capacity error when fallback is configured (so the body
-        buffers for retry), and otherwise installs
-        :class:`~ccproxy.hooks.gemini_envelope.EnvelopeUnwrapStream` so each
-        SSE event is unwrapped on the way back.
+        Back-off contract: if ``flow.response.stream`` is already a non-bool
+        callable (i.e. InspectorAddon installed a transformer), leave it
+        alone. The FSM-driven pipeline owns envelope unwrap for transform
+        mode. This addon only fires for redirect-mode streaming where no
+        upstream transformer was installed.
         """
         if not flow.response or not self._is_gemini_flow(flow):
             return
@@ -135,6 +136,14 @@ class GeminiAddon:
         record = flow.metadata.get(InspectorMeta.RECORD)
         transform = getattr(record, "transform", None) if record else None
         if not transform or transform.mode != "redirect" or not transform.is_streaming:
+            return
+
+        # InspectorAddon may have already installed an SSEPipeline (or some
+        # other callable) on flow.response.stream. mitmproxy uses bool for
+        # the default passthrough mode; a callable is an active transformer
+        # that already handles envelope unwrap (the FSM intake folds it in),
+        # so this addon must back off.
+        if callable(flow.response.stream):
             return
 
         retry_codes = get_config().gemini_capacity.retry_status_codes
@@ -177,6 +186,9 @@ class GeminiAddon:
         if not transform or transform.is_streaming:
             return
 
+        # TODO(phase-r): buffered Gemini flows still call unwrap_buffered here.
+        # Phase R folds buffered response transform into the FSM and this call
+        # disappears along with the legacy ``hooks/gemini_envelope.py``.
         response.content = unwrap_buffered(response.content or b"")
 
     # ----- capacity fallback orchestrator --------------------------------

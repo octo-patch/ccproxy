@@ -1,11 +1,19 @@
-"""Tests for the Perplexity Pro response intake (SSE → pydantic-ai IR)."""
+"""Tests for the Perplexity Pro response intake FSM (SSE → pydantic-ai IR).
+
+The production FSM is async; ``_PerplexityFSMAdapter`` wraps it with a
+one-fresh-loop-per-call sync surface for tests (the persistent-loop bridge
+lives in :class:`SSEPipeline` for production).
+"""
 
 from __future__ import annotations
 
+import asyncio
 import json
-from typing import Any
+from collections.abc import Callable, Iterable
+from typing import Any, Protocol
 
 import pytest
+from pydantic_ai._parts_manager import ModelResponsePartsManager
 from pydantic_ai.messages import (
     ModelResponseStreamEvent,
     PartDeltaEvent,
@@ -17,21 +25,102 @@ from pydantic_ai.messages import (
 )
 from pydantic_ai.models import ModelRequestParameters
 
-from ccproxy.lightllm.response.intake_perplexity import (
+from ccproxy.lightllm.graph.perplexity_intake import (
     _ANSWER_VENDOR_ID,
     _REASONING_VENDOR_ID,
-    PerplexityResponseIntake,
+    PerplexityResponseIntakeFSM,
 )
 
+# ---------------------------------------------------------------------------
+# Adapter
+# ---------------------------------------------------------------------------
+
+
+class _StateView(Protocol):
+    """Subset of stream-level state the intake exposes for assertions."""
+
+    ids: dict[str, str]
+    final: bool
+    seen_step_uuids: set[str]
+    logged_unknown_intended_usages: set[str]
+
+
+class _IntakeLike(Protocol):
+    """Sync-callable surface around the async FSM intake."""
+
+    upstream_raw_bytes: bytearray
+
+    @property
+    def parts_manager(self) -> ModelResponsePartsManager: ...
+
+    @property
+    def _state(self) -> _StateView: ...
+
+    def feed(self, data: bytes) -> Iterable[ModelResponseStreamEvent]: ...
+
+    def close(self) -> Iterable[ModelResponseStreamEvent]: ...
+
+
+class _PerplexityFSMAdapter:
+    """Sync-facing adapter around the async :class:`PerplexityResponseIntakeFSM`.
+
+    The production FSM is async (the persistent-loop bridge lives in
+    :class:`SSEPipeline`). For tests, one fresh asyncio loop per
+    ``feed`` / ``close`` call is fine — tests aren't on a hot path.
+    """
+
+    def __init__(self, *, model: str, request_params: ModelRequestParameters) -> None:
+        self._fsm = PerplexityResponseIntakeFSM(model=model, request_params=request_params)
+
+    @property
+    def parts_manager(self) -> ModelResponsePartsManager:
+        return self._fsm.parts_manager
+
+    @property
+    def upstream_raw_bytes(self) -> bytearray:
+        return self._fsm.upstream_raw_bytes
+
+    @property
+    def _state(self) -> _StateView:
+        return self._fsm.state  # type: ignore[return-value]
+
+    def feed(self, data: bytes) -> list[ModelResponseStreamEvent]:
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(self._fsm.feed(data))
+        finally:
+            loop.close()
+
+    def close(self) -> list[ModelResponseStreamEvent]:
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(self._fsm.close())
+        finally:
+            loop.close()
+
+
+_IntakeFactory = Callable[..., _IntakeLike]
+
+
+@pytest.fixture
+def intake_factory() -> _IntakeFactory:
+    """Factory for the FSM intake wrapped in a sync adapter."""
+
+    def _make(*, model: str = "perplexity/best") -> _IntakeLike:
+        return _PerplexityFSMAdapter(
+            model=model, request_params=ModelRequestParameters()
+        )
+
+    return _make
+
+
+@pytest.fixture
+def intake_logger_name() -> str:
+    """Name of the logger emitting unknown-intended_usage DEBUG records."""
+    return "ccproxy.lightllm.graph.perplexity_intake"
+
+
 # ----------------------- helpers -----------------------
-
-
-def _make_intake() -> PerplexityResponseIntake:
-    """Construct a fresh intake with empty request_parameters."""
-    return PerplexityResponseIntake(
-        model="perplexity/best",
-        request_params=ModelRequestParameters(),
-    )
 
 
 def _sse_payload(payload: dict[str, Any]) -> bytes:
@@ -39,7 +128,7 @@ def _sse_payload(payload: dict[str, Any]) -> bytes:
     return f"data: {json.dumps(payload)}\n\n".encode()
 
 
-def _collect_feed(intake: PerplexityResponseIntake, data: bytes) -> list[ModelResponseStreamEvent]:
+def _collect_feed(intake: _IntakeLike, data: bytes) -> list[ModelResponseStreamEvent]:
     return list(intake.feed(data))
 
 
@@ -67,9 +156,9 @@ def _final_thinking(events: list[ModelResponseStreamEvent]) -> str:
 # ----------------------- synthetic roundtrip -----------------------
 
 
-def test_synthetic_full_answer_roundtrip_via_mode_a() -> None:
+def test_synthetic_full_answer_roundtrip_via_mode_a(intake_factory: _IntakeFactory) -> None:
     """One Mode-A event with a cumulative ``answer`` string yields one TextPart."""
-    intake = _make_intake()
+    intake = intake_factory()
     event = {
         "blocks": [
             {
@@ -85,9 +174,9 @@ def test_synthetic_full_answer_roundtrip_via_mode_a() -> None:
     assert _final_text(events) == "Hello world."
 
 
-def test_synthetic_mode_b_then_mode_c_chunked_answer() -> None:
+def test_synthetic_mode_b_then_mode_c_chunked_answer(intake_factory: _IntakeFactory) -> None:
     """Mode B sets chunks[0]; Mode C appends /chunks/1, /chunks/2."""
-    intake = _make_intake()
+    intake = intake_factory()
     e1 = {
         "blocks": [
             {
@@ -141,9 +230,9 @@ def test_synthetic_mode_b_then_mode_c_chunked_answer() -> None:
     assert _final_text(events) == "2 + 2 equals 4."
 
 
-def test_ask_text_block_is_skipped_no_double_emission() -> None:
+def test_ask_text_block_is_skipped_no_double_emission(intake_factory: _IntakeFactory) -> None:
     """Both ``ask_text_0_markdown`` and ``ask_text`` ship identical patches; we only emit markdown."""
-    intake = _make_intake()
+    intake = intake_factory()
     payload = {
         "blocks": [
             {
@@ -166,9 +255,9 @@ def test_ask_text_block_is_skipped_no_double_emission() -> None:
     assert _final_text(events) == "hi"  # NOT "hihi"
 
 
-def test_reasoning_goals_prefix_diff() -> None:
+def test_reasoning_goals_prefix_diff(intake_factory: _IntakeFactory) -> None:
     """plan_block.goals[].description is cumulative; emit only the tail."""
-    intake = _make_intake()
+    intake = intake_factory()
     e1 = {
         "blocks": [
             {
@@ -191,9 +280,9 @@ def test_reasoning_goals_prefix_diff() -> None:
     assert _final_thinking(events) == "Looking up X"
 
 
-def test_identifier_capture_preserved_in_state() -> None:
+def test_identifier_capture_preserved_in_state(intake_factory: _IntakeFactory) -> None:
     """Top-level event fields populate ``self._state.ids``."""
-    intake = _make_intake()
+    intake = intake_factory()
     e = {
         "backend_uuid": "B-1",
         "context_uuid": "C-1",
@@ -214,14 +303,14 @@ def test_identifier_capture_preserved_in_state() -> None:
     }
 
 
-def test_final_sse_message_sets_final_flag() -> None:
-    intake = _make_intake()
+def test_final_sse_message_sets_final_flag(intake_factory: _IntakeFactory) -> None:
+    intake = intake_factory()
     _collect_feed(intake, _sse_payload({"blocks": [], "final_sse_message": True}))
     assert intake._state.final is True
 
 
-def test_close_yields_no_events() -> None:
-    intake = _make_intake()
+def test_close_yields_no_events(intake_factory: _IntakeFactory) -> None:
+    intake = intake_factory()
     _collect_feed(intake, _sse_payload({"blocks": []}))
     assert list(intake.close()) == []
 
@@ -229,9 +318,9 @@ def test_close_yields_no_events() -> None:
 # ----------------------- chunk-boundary robustness -----------------------
 
 
-def test_chunk_boundary_byte_by_byte_feed() -> None:
+def test_chunk_boundary_byte_by_byte_feed(intake_factory: _IntakeFactory) -> None:
     """Fed one byte at a time, the intake produces the same final text."""
-    intake = _make_intake()
+    intake = intake_factory()
     payload = {
         "blocks": [
             {
@@ -251,9 +340,9 @@ def test_chunk_boundary_byte_by_byte_feed() -> None:
     assert _final_text(events) == "Hello"
 
 
-def test_chunk_boundary_split_inside_separator() -> None:
+def test_chunk_boundary_split_inside_separator(intake_factory: _IntakeFactory) -> None:
     """Separator ``\\n\\n`` arriving across two calls is still framed correctly."""
-    intake = _make_intake()
+    intake = intake_factory()
     payload = _sse_payload(
         {
             "blocks": [
@@ -273,9 +362,9 @@ def test_chunk_boundary_split_inside_separator() -> None:
     assert _final_text(events) == "AB"
 
 
-def test_crlf_separator_recognized() -> None:
+def test_crlf_separator_recognized(intake_factory: _IntakeFactory) -> None:
     """``\\r\\n\\r\\n`` is a valid SSE separator."""
-    intake = _make_intake()
+    intake = intake_factory()
     payload_body = json.dumps(
         {
             "blocks": [
@@ -294,9 +383,9 @@ def test_crlf_separator_recognized() -> None:
     assert _final_text(events) == "X"
 
 
-def test_multiple_events_one_feed_call() -> None:
+def test_multiple_events_one_feed_call(intake_factory: _IntakeFactory) -> None:
     """Two SSE events arriving in a single bytes blob both get processed."""
-    intake = _make_intake()
+    intake = intake_factory()
     e1 = _sse_payload(
         {
             "blocks": [
@@ -338,9 +427,9 @@ def test_multiple_events_one_feed_call() -> None:
 # ----------------------- step events (don't crash) -----------------------
 
 
-def test_step_event_with_mcp_tool_input_renders_into_thinking() -> None:
+def test_step_event_with_mcp_tool_input_renders_into_thinking(intake_factory: _IntakeFactory) -> None:
     """plan_block.steps[] with an MCP tool call routes rendered text into ThinkingPart."""
-    intake = _make_intake()
+    intake = intake_factory()
     event = {
         "blocks": [
             {
@@ -373,9 +462,9 @@ def test_step_event_with_mcp_tool_input_renders_into_thinking() -> None:
     assert "get_me" in thinking
 
 
-def test_step_dedup_via_uuid_across_cumulative_events() -> None:
+def test_step_dedup_via_uuid_across_cumulative_events(intake_factory: _IntakeFactory) -> None:
     """Two events carrying the same step uuid emit reasoning text only once."""
-    intake = _make_intake()
+    intake = intake_factory()
     step_event = {
         "blocks": [
             {
@@ -407,9 +496,9 @@ def test_step_dedup_via_uuid_across_cumulative_events() -> None:
     assert "dedup-1" in intake._state.seen_step_uuids
 
 
-def test_clarifying_questions_step_does_not_crash_intake() -> None:
+def test_clarifying_questions_step_does_not_crash_intake(intake_factory: _IntakeFactory) -> None:
     """RESEARCH_CLARIFYING_QUESTIONS is silently suppressed in the intake."""
-    intake = _make_intake()
+    intake = intake_factory()
     event = {
         "text": json.dumps(
             [
@@ -427,9 +516,9 @@ def test_clarifying_questions_step_does_not_crash_intake() -> None:
     assert events == []
 
 
-def test_plan_event_doesnt_crash_with_bare_metadata() -> None:
+def test_plan_event_doesnt_crash_with_bare_metadata(intake_factory: _IntakeFactory) -> None:
     """A 'plan' event with only goals (no steps) yields reasoning + no crash."""
-    intake = _make_intake()
+    intake = intake_factory()
     event = {
         "blocks": [
             {
@@ -449,19 +538,23 @@ def test_plan_event_doesnt_crash_with_bare_metadata() -> None:
     assert "Opening GitHub" in _final_thinking(events)
 
 
-def test_unknown_intended_usage_logs_at_debug(caplog: pytest.LogCaptureFixture) -> None:
+def test_unknown_intended_usage_logs_at_debug(
+    intake_factory: _IntakeFactory,
+    intake_logger_name: str,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     """Unknown intended_usage values get DEBUG-logged once per stream."""
     import logging
 
-    intake = _make_intake()
+    intake = intake_factory()
     event = {"blocks": [{"intended_usage": "totally_new_block_type", "totally_new_block": {}}]}
-    with caplog.at_level(logging.DEBUG, logger="ccproxy.lightllm.response.intake_perplexity"):
+    with caplog.at_level(logging.DEBUG, logger=intake_logger_name):
         _collect_feed(intake, _sse_payload(event))
     assert "totally_new_block_type" in intake._state.logged_unknown_intended_usages
     assert any("totally_new_block_type" in r.message for r in caplog.records)
 
     caplog.clear()
-    with caplog.at_level(logging.DEBUG, logger="ccproxy.lightllm.response.intake_perplexity"):
+    with caplog.at_level(logging.DEBUG, logger=intake_logger_name):
         _collect_feed(intake, _sse_payload(event))
     assert not any("totally_new_block_type" in r.message for r in caplog.records)
 
@@ -469,9 +562,9 @@ def test_unknown_intended_usage_logs_at_debug(caplog: pytest.LogCaptureFixture) 
 # ----------------------- upstream_raw_bytes tee -----------------------
 
 
-def test_upstream_raw_bytes_byte_for_byte_tee() -> None:
+def test_upstream_raw_bytes_byte_for_byte_tee(intake_factory: _IntakeFactory) -> None:
     """``upstream_raw_bytes`` accumulates every byte passed to ``feed``."""
-    intake = _make_intake()
+    intake = intake_factory()
     blob1 = b'data: {"final_sse_message": false, "blocks": []}\n\n'
     blob2 = b'data: {"final_sse_message": true, "blocks": []}\n\n'
     list(intake.feed(blob1))
@@ -479,36 +572,36 @@ def test_upstream_raw_bytes_byte_for_byte_tee() -> None:
     assert bytes(intake.upstream_raw_bytes) == blob1 + blob2
 
 
-def test_upstream_raw_bytes_includes_unparseable_input() -> None:
+def test_upstream_raw_bytes_includes_unparseable_input(intake_factory: _IntakeFactory) -> None:
     """Even non-JSON / partial frames are kept in the tee."""
-    intake = _make_intake()
+    intake = intake_factory()
     blob = b"data: not-json\n\ndata: also-bad\n\n"
     list(intake.feed(blob))
     assert bytes(intake.upstream_raw_bytes) == blob
 
 
-def test_upstream_raw_bytes_empty_after_construction() -> None:
-    intake = _make_intake()
+def test_upstream_raw_bytes_empty_after_construction(intake_factory: _IntakeFactory) -> None:
+    intake = intake_factory()
     assert intake.upstream_raw_bytes == bytearray()
 
 
-def test_empty_feed_is_noop() -> None:
-    intake = _make_intake()
+def test_empty_feed_is_noop(intake_factory: _IntakeFactory) -> None:
+    intake = intake_factory()
     assert list(intake.feed(b"")) == []
     assert intake.upstream_raw_bytes == bytearray()
 
 
-def test_done_sentinel_doesnt_crash() -> None:
+def test_done_sentinel_doesnt_crash(intake_factory: _IntakeFactory) -> None:
     """``data: [DONE]`` (OpenAI sentinel; not standard for pplx) is gracefully ignored."""
-    intake = _make_intake()
+    intake = intake_factory()
     blob = b"data: [DONE]\n\n"
     events = _collect_feed(intake, blob)
     assert events == []
 
 
-def test_keepalive_comments_are_skipped() -> None:
+def test_keepalive_comments_are_skipped(intake_factory: _IntakeFactory) -> None:
     """Lines not starting with ``data:`` (e.g. SSE comments) are dropped."""
-    intake = _make_intake()
+    intake = intake_factory()
     blob = b": keepalive\n\n"
     events = _collect_feed(intake, blob)
     assert events == []
@@ -523,10 +616,10 @@ def test_vendor_part_ids_use_stable_constants() -> None:
     assert _REASONING_VENDOR_ID == "pplx-reasoning"
 
 
-def test_separate_text_and_thinking_parts_emitted() -> None:
+def test_separate_text_and_thinking_parts_emitted(intake_factory: _IntakeFactory) -> None:
     """An event carrying both an answer delta and a goal description produces
     two distinct parts."""
-    intake = _make_intake()
+    intake = intake_factory()
     event = {
         "blocks": [
             {

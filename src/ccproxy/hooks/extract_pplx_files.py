@@ -24,14 +24,13 @@ import base64
 import logging
 import mimetypes
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import unquote, urlparse
 from uuid import uuid4
 
 import httpx
 from curl_cffi import CurlMime
 from curl_cffi.requests import Session as CurlSession
-from litellm.llms.base_llm.chat.transformation import BaseLLMException
 
 from ccproxy.config import get_config
 from ccproxy.lightllm.pplx import (
@@ -39,6 +38,7 @@ from ccproxy.lightllm.pplx import (
     PERPLEXITY_PROVIDER_NAME,
     PERPLEXITY_SESSION_COOKIE,
     PERPLEXITY_URL_BASE,
+    LightllmException,
 )
 from ccproxy.pipeline.hook import hook
 
@@ -61,7 +61,7 @@ _BATCH_UPLOAD_URL = f"{PERPLEXITY_URL_BASE}/rest/uploads/batch_create_upload_url
 _PROCESSING_SUBSCRIBE_URL = f"{PERPLEXITY_URL_BASE}/rest/sse/attachment_processing/subscribe"
 
 
-class PerplexityFileError(BaseLLMException):
+class PerplexityFileError(LightllmException):
     """Surfaced as a 4xx structured error to the OpenAI client."""
 
 
@@ -86,9 +86,10 @@ def _collect_parts(messages: list[Any]) -> list[tuple[int, int, dict[str, Any]]]
         content = msg.get("content") if isinstance(msg, dict) else getattr(msg, "content", None)
         if not isinstance(content, list):
             continue
-        for pi, part in enumerate(content):
-            if not isinstance(part, dict):
+        for pi, raw_part in enumerate(content):
+            if not isinstance(raw_part, dict):
                 continue
+            part = cast("dict[str, Any]", raw_part)
             ptype = part.get("type")
             if ptype in (None, "text"):
                 continue
@@ -166,7 +167,6 @@ def _fetch_url(url: str) -> FileInfo | None:
         raise PerplexityFileError(
             status_code=400,
             message=f"Failed to fetch image_url {url!r}: {e}",
-            headers=None,
         ) from e
     parsed = urlparse(url)
     name = parsed.path.rsplit("/", 1)[-1] or "image"
@@ -190,7 +190,6 @@ def _validate(files: list[FileInfo]) -> None:
         raise PerplexityFileError(
             status_code=400,
             message=f"Too many attachments: {len(files)}. Maximum allowed is {_MAX_FILES}.",
-            headers=None,
         )
     for f in files:
         size = len(f.data)
@@ -198,13 +197,11 @@ def _validate(files: list[FileInfo]) -> None:
             raise PerplexityFileError(
                 status_code=400,
                 message=f"Attachment {f.filename!r} is empty.",
-                headers=None,
             )
         if size > _MAX_FILE_SIZE:
             raise PerplexityFileError(
                 status_code=400,
                 message=(f"Attachment {f.filename!r} exceeds 50 MB limit: {size / (1024 * 1024):.1f} MB"),
-                headers=None,
             )
 
 
@@ -236,7 +233,6 @@ def _batch_create_upload_urls(files: list[FileInfo], token: str) -> dict[str, di
         raise PerplexityFileError(
             status_code=502,
             message=f"batch_create_upload_urls failed: {e}",
-            headers=None,
         ) from e
 
     body = resp.json()
@@ -245,16 +241,17 @@ def _batch_create_upload_urls(files: list[FileInfo], token: str) -> dict[str, di
         raise PerplexityFileError(
             status_code=502,
             message="batch_create_upload_urls returned no results",
-            headers=None,
         )
     if body.get("rate_limited"):
         raise PerplexityFileError(
             status_code=429,
             message="Perplexity rate-limited the upload batch.",
-            headers=None,
         )
 
-    return {client_uuid: result for client_uuid, result in zip(payload_files, results.values(), strict=False)}
+    return {
+        client_uuid: cast("dict[str, Any]", result)
+        for client_uuid, result in zip(payload_files, results.values(), strict=False)
+    }
 
 
 def _s3_upload(file_info: FileInfo, result: dict[str, Any]) -> str:
@@ -266,13 +263,11 @@ def _s3_upload(file_info: FileInfo, result: dict[str, Any]) -> str:
         raise PerplexityFileError(
             status_code=502,
             message="upload URL response missing s3_bucket_url / s3_object_url",
-            headers=None,
         )
     if not isinstance(fields, dict):
         raise PerplexityFileError(
             status_code=502,
             message="upload URL response missing presigned fields",
-            headers=None,
         )
 
     mime = CurlMime()
@@ -291,7 +286,6 @@ def _s3_upload(file_info: FileInfo, result: dict[str, Any]) -> str:
             raise PerplexityFileError(
                 status_code=502,
                 message=(f"S3 upload failed for {file_info.filename!r}: status {resp.status_code}"),
-                headers=None,
             )
     finally:
         mime.close()
@@ -344,7 +338,7 @@ def _api_headers(token: str) -> dict[str, str]:
 def extract_pplx_files(ctx: Context, _: dict[str, Any]) -> Context:
     """Extract → upload → attach multimodal parts. See module docstring."""
     assert ctx.flow is not None
-    body = ctx._body if isinstance(ctx._body, dict) else {}
+    body = ctx._body
     messages = body.get("messages")
     if not isinstance(messages, list) or not messages:
         return ctx

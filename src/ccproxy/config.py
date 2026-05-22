@@ -362,7 +362,7 @@ class MitmproxyOptions(BaseModel):
 
 
 class Provider(BaseModel):
-    """Auth + single destination + LiteLLM format identifier.
+    """Auth + single destination + provider format identifier.
 
     Keyed by sentinel suffix in :class:`CCProxyConfig.providers`. When a
     request arrives with ``x-api-key: sk-ant-oat-ccproxy-{name}``, the
@@ -384,11 +384,10 @@ class Provider(BaseModel):
     substituted from glom-read body fields and URL captures at routing time."""
 
     provider: str
-    """Provider identifier. Either a LiteLLM ``LlmProviders`` enum value
-    (``anthropic``, ``gemini``, ``deepseek``, ``openai``, …) or a
-    ccproxy-internal string registered in ``ccproxy.lightllm.registry``
-    (``perplexity_pro``). Drives ``lightllm.transform_to_provider`` when
-    the incoming format differs from what the destination speaks."""
+    """Provider identifier (``anthropic``, ``gemini``, ``deepseek``,
+    ``openai``, ``perplexity_pro``, …). Drives
+    ``lightllm.graph.dispatch_dump_sync`` when the incoming format differs
+    from what the destination speaks."""
 
     fingerprint_profile: str | None = None
     """``curl-cffi`` impersonate profile name (e.g. ``"chrome131"``).
