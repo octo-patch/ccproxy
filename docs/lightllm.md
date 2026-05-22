@@ -205,93 +205,127 @@ to is a separate decision (made by the transform router via sentinel-key or
 
 ---
 
-## The FSM pattern
+## The FSM pattern (response side only)
 
-Every file under `lightllm/graph/*_intake.py` and `*_render.py` follows the
-same shape. These handle streaming response transformations. Reading
-`anthropic_intake.py` end-to-end is the fastest way to understand it; the
-other modules echo its idioms.
-
-**Graph builder import**: pydantic-graph >=1.99.0 uses canonical paths:
+The four `lightllm/graph/*_intake.py` modules and two `*_render.py` modules
+share a single shape. These handle **streaming SSE** transformations and are
+the only place ccproxy still uses pydantic-graph at runtime — the request
+side is procedural adapter classmethods, not graphs. Reading
+`anthropic_intake.py` end-to-end is the fastest way to understand the idiom;
+the other modules echo it.
 
 ```python
-from pydantic_graph import GraphBuilder, StepContext
+from pydantic_graph import GraphBuilder, StepContext  # canonical, not .beta
 
 # 1. State — a mutable dataclass carrying everything the FSM needs across steps.
 @dataclass
-class AnthropicDumpState:
-    queue: deque[Any] = field(default_factory=deque)
-    blocks: list[BetaContentBlockParam] = field(default_factory=list)
-    last_emitted_block: BetaContentBlockParam | None = None
+class _AnthropicIntakeState:
+    parts_manager: ModelResponsePartsManager
+    provider_name: str
+    current_block: BetaContentBlock | None = None
+    events_queue: deque[BetaRawMessageStreamEvent] = field(default_factory=deque)
+    out_events: list[ModelResponseStreamEvent] = field(default_factory=list)
+    # ... per-FSM extra fields
 
-# 2. End-of-graph sentinel — a marker class routed to a terminal step.
-class _DumpDone:
-    """Marker returned when the queue is exhausted."""
+# 2. Marker classes — sentinel values the decision routes on.
+class _FeedDone: ...        # queue exhausted; route to terminal step
+class _IgnoredEvent: ...    # event has no IR equivalent; loop back to router
 
-# 3. GraphBuilder — type parameters describe the FSM's runtime signature.
-_g: GraphBuilder[AnthropicDumpState, None, None, list[BetaContentBlockParam]] = GraphBuilder(
-    state_type=AnthropicDumpState,
-    output_type=list[BetaContentBlockParam],
+# 3. GraphBuilder — type parameters: [state, deps, inputs, output].
+_g: GraphBuilder[
+    _AnthropicIntakeState, None, None, list[ModelResponseStreamEvent]
+] = GraphBuilder(
+    state_type=_AnthropicIntakeState,
+    output_type=list[ModelResponseStreamEvent],
 )
 
-# 4. Router step — pops the next item OR signals done.
+# 4. Router step — pops the next typed event OR signals done.
 @_g.step
-async def take_next(ctx: StepContext[AnthropicDumpState, None, None]) -> Any:
-    if not ctx.state.queue:
-        return _DumpDone()
-    return ctx.state.queue.popleft()
+async def frame_next_event(ctx: StepContext[_AnthropicIntakeState, None, None]) -> Any:
+    state = ctx.state
+    while state.events_queue:
+        event = state.events_queue.popleft()
+        if isinstance(event, (BetaRawMessageStartEvent, BetaRawMessageDeltaEvent)):
+            return _IgnoredEvent()
+        if isinstance(event, BetaRawMessageStopEvent):
+            state.current_block = None
+            return _IgnoredEvent()
+        return event
+    return _FeedDone()
 
-# 5. Per-type handler steps — one per IR-part type.
+# 5. Per-variant handler steps — one per concrete BetaRaw*Event subclass.
 @_g.step
-async def parse_text(ctx: StepContext[AnthropicDumpState, None, str]) -> None:
-    block: BetaTextBlockParam = {"type": "text", "text": ctx.inputs}
-    ctx.state.blocks.append(block)
-    ctx.state.last_emitted_block = block
+async def handle_content_block_start(
+    ctx: StepContext[_AnthropicIntakeState, None, BetaRawContentBlockStartEvent],
+) -> None:
+    # ... drive ctx.state.parts_manager and append to ctx.state.out_events
+    ...
 
-# ... (more per-type steps for BinaryContent, ImageUrl, ToolReturnPart, etc.)
+# (handle_content_block_delta, handle_content_block_stop, skip_ignored_event,
+#  emit_done all follow the same shape)
 
-# 6. Terminal step — pulls the result out of state and hands it to end_node.
+# 6. Terminal step — pulls the accumulated output out of state.
 @_g.step
-async def emit_blocks(ctx: StepContext[AnthropicDumpState, None, _DumpDone]) -> list[BetaContentBlockParam]:
-    return ctx.state.blocks
+async def emit_done(
+    ctx: StepContext[_AnthropicIntakeState, None, _FeedDone],
+) -> list[ModelResponseStreamEvent]:
+    return ctx.state.out_events
 
 # 7. Wire the topology — declarative edges with a single decision fan-out.
 _g.add(
-    _g.edge_from(_g.start_node).to(take_next),
-    _g.edge_from(take_next).to(
+    _g.edge_from(_g.start_node).to(frame_next_event),
+    _g.edge_from(frame_next_event).to(
         _g.decision()
-        .branch(_g.match(_DumpDone).to(emit_blocks))
-        .branch(_g.match(str).to(parse_text))
-        .branch(_g.match(BinaryContent).to(parse_binary))
-        # ... per-IR-part-type branches
+        .branch(_g.match(_FeedDone).to(emit_done))
+        .branch(_g.match(_IgnoredEvent).to(skip_ignored_event))
+        .branch(_g.match(BetaRawContentBlockStartEvent).to(handle_content_block_start))
+        .branch(_g.match(BetaRawContentBlockDeltaEvent).to(handle_content_block_delta))
+        .branch(_g.match(BetaRawContentBlockStopEvent).to(handle_content_block_stop))
     ),
-    # Loop-back: every parse_* step feeds back into take_next.
-    _g.edge_from(parse_text, parse_binary, ...).to(take_next),
-    _g.edge_from(emit_blocks).to(_g.end_node),
+    # Loop-back: every handler step feeds back into the router.
+    _g.edge_from(
+        handle_content_block_start,
+        handle_content_block_delta,
+        handle_content_block_stop,
+        skip_ignored_event,
+    ).to(frame_next_event),
+    _g.edge_from(emit_done).to(_g.end_node),
 )
 
 # 8. Build once at import time.
-_dump_graph = _g.build()
+_intake_graph = _g.build()
 
-# 9. Public entrypoint — drives the graph from imperative wrapper code.
-async def render_anthropic_dump(parsed: ParsedRequest) -> bytes:
-    # ... assemble static envelope (model, tools, system, settings, raw_extras)
-    state = AnthropicDumpState(queue=deque(flatten_messages_to_items(parsed.messages)))
-    blocks = await _dump_graph.run(state=state)
-    # ... stitch blocks into the BetaMessageParam list and serialize
-    return json.dumps(body, separators=(",", ":")).encode()
+# 9. Public FSM wrapper — drives the graph per chunk of SSE bytes.
+class AnthropicResponseIntakeFSM:
+    def __init__(self, *, model: str, request_params: ModelRequestParameters):
+        self._state = _AnthropicIntakeState(
+            parts_manager=ModelResponsePartsManager(model_request_parameters=request_params),
+            provider_name="anthropic",
+        )
+
+    async def feed(self, data: bytes) -> list[ModelResponseStreamEvent]:
+        # parse SSE frames out of the buffer, push typed events onto the
+        # state's events_queue, then run the graph
+        ...
+        self._state.out_events = []
+        result = await _intake_graph.run(state=self._state)
+        return result
 ```
+
+The render side (`anthropic_render.py`, `openai_render.py`) is symmetric:
+state owns an `events_queue: deque[ModelResponseStreamEvent]` and an
+`out_bytes: bytearray`; handler steps emit SSE wire bytes per IR event;
+the terminal step returns `bytes(state.out_bytes)`.
 
 ### Why this shape
 
 | Concern | Solution |
 |---|---|
-| **Polymorphic walk** over heterogeneous IR parts | One router step (`take_next`) + a decision with a branch per type. |
-| **End-of-graph from a router** | A marker class (e.g. `_DumpDone`) routed via `g.match(_DumpDone).to(terminal_step)`. The terminal step returns the accumulated state — that value becomes the graph's output. |
-| **Typed dispatch on string-discriminated unions** (load + intake side) | Wrap the runtime-string-tagged dicts in one frozen dataclass per discriminator value (`_UserTextBlock`, `_MessageStartEvent`, …). The router inspects the discriminator once and emits the matching envelope; the decision routes by Python type. |
-| **Centralized middleware** (e.g. `cache_control` attachment) | A dedicated step that mutates state side-effectfully. Every other step that emits a block updates a `state.last_emitted_block` reference; the middleware step mutates the dict that reference points to. |
-| **Side-effect-only no-ops** | A `skip_item` step matched by a `_Skip` marker that loops back to the router. |
-| **Mermaid visualization** | Free via `graph.render(title=..., direction='LR')`. Every FSM file can produce its diagram on demand. |
+| **Polymorphic walk** over heterogeneous typed events | One router step (`frame_next_event`) + a decision with a branch per concrete event class. |
+| **End-of-graph from a router** | A marker class (`_FeedDone`) routed via `g.match(_FeedDone).to(emit_done)`. The terminal step returns the accumulated state — that value becomes the graph's output. |
+| **Events with no IR output** (e.g. `message_start`, `message_delta`) | A `_IgnoredEvent` marker matched to a `skip_ignored_event` step that loops back to the router. |
+| **Per-chunk drive** | `feed(data)` parses SSE frames out of an internal buffer into typed events, clears `state.out_events`, runs the graph once, returns the accumulated IR events. State persists across chunks (current block, parts_manager, etc.). |
+| **Mermaid visualization** | Free via `graph.render(title=..., direction='LR')`. See the Visualization section below. |
 
 ### What each file does
 
@@ -301,8 +335,8 @@ async def render_anthropic_dump(parsed: ParsedRequest) -> bytes:
 |---|---|
 | `anthropic.py` | `AnthropicAdapter` — bidirectional wire ↔ IR for Anthropic Messages |
 | `openai_chat.py` | `OpenAIChatAdapter` — bidirectional wire ↔ IR for OpenAI Chat Completions |
-| `google.py` | `GoogleAdapter` — outbound-only IR → Google Gemini wire (wraps pydantic-ai's `GoogleModel`) |
-| `perplexity.py` | `PerplexityAdapter` — outbound-only IR → Perplexity Pro wire (wraps `pplx.py` helpers) |
+| `google.py` | `GoogleAdapter` — outbound-only IR → Google Gemini `generateContent` wire bytes. Direct dict construction with camelCase keys, base64-inline binary data, `generationConfig` hoist for sampling params. Does NOT wrap pydantic-ai's `GoogleModel` — too many ccproxy-specific tweaks (cloudcode-pa envelope, raw_extras passthrough). |
+| `perplexity.py` | `PerplexityAdapter` — outbound-only IR → Perplexity Pro wire bytes. Projects IR back to OpenAI-format dicts, then invokes `pplx.py:_build_pplx_payload` (the 28-field Perplexity payload builder) with `raw_extras["pplx"]` as the params block. |
 | `_envelope.py` | `parse_request_into_fields`, `parse_request`, `render_request` — test/inspector helpers |
 | `_anthropic_envelope.py` | Anthropic wire helpers |
 | `_openai_envelope.py` | OpenAI wire helpers |
@@ -530,13 +564,16 @@ the outbound renderer produces a wire body — the round-trip should be
 tests assert this via canonicalization helpers
 (`assert_anthropic_bodies_equivalent`) for every shape in the test corpus.
 
-The lossiness regressions specifically called out:
-* `ToolReturnPart.tool_name` populated via two-pass lookup (was hardcoded
-  to `""` in the pre-FSM wire.py predecessor).
-* Image `media_type` preserved on `BinaryContent` (was defaulted).
-* `cache_control` TTLs pydantic-ai can't represent stashed in `raw_extras`
-  (were silently coerced).
-* Unknown content blocks preserved in `raw_extras` (were dropped).
+The lossiness invariants specifically called out:
+* `ToolReturnPart.tool_name` populated via the adapter's two-pass lookup
+  (scan assistant turns to build `{tool_use_id: tool_name}`, then attach
+  during user-turn `tool_result` parsing).
+* Image `media_type` preserved on `BinaryContent` (no default-fallback).
+* `cache_control` TTLs pydantic-ai's `CachePoint` can't represent (anything
+  other than `5m` / `1h`) stashed in `raw_extras["cc:msg:N:block:M"]` and
+  re-applied verbatim by the adapter's `render()` path.
+* Unknown content blocks (anything with an unrecognized `type`) preserved
+  in `raw_extras["unknown_block:msg:N:idx:M"]` and re-emitted on dump.
 
 ---
 
@@ -742,13 +779,25 @@ render file when the vendor is a listener format) for the FSMs:
 
 `tests/test_lightllm_graph_anthropic_dump.py` and
 `tests/test_lightllm_graph_anthropic_load.py` together assert the
-roundtrip:
+roundtrip. The pattern is: load body → IR via the adapter, wrap in a
+`ParsedRequest` (or `Context`) test fixture, render back to wire bytes via
+the adapter, then compare against the input:
 
 ```python
-# Load wire → IR
-messages, settings, raw_extras = AnthropicAdapter.load_messages(case.body)
-# Rebuild wire from IR
-req = ParsedRequest(model=..., messages=messages, settings=settings, raw_extras=raw_extras)
+# Load wire → IR. raw_extras and settings come from envelope helpers;
+# adapter.load_messages only returns the message stream.
+raw_extras: dict[str, Any] = {}
+messages = AnthropicAdapter.load_messages(
+    case.body["messages"], system=case.body.get("system"), raw_extras=raw_extras,
+)
+# In the test bench, build a ParsedRequest fixture with the full IR shape:
+req = ParsedRequest(
+    model=case.body["model"],
+    messages=messages,
+    request_parameters=ModelRequestParameters(function_tools=...),
+    settings=settings,
+    raw_extras=raw_extras,
+)
 rendered = AnthropicAdapter.render(req)
 rebuilt = json.loads(rendered)
 assert_anthropic_bodies_equivalent(case.body, rebuilt)
@@ -801,51 +850,47 @@ Mirror these for any new provider's adapter.
 
 ## Visualization
 
-Every FSM in `lightllm/graph/` can render itself as a mermaid diagram:
+Every built FSM in `lightllm/graph/` exposes a `.render()` mermaid
+generator. Import the private module-level graph and print the diagram:
 
 ```python
-from ccproxy.lightllm.graph.anthropic_dump import _dump_graph
-print(_dump_graph.render(title="anthropic_dump", direction="LR"))
+from ccproxy.lightllm.graph.anthropic_intake import _intake_graph
+print(_intake_graph.render(title="anthropic_intake", direction="LR"))
 ```
 
 Produces (excerpt):
 
 ```
 ---
-title: anthropic_dump
+title: anthropic_intake
 ---
 stateDiagram-v2
   direction LR
-  take_next
+  frame_next_event
   state decision <<choice>>
-  apply_cache
-  emit_blocks
-  parse_binary
-  parse_text
-  parse_tool_call_part
-  parse_tool_return
-  parse_url
-  skip_item
+  emit_done
+  handle_content_block_delta
+  handle_content_block_start
+  handle_content_block_stop
+  skip_ignored_event
 
-  [*] --> take_next
-  take_next --> decision
-  decision --> apply_cache
-  decision --> emit_blocks
-  decision --> parse_binary
-  decision --> parse_text
-  decision --> parse_tool_call_part
-  decision --> parse_tool_return
-  decision --> parse_url
-  decision --> skip_item
-  apply_cache --> take_next
-  parse_binary --> take_next
-  parse_text --> take_next
-  parse_tool_call_part --> take_next
-  parse_tool_return --> take_next
-  parse_url --> take_next
-  skip_item --> take_next
-  emit_blocks --> [*]
+  [*] --> frame_next_event
+  frame_next_event --> decision
+  decision --> emit_done
+  decision --> handle_content_block_start
+  decision --> handle_content_block_delta
+  decision --> handle_content_block_stop
+  decision --> skip_ignored_event
+  handle_content_block_start --> frame_next_event
+  handle_content_block_delta --> frame_next_event
+  handle_content_block_stop --> frame_next_event
+  skip_ignored_event --> frame_next_event
+  emit_done --> [*]
 ```
+
+The render-side graph lives at `_render_graph` in `anthropic_render.py`;
+likewise `openai_intake._intake_graph`, `openai_render._render_graph`,
+`google_intake._intake_graph`, `perplexity_intake._intake_graph`.
 
 Useful for debugging surprising routing, for code reviews, and for
 keeping docs in sync.
@@ -932,9 +977,8 @@ envelope without unwrap).
 | OpenAI response FSMs | `src/ccproxy/lightllm/graph/openai_{intake,render}.py` |
 | Google response FSM | `src/ccproxy/lightllm/graph/google_intake.py` |
 | Perplexity response FSM | `src/ccproxy/lightllm/graph/perplexity_intake.py` |
-| Streaming response pipeline | `src/ccproxy/lightllm/graph/sse_pipeline.py` |
-| Buffered response transform | `src/ccproxy/lightllm/graph/buffered.py` |
-| Persistent-loop bridge (response stream) | `src/ccproxy/lightllm/graph/sse_pipeline.py:SSEPipeline` |
+| Streaming response pipeline (persistent-loop bridge) | `src/ccproxy/lightllm/graph/sse_pipeline.py:SSEPipeline` |
+| Buffered response transform | `src/ccproxy/lightllm/graph/buffered.py:transform_buffered_response_sync` |
 | Inspector streaming call site | `src/ccproxy/inspector/addon.py:_install_streaming_transformer` |
 | Inspector buffered call site | `src/ccproxy/inspector/routes/transform.py:handle_transform_response` |
 | Inspector transform call site | `src/ccproxy/inspector/routes/transform.py:_handle_transform` |
