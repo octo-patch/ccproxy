@@ -184,6 +184,14 @@ class TestRouteDispatch:
             blacklist_domain=["evil.com"],
             request_passthrough=True,
         )
+
+        # xepor's `request()` returns early when no routes are registered, so we
+        # register a no-op route on a different host to ensure the blacklist
+        # branch executes when evil.com hits the dispatcher.
+        @api.route("/never", host="example.com")
+        def _noop(flow: MagicMock) -> None:
+            pass
+
         flow = _make_flow(host="evil.com")
         api.request(flow)
         assert flow.response.status_code == 404

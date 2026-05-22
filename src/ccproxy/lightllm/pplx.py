@@ -315,9 +315,10 @@ def _parse_sse_line(line: str | bytes) -> dict[str, Any] | None:
     if not payload or payload.strip() in (b"[DONE]", "[DONE]"):
         return None
     try:
-        return json.loads(payload)
+        parsed: dict[str, Any] = json.loads(payload)
     except json.JSONDecodeError:
         return None
+    return parsed
 
 
 def _consume_step(step: dict[str, Any], state: StreamState) -> str:

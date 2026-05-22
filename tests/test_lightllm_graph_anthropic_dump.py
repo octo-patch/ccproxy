@@ -1,48 +1,39 @@
 """Parametrized parity tests for the Anthropic dump path.
 
-Runs every roundtrip / contract case against BOTH the legacy
-``ccproxy.lightllm.outbound_anthropic.render_anthropic`` and the new
-``ccproxy.lightllm.graph.anthropic_dump.render_anthropic_dump`` FSM. Both
-implementations must satisfy the same acceptance criteria from the original
-briefing:
-
-    ``render(parse_anthropic_messages(b))`` matches ``json.loads(b)`` modulo
-    field-order and ``null``/missing omission.
-
-Where the IR normalizes the wire shape (e.g. a string ``content`` becomes a
-single-element block list), the stronger IR-mediated equivalence is used:
-
-    ``parse(render(parse(b))) == parse(b)``.
-
-When the FSM achieves parity on every case and the legacy implementation is
-deleted in Phase H, the ``implementation`` parametrize collapses to a single
-``"fsm"`` param and the legacy branch is removed.
+Tests the new adapter-based IR → wire rendering using the stronger
+IR-mediated equivalence: ``parse(render(parse(b))) == parse(b)``.
 """
 
 from __future__ import annotations
 
 import json
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
 import pytest
 
-from ccproxy.lightllm.graph import load_anthropic, render_anthropic_dump
-from ccproxy.lightllm.parsed import ParsedRequest
+from ccproxy.lightllm.adapters._envelope import parse_request, render_request
+from ccproxy.lightllm.parsed import ListenerFormat, ParsedRequest
 
-Parse = Callable[[dict[str, Any]], Awaitable[ParsedRequest]]
-Render = Callable[[ParsedRequest], Awaitable[bytes]]
+Parse = Callable[[dict[str, Any]], ParsedRequest]
+Render = Callable[[ParsedRequest], bytes]
 
 
 @pytest.fixture
 def parse() -> Parse:
-    return load_anthropic
+    def _parse(body: dict[str, Any]) -> ParsedRequest:
+        return parse_request(body, listener_format=ListenerFormat.ANTHROPIC_MESSAGES)
+
+    return _parse
 
 
 @pytest.fixture
 def render() -> Render:
-    return render_anthropic_dump
+    def _render(parsed: ParsedRequest) -> bytes:
+        return render_request(parsed, listener_format=ListenerFormat.ANTHROPIC_MESSAGES)
+
+    return _render
 
 
 # ---------------------------------------------------------------------------
@@ -307,10 +298,10 @@ _ROUNDTRIP_CASES: list[RoundtripCase] = [
     "case",
     [pytest.param(c, id=c.name) for c in _ROUNDTRIP_CASES],
 )
-async def test_roundtrip_semantic_equivalence(case: RoundtripCase, parse: Parse, render: Render) -> None:
+def test_roundtrip_semantic_equivalence(case: RoundtripCase, parse: Parse, render: Render) -> None:
     """``parse → render`` produces a body semantically equal to the input."""
-    parsed = await parse(case.body)
-    rendered = await render(parsed)
+    parsed = parse(case.body)
+    rendered = render(parsed)
     rebuilt = json.loads(rendered)
     assert_anthropic_bodies_equivalent(case.body, rebuilt)
 
@@ -373,11 +364,11 @@ def _summarise_messages(messages: list[Any]) -> list[Any]:
     "case",
     [pytest.param(c, id=c.name) for c in _ROUNDTRIP_CASES],
 )
-async def test_roundtrip_ir_idempotent(case: RoundtripCase, parse: Parse, render: Render) -> None:
+def test_roundtrip_ir_idempotent(case: RoundtripCase, parse: Parse, render: Render) -> None:
     """Re-parsing the rendered body yields the same IR (timestamps stripped)."""
-    parsed_original = await parse(case.body)
-    rendered = await render(parsed_original)
-    parsed_again = await parse(json.loads(rendered))
+    parsed_original = parse(case.body)
+    rendered = render(parsed_original)
+    parsed_again = parse(json.loads(rendered))
 
     assert parsed_again.model == parsed_original.model
     assert _summarise_messages(parsed_again.messages) == _summarise_messages(parsed_original.messages)
@@ -389,41 +380,41 @@ async def test_roundtrip_ir_idempotent(case: RoundtripCase, parse: Parse, render
 # ---------------------------------------------------------------------------
 
 
-async def test_render_returns_bytes(parse: Parse, render: Render) -> None:
-    parsed = await parse(
+def test_render_returns_bytes(parse: Parse, render: Render) -> None:
+    parsed = parse(
         {"model": "claude-3-5-haiku-20241022", "max_tokens": 16, "messages": [{"role": "user", "content": "hi"}]}
     )
-    rendered = await render(parsed)
+    rendered = render(parsed)
     assert isinstance(rendered, bytes)
     json.loads(rendered)  # well-formed JSON
 
 
-async def test_render_compact_json(parse: Parse, render: Render) -> None:
+def test_render_compact_json(parse: Parse, render: Render) -> None:
     """Rendered output is compact JSON (no insignificant whitespace)."""
-    parsed = await parse(
+    parsed = parse(
         {"model": "claude-3-5-haiku-20241022", "max_tokens": 16, "messages": [{"role": "user", "content": "hi"}]}
     )
-    rendered = await render(parsed)
+    rendered = render(parsed)
     assert b": " not in rendered
     assert b", " not in rendered
 
 
-async def test_render_strips_sdk_control_fields(parse: Parse, render: Render) -> None:
+def test_render_strips_sdk_control_fields(parse: Parse, render: Render) -> None:
     """Rendered body never carries the SDK-only kwargs (extra_headers, betas, etc.)."""
-    parsed = await parse(
+    parsed = parse(
         {"model": "claude-3-5-haiku-20241022", "max_tokens": 16, "messages": [{"role": "user", "content": "hi"}]}
     )
-    rendered = json.loads(await render(parsed))
+    rendered = json.loads(render(parsed))
     for forbidden in ("extra_headers", "extra_body", "extra_query", "timeout", "betas"):
         assert forbidden not in rendered, f"SDK control field {forbidden!r} leaked into body"
 
 
-async def test_render_strips_omit_sentinels(parse: Parse, render: Render) -> None:
+def test_render_strips_omit_sentinels(parse: Parse, render: Render) -> None:
     """No anthropic.Omit / NotGiven sentinels survive into the JSON output."""
-    parsed = await parse(
+    parsed = parse(
         {"model": "claude-3-5-haiku-20241022", "max_tokens": 16, "messages": [{"role": "user", "content": "hi"}]}
     )
-    rendered = json.loads(await render(parsed))
+    rendered = json.loads(render(parsed))
     for key, value in rendered.items():
         assert value is not None, f"Field {key!r} is None — Omit handling leaked"
 
@@ -433,7 +424,7 @@ async def test_render_strips_omit_sentinels(parse: Parse, render: Render) -> Non
 # ---------------------------------------------------------------------------
 
 
-async def test_non_uniform_system_cache_control_preserved(parse: Parse, render: Render) -> None:
+def test_non_uniform_system_cache_control_preserved(parse: Parse, render: Render) -> None:
     """Mixed system cache_control roundtrips via raw_extras['system']."""
     body = {
         "model": "claude-3-5-haiku-20241022",
@@ -444,23 +435,23 @@ async def test_non_uniform_system_cache_control_preserved(parse: Parse, render: 
         ],
         "messages": [{"role": "user", "content": "go"}],
     }
-    parsed = await parse(body)
+    parsed = parse(body)
     # The inbound parser stashes the original blocks for non-uniform cache_control.
     assert "system" in parsed.raw_extras
 
-    rendered = json.loads(await render(parsed))
+    rendered = json.loads(render(parsed))
     assert rendered["system"] == body["system"]
 
 
-async def test_metadata_preserved_via_raw_extras(parse: Parse, render: Render) -> None:
+def test_metadata_preserved_via_raw_extras(parse: Parse, render: Render) -> None:
     body = {
         "model": "claude-3-5-haiku-20241022",
         "max_tokens": 16,
         "messages": [{"role": "user", "content": "hi"}],
         "metadata": {"user_id": "alice"},
     }
-    parsed = await parse(body)
-    rendered = json.loads(await render(parsed))
+    parsed = parse(body)
+    rendered = json.loads(render(parsed))
     assert rendered.get("metadata") == {"user_id": "alice"}
 
 

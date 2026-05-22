@@ -282,7 +282,8 @@ def test_fastmcp_instructions_block_configured() -> None:
     """The FastMCP server advertises ccproxy-specific guidance to calling LLMs."""
     instructions = getattr(server.mcp, "instructions", "") or ""
     assert "ccproxy" in instructions
-    assert "chat/completions" in instructions or "chat-completions" in instructions
+    instructions_lc = instructions.lower()
+    assert "chat/completions" in instructions_lc or "chat-completions" in instructions_lc
     assert "flow inspection" in instructions
 
 

@@ -8,7 +8,6 @@ commit(). Header mutations are live — they hit the flow immediately.
 
 from __future__ import annotations
 
-import asyncio
 import json
 from dataclasses import dataclass, field
 from dataclasses import replace as _dataclass_replace
@@ -22,35 +21,6 @@ from ccproxy.lightllm.parsed import ListenerFormat, ParsedRequest
 if TYPE_CHECKING:
     from mitmproxy import http
     from mitmproxy.http import HTTPFlow
-
-
-def _run_coro_sync(coro: Any) -> Any:
-    """Drive an awaitable to completion from any sync context.
-
-    If no event loop is running on the current thread, use a private
-    event loop. If a loop is already running, dispatch to a worker
-    thread that owns its own private loop — necessary because asyncio
-    forbids nested ``run_until_complete`` calls in the same thread.
-    """
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        try:
-            return loop.run_until_complete(coro)
-        finally:
-            loop.close()
-    import concurrent.futures
-
-    def _worker() -> Any:
-        worker_loop = asyncio.new_event_loop()
-        try:
-            return worker_loop.run_until_complete(coro)
-        finally:
-            worker_loop.close()
-
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-        return pool.submit(_worker).result()
 
 
 def _replace_system_parts(
@@ -132,43 +102,25 @@ class Context:
     _parsed: ParsedRequest | None = field(default=None, repr=False)
     """Lazy-parsed IR view of the request. Populated by per-listener parser on demand."""
 
-    async def ensure_parsed(self) -> ParsedRequest:
-        """Lazily parse ``self._body`` via the listener-format-matched inbound parser.
-
-        Raises ``ValueError`` if the listener format is UNKNOWN — callers
-        that need the IR view should branch on ``self._listener_format``
-        first. Subsequent calls return the cached ``ParsedRequest`` even
-        if ``_body`` has been mutated; call ``invalidate_parsed()`` to
-        force a re-parse.
-        """
-        if self._parsed is not None:
-            return self._parsed
-        from ccproxy.lightllm.graph import dispatch_load
-
-        self._parsed = await dispatch_load(self._body, listener_format=self._listener_format)
-        return self._parsed
-
     def invalidate_parsed(self) -> None:
-        """Drop the cached ``ParsedRequest`` so the next ``ensure_parsed`` re-parses."""
+        """Drop the cached ``ParsedRequest`` so the next ``parse_sync`` re-parses."""
         self._parsed = None
 
     def parse_sync(self) -> ParsedRequest:
-        """Sync wrapper around :meth:`ensure_parsed`.
+        """Parse ``self._body`` via the listener-format-matched UIAdapter.
 
-        Drives the async parser to completion so sync callers (xepor
-        route handlers, mitmproxy stream callbacks, sync hook bodies)
-        can pull the IR view. When invoked from outside any event loop,
-        a private loop is used. When invoked from inside a running loop
-        (e.g. a hook running on mitmproxy's asyncio loop), the work is
-        dispatched to a worker thread so we don't nest loops.
-
-        Safe because the inbound parsers have no real I/O — they raise
-        no exceptions other than ValidationError, so the work is bounded.
+        Sync because the new UIAdapters in :mod:`ccproxy.lightllm.adapters`
+        are pure (``json.loads`` + procedural dispatch), so there's no
+        asyncio bridge to maintain. Subsequent calls return the cached
+        :class:`ParsedRequest` even if ``_body`` has been mutated; call
+        :meth:`invalidate_parsed` to force a re-parse.
         """
         if self._parsed is not None:
             return self._parsed
-        parsed: ParsedRequest = _run_coro_sync(self.ensure_parsed())
-        return parsed
+        from ccproxy.lightllm.adapters._envelope import parse_request
+
+        self._parsed = parse_request(self._body, listener_format=self._listener_format)
+        return self._parsed
 
     @classmethod
     def from_flow(cls, flow: HTTPFlow) -> Context:
@@ -354,7 +306,7 @@ class Context:
         if self._listener_format is ListenerFormat.UNKNOWN:
             return
 
-        from ccproxy.lightllm.graph import dispatch_dump_sync
+        from ccproxy.lightllm.adapters._envelope import render_request
 
         # Ensure we have a base ParsedRequest to mutate.
         parsed = self.parse_sync()
@@ -374,10 +326,7 @@ class Context:
             parsed = _dataclass_replace(parsed, request_parameters=new_params)
 
         self._parsed = parsed
-        # ``provider`` here is the LISTENER format name — the outbound dispatcher
-        # routes it to the matching renderer (anthropic/openai).
-        listener_provider = "anthropic" if self._listener_format is ListenerFormat.ANTHROPIC_MESSAGES else "openai"
-        rendered = dispatch_dump_sync(parsed, provider=listener_provider)
+        rendered = render_request(parsed, listener_format=self._listener_format)
         self._body = json.loads(rendered)
 
     def commit(self) -> None:

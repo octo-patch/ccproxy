@@ -11,7 +11,6 @@ from ccproxy.lightllm.graph import (
     dispatch_dump,
     dispatch_dump_sync,
     dispatch_intake,
-    dispatch_load,
     dispatch_render,
 )
 from ccproxy.lightllm.parsed import ListenerFormat, ParsedRequest
@@ -31,6 +30,5 @@ __all__ = [
     "dispatch_dump",
     "dispatch_dump_sync",
     "dispatch_intake",
-    "dispatch_load",
     "dispatch_render",
 ]
