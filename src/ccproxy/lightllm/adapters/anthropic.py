@@ -30,8 +30,6 @@ from dataclasses import dataclass
 from functools import cached_property
 from typing import Any, Literal, cast
 
-logger = logging.getLogger(__name__)
-
 from anthropic.types.beta import (
     BetaContentBlockParam,
     BetaImageBlockParam,
@@ -63,6 +61,8 @@ from pydantic_ai.messages import (
 from pydantic_ai.output import OutputDataT
 from pydantic_ai.tools import AgentDepsT
 from pydantic_ai.ui import MessagesBuilder, UIAdapter, UIEventStream
+
+logger = logging.getLogger(__name__)
 
 # pydantic-ai's CachePoint accepts only these two TTLs (Literal['5m', '1h']);
 # anything else stashes in raw_extras via the per-block `cc:` key convention.
@@ -106,7 +106,7 @@ class AnthropicAdapter(UIAdapter[MessageCreateParamsBase, BetaMessageParam, Any,
     # ── load (wire → IR) ─────────────────────────────────────────────────────
 
     @classmethod
-    def load_messages(  # noqa: PLR0912
+    def load_messages(
         cls,
         messages: Iterable[BetaMessageParam],
         *,
@@ -166,10 +166,11 @@ class AnthropicAdapter(UIAdapter[MessageCreateParamsBase, BetaMessageParam, Any,
                 cls._load_assistant_turn(
                     msg, builder, msg_index=msg_index, raw_extras=raw_extras,
                 )
-            elif role == "system":
+            elif role == "system":  # type: ignore[unreachable]
                 # Some clients put system prompts inline in messages[] rather than
-                # at the top-level `system` field. Surface them as SystemPromptParts.
-                content = msg.get("content")
+                # at the top-level `system` field. The SDK TypedDict claims user/assistant
+                # only, hence the type:ignore — runtime reality is broader.
+                content = msg.get("content")  # type: ignore[unreachable]
                 if isinstance(content, str):
                     if content:
                         builder.add(SystemPromptPart(content=content))
@@ -181,7 +182,7 @@ class AnthropicAdapter(UIAdapter[MessageCreateParamsBase, BetaMessageParam, Any,
         return builder.messages
 
     @classmethod
-    def _load_user_turn(  # noqa: PLR0912, PLR0913
+    def _load_user_turn(
         cls,
         msg: BetaMessageParam,
         builder: MessagesBuilder,
@@ -280,7 +281,7 @@ class AnthropicAdapter(UIAdapter[MessageCreateParamsBase, BetaMessageParam, Any,
         flush()
 
     @classmethod
-    def _load_assistant_turn(  # noqa: PLR0912
+    def _load_assistant_turn(
         cls,
         msg: BetaMessageParam,
         builder: MessagesBuilder,
@@ -570,7 +571,7 @@ class AnthropicAdapter(UIAdapter[MessageCreateParamsBase, BetaMessageParam, Any,
                 tr: BetaToolResultBlockParam = {
                     "type": "tool_result",
                     "tool_use_id": part.tool_call_id,
-                    "content": part.model_response_str(),
+                    "content": [{"type": "text", "text": part.model_response_str()}],
                 }
                 if part.outcome == "failed":
                     tr["is_error"] = True
@@ -582,7 +583,7 @@ class AnthropicAdapter(UIAdapter[MessageCreateParamsBase, BetaMessageParam, Any,
                         {
                             "type": "tool_result",
                             "tool_use_id": part.tool_call_id,
-                            "content": part.model_response(),
+                            "content": [{"type": "text", "text": part.model_response()}],
                             "is_error": True,
                         }
                     )

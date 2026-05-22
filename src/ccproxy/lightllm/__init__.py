@@ -6,6 +6,10 @@ and upstream provider formats. The per-provider FSMs live in
 public entry points for the rest of ccproxy.
 """
 
+from ccproxy.lightllm.graph_ext import apply_patches
+
+apply_patches()
+
 from ccproxy.lightllm.graph import (
     UnsupportedUpstreamError,
     dispatch_dump,

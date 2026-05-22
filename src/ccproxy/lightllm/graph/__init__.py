@@ -5,22 +5,18 @@ return per-provider async FSM instances; the persistent-loop bridge in
 :class:`ccproxy.lightllm.graph.sse_pipeline.SSEPipeline` drives them from
 mitmproxy's sync stream callable.
 
-The request-side :func:`dispatch_dump_sync` routes Anthropic + OpenAI to the
-new :mod:`ccproxy.lightllm.adapters` (synchronous UIAdapter subclasses), and
-Google + Perplexity to the legacy async FSM dumps until Phases D + E land.
+The request-side :func:`dispatch_dump_sync` routes all providers (Anthropic,
+OpenAI, Google, Perplexity) to the new :mod:`ccproxy.lightllm.adapters`
+(synchronous UIAdapter subclasses or direct render functions).
 """
 
-import asyncio
-import concurrent.futures
 from typing import TYPE_CHECKING
 
 from ccproxy.lightllm.graph.anthropic_intake import AnthropicResponseIntakeFSM
 from ccproxy.lightllm.graph.anthropic_render import AnthropicResponseRenderFSM
-from ccproxy.lightllm.graph.google_dump import render_google_dump
 from ccproxy.lightllm.graph.google_intake import GoogleResponseIntakeFSM
 from ccproxy.lightllm.graph.openai_intake import OpenAIResponseIntakeFSM
 from ccproxy.lightllm.graph.openai_render import OpenAIResponseRenderFSM
-from ccproxy.lightllm.graph.perplexity_dump import render_perplexity_pro_dump
 from ccproxy.lightllm.graph.perplexity_intake import PerplexityResponseIntakeFSM
 from ccproxy.lightllm.parsed import ListenerFormat, ParsedRequest
 
@@ -63,17 +59,10 @@ class UnsupportedListenerError(ValueError):
 async def dispatch_dump(parsed: ParsedRequest, *, provider: str) -> bytes:
     """Render ``parsed`` to the wire bytes the named upstream expects.
 
-    Google / Vertex AI / Perplexity Pro route to their legacy async FSM dumps.
-    Anthropic-compatible + OpenAI now route through :func:`dispatch_dump_sync`
+    All providers now route through :func:`dispatch_dump_sync`
     (kept here for test compatibility only).
     """
-    if provider in _ANTHROPIC_COMPATIBLE or provider == "openai":
-        return dispatch_dump_sync(parsed, provider=provider)
-    if provider in _GOOGLE_COMPATIBLE:
-        return await render_google_dump(parsed)
-    if provider == "perplexity_pro":
-        return await render_perplexity_pro_dump(parsed)
-    raise UnsupportedUpstreamError(f"no outbound renderer for provider={provider!r}")
+    return dispatch_dump_sync(parsed, provider=provider)
 
 
 def dispatch_intake(
@@ -120,13 +109,10 @@ def dispatch_render(*, listener_format: ListenerFormat, model: str = "unknown") 
 
 
 def dispatch_dump_sync(parsed: ParsedRequest, *, provider: str) -> bytes:
-    """Sync facade over :func:`dispatch_dump`.
+    """Synchronous dispatcher for all providers.
 
-    For Anthropic + OpenAI Chat targets, dispatches synchronously through the
-    new :mod:`ccproxy.lightllm.adapters` (no worker-thread bridge needed —
-    those adapters are pure procedural code). For Google + Perplexity Pro,
-    still bridges to the async FSM dump via a private event loop until those
-    adapters land (Phases D + E).
+    Routes to the appropriate adapter or render function in
+    :mod:`ccproxy.lightllm.adapters`.
     """
     if provider in _ANTHROPIC_COMPATIBLE:
         from ccproxy.lightllm.adapters._envelope import render_request
@@ -138,22 +124,13 @@ def dispatch_dump_sync(parsed: ParsedRequest, *, provider: str) -> bytes:
         from ccproxy.lightllm.parsed import ListenerFormat
 
         return render_request(parsed, listener_format=ListenerFormat.OPENAI_CHAT)
+    if provider in _GOOGLE_COMPATIBLE:
+        from ccproxy.lightllm.adapters import google
 
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        try:
-            return loop.run_until_complete(dispatch_dump(parsed, provider=provider))
-        finally:
-            loop.close()
+        return google.render(parsed)
+    if provider == "perplexity_pro":
+        from ccproxy.lightllm.adapters import perplexity
 
-    def _worker() -> bytes:
-        worker_loop = asyncio.new_event_loop()
-        try:
-            return worker_loop.run_until_complete(dispatch_dump(parsed, provider=provider))
-        finally:
-            worker_loop.close()
+        return perplexity.render(parsed)
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-        return pool.submit(_worker).result()
+    raise UnsupportedUpstreamError(f"no outbound renderer for provider={provider!r}")

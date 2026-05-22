@@ -91,11 +91,12 @@ def _fetch_thread(slug: str, token: str) -> dict[str, Any] | None:
         "x-perplexity-request-endpoint": url,
     }
 
-    resp = httpx.get(url, params=params, headers=headers, timeout=_THREAD_FETCH_TIMEOUT)
+    resp = httpx.get(url, params=tuple(params), headers=headers, timeout=_THREAD_FETCH_TIMEOUT)
     if resp.status_code == 404:
         return None
     resp.raise_for_status()
-    return resp.json()
+    parsed: dict[str, Any] = resp.json()
+    return parsed
 
 
 def _extract_latest_identifiers(thread: dict[str, Any]) -> dict[str, str | None] | None:

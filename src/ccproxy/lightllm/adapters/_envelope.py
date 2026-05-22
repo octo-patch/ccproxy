@@ -125,6 +125,18 @@ def _render_anthropic(parsed: ParsedRequest) -> bytes:
     messages = AnthropicAdapter.dump_messages(parsed.messages)
     tools = _anthropic_format_tools(parsed.request_parameters.function_tools, settings_dict)
 
+    # Lift the uniform-cache TTL captured during load back onto every system
+    # block so the wire round-trips. Non-uniform / non-standard TTLs flow
+    # through ``raw_extras['system']`` instead — _stitch_raw_extras overwrites
+    # below.
+    cache_ttl = settings_dict.get("anthropic_cache_instructions")
+    if cache_ttl and system is not None:
+        if isinstance(system, str):
+            system = [{"type": "text", "text": system, "cache_control": {"type": "ephemeral", "ttl": cache_ttl}}]
+        else:
+            for block in system:
+                block.setdefault("cache_control", {"type": "ephemeral", "ttl": cache_ttl})
+
     body: dict[str, Any] = {
         "model": parsed.model,
         "messages": messages,

@@ -6,12 +6,17 @@ the ``x-ccproxy-flow-id`` header so that inbound auth decisions are readable
 when the corresponding response phase fires.
 """
 
+from __future__ import annotations
+
 import json
 import threading
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
+
+if TYPE_CHECKING:
+    from ccproxy.pipeline.results import HookResult
 
 FLOW_ID_HEADER = "x-ccproxy-flow-id"
 
@@ -144,6 +149,14 @@ class FlowRecord:
     """First 12 hex chars of ``sha256(json.dumps(system, sort_keys=True))``.
 
     Identifies which system prompt was in effect for this request.
+    """
+
+    hook_results: list[HookResult] = field(default_factory=list)
+    """Results from each hook execution in the pipeline.
+
+    Populated from flow.metadata["ccproxy.hook_results"] during pipeline
+    execution. Each entry is a discriminated union indicating success,
+    skip, or error for a single hook invocation.
     """
 
     _parsed_request_body: dict[str, Any] | None = field(default=None, init=False, repr=False)

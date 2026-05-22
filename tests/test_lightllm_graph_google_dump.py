@@ -25,19 +25,19 @@ from pydantic_ai.models import ModelRequestParameters
 from pydantic_ai.settings import ModelSettings
 from pydantic_ai.tools import ToolDefinition
 
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable
 
 import pytest
 
-from ccproxy.lightllm.graph import render_google_dump
+from ccproxy.lightllm.adapters import google
 from ccproxy.lightllm.parsed import ParsedRequest
 
-Render = Callable[[ParsedRequest], Awaitable[bytes]]
+Render = Callable[[ParsedRequest], bytes]
 
 
 @pytest.fixture
 def render() -> Render:
-    return render_google_dump
+    return google.render
 
 
 def _build_parsed(
@@ -56,12 +56,12 @@ def _build_parsed(
 
 
 class TestSingleUserMessage:
-    async def test_text_only(self, render: Render) -> None:
+    def test_text_only(self, render: Render) -> None:
         parsed = _build_parsed(
             messages=[ModelRequest(parts=[UserPromptPart(content="Hello")])],
             settings=ModelSettings(temperature=0.7, max_tokens=128),
         )
-        body = json.loads(await render(parsed))
+        body = json.loads(render(parsed))
         assert body["contents"] == [
             {"role": "user", "parts": [{"text": "Hello"}]},
         ]
@@ -74,7 +74,7 @@ class TestSingleUserMessage:
 
 
 class TestSystemInstruction:
-    async def test_single_system_prompt(self, render: Render) -> None:
+    def test_single_system_prompt(self, render: Render) -> None:
         parsed = _build_parsed(
             messages=[
                 ModelRequest(
@@ -85,7 +85,7 @@ class TestSystemInstruction:
                 )
             ],
         )
-        body = json.loads(await render(parsed))
+        body = json.loads(render(parsed))
         assert body["systemInstruction"] == {
             "role": "user",
             "parts": [{"text": "Be brief."}],
@@ -94,7 +94,7 @@ class TestSystemInstruction:
             {"role": "user", "parts": [{"text": "Hi"}]},
         ]
 
-    async def test_multi_part_system(self, render: Render) -> None:
+    def test_multi_part_system(self, render: Render) -> None:
         parsed = _build_parsed(
             messages=[
                 ModelRequest(
@@ -106,7 +106,7 @@ class TestSystemInstruction:
                 )
             ],
         )
-        body = json.loads(await render(parsed))
+        body = json.loads(render(parsed))
         # Multiple SystemPromptParts collapse into one systemInstruction
         # block carrying multiple text parts.
         assert body["systemInstruction"] == {
@@ -119,7 +119,7 @@ class TestSystemInstruction:
 
 
 class TestToolCallHistory:
-    async def test_assistant_function_call_and_user_function_response(self, render: Render) -> None:
+    def test_assistant_function_call_and_user_function_response(self, render: Render) -> None:
         parsed = _build_parsed(
             messages=[
                 ModelRequest(parts=[UserPromptPart(content="What is 2+2?")]),
@@ -155,7 +155,7 @@ class TestToolCallHistory:
                 ],
             ),
         )
-        body = json.loads(await render(parsed))
+        body = json.loads(render(parsed))
 
         # Assistant turn becomes role='model' with a functionCall part.
         model_turn = body["contents"][1]
@@ -197,7 +197,7 @@ class TestToolCallHistory:
         # is true and tool_choice is unset (default AUTO is implicit upstream).
         assert "toolConfig" not in body
 
-    async def test_required_tool_choice_emits_tool_config(self, render: Render) -> None:
+    def test_required_tool_choice_emits_tool_config(self, render: Render) -> None:
         parsed = _build_parsed(
             messages=[ModelRequest(parts=[UserPromptPart(content="Use the tool.")])],
             request_parameters=ModelRequestParameters(
@@ -214,7 +214,7 @@ class TestToolCallHistory:
                 allow_text_output=False,
             ),
         )
-        body = json.loads(await render(parsed))
+        body = json.loads(render(parsed))
         # When allow_text_output is false, the installed pydantic-ai forces
         # ANY mode with allowed_function_names so the model must invoke a tool.
         assert body["toolConfig"] == {
@@ -226,7 +226,7 @@ class TestToolCallHistory:
 
 
 class TestImageContent:
-    async def test_binary_image_maps_to_inline_data(self, render: Render) -> None:
+    def test_binary_image_maps_to_inline_data(self, render: Render) -> None:
         raw_bytes = b"\x89PNG\r\n\x1a\nfake-png-payload"
         parsed = _build_parsed(
             messages=[
@@ -245,7 +245,7 @@ class TestImageContent:
                 )
             ],
         )
-        body = json.loads(await render(parsed))
+        body = json.loads(render(parsed))
 
         parts = body["contents"][0]["parts"]
         text_part = next(p for p in parts if "text" in p)

@@ -91,7 +91,7 @@ class OpenAIChatAdapter(
     # ── load (wire → IR) ─────────────────────────────────────────────────────
 
     @classmethod
-    def load_messages(  # noqa: PLR0912
+    def load_messages(
         cls,
         messages: Iterable[ChatCompletionMessageParam],
         *,
@@ -239,7 +239,7 @@ class OpenAIChatAdapter(
         return {INVALID_JSON_KEY: arguments}
 
     @classmethod
-    def _load_user_content(  # noqa: PLR0912
+    def _load_user_content(
         cls,
         content: str | Iterable[ChatCompletionContentPartParam],
         *,
@@ -297,10 +297,11 @@ class OpenAIChatAdapter(
                 else:
                     parts.append(json.dumps(dict(item)))
 
-            else:
+            else:  # type: ignore[unreachable]
                 # Unknown block — preserve in raw_extras and emit a JSON-string
-                # placeholder so the message has SOMETHING to point at.
-                if raw_extras is not None:
+                # placeholder. The SDK TypedDict claims exhaustive variants;
+                # runtime allows arbitrary unknown types.
+                if raw_extras is not None:  # type: ignore[unreachable]
                     raw_extras[f"unknown_block:msg:{msg_index}:block:{block_index}"] = dict(item)
                 parts.append(json.dumps(dict(item)))
 

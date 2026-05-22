@@ -14,6 +14,14 @@ Both directions share one FSM idiom built on
 `*_intake.py` / `*_render.py` module per provider/listener-format. There is
 no LiteLLM dependency; `rg "litellm" src/` returns empty.
 
+**Graph composition**: `src/ccproxy/lightllm/graph_ext.py` applies a load-time
+monkey-patch to `pydantic_graph.beta.GraphBuilder`, adding an
+`add_subgraph(child, state_factory=None, node_id=None, label=None)` method for
+composing FSMs from child graphs. The patch is idempotent and applied from
+`ccproxy.lightllm.__init__`. This enables hierarchical FSM composition for
+complex SSE dispatch patterns without waiting for upstream pydantic_graph
+support (tracked at pydantic_graph/pydantic_graph/graph_builder.py:1469).
+
 ---
 
 ## Architecture
