@@ -50,7 +50,7 @@ from typing import TYPE_CHECKING, Any
 # behavior and there is no public replacement.
 from pydantic_ai._parts_manager import ModelResponsePartsManager
 from pydantic_ai.messages import ModelResponseStreamEvent
-from pydantic_graph.beta import GraphBuilder, StepContext
+from pydantic_graph import GraphBuilder, StepContext
 
 from ccproxy.lightllm.pplx_steps import _KNOWN_INTENDED_USAGES, render_step
 
@@ -170,10 +170,11 @@ def _apply_markdown_patch(state: _PerplexityIntakeState, path: str, value: Any) 
             new_text = "".join(c for c in chunks if isinstance(c, str))
             if offset in (None, 0):
                 if new_text != state.answer_seen:
-                    if new_text.startswith(state.answer_seen):
-                        d = new_text[len(state.answer_seen) :]
-                    else:
-                        d = new_text
+                    d = (
+                        new_text[len(state.answer_seen) :]
+                        if new_text.startswith(state.answer_seen)
+                        else new_text
+                    )
                     if d:
                         delta += d
                     state.answer_seen = new_text
@@ -445,7 +446,7 @@ class PerplexityResponseIntakeFSM:
         self._sse_buffer = bytearray()
         self.upstream_raw_bytes = bytearray()
         self._state = _PerplexityIntakeState(
-            parts_manager=ModelResponsePartsManager(),
+            parts_manager=ModelResponsePartsManager(model_request_parameters=request_params),
         )
 
     @property

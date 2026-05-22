@@ -6,8 +6,8 @@ renderers under :mod:`ccproxy.lightllm.graph` are async (each chunk drives one
 ``await graph.run(...)``), but mitmproxy installs sync callables on
 ``flow.response.stream``. This pipeline owns one daemon thread + one
 :class:`asyncio.AbstractEventLoop` per instance and submits each chunk via
-:func:`asyncio.run_coroutine_threadsafe`, paying ~10–50 µs of cross-thread
-hop per chunk against an upstream-network-bound 10–100 ms-per-chunk floor.
+:func:`asyncio.run_coroutine_threadsafe`, paying ~10-50 µs of cross-thread
+hop per chunk against an upstream-network-bound 10-100 ms-per-chunk floor.
 
 Compare to the pathological pattern Phase Q replaces: the
 ``_GoogleSyncIntake`` / ``_PerplexitySyncIntake`` adapters in

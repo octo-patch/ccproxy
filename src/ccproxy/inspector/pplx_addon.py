@@ -24,18 +24,17 @@ state. Both observe the same SSE events but for different purposes.
 
 from __future__ import annotations
 
-import json
+import contextlib
 import logging
-from typing import Any
 
 from mitmproxy import http
 
 from ccproxy.lightllm.pplx import (
-    PERPLEXITY_PROVIDER_NAME,
     _PPLX_ID_FIELDS,
+    PERPLEXITY_PROVIDER_NAME,
+    StreamState,
     _extract_deltas,
     _parse_sse_line,
-    StreamState,
 )
 from ccproxy.lightllm.pplx_threads import get_pplx_thread_store
 
@@ -142,10 +141,8 @@ class PerplexityAddon:
             event = _parse_sse_line(line)
             if event is None:
                 continue
-            try:
+            with contextlib.suppress(Exception):
                 _extract_deltas(event, state)
-            except Exception:
-                pass
 
         ids = {k: v for k, v in state.ids.items() if k in _PPLX_ID_FIELDS and isinstance(v, str)}
         return ids or None

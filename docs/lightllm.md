@@ -9,18 +9,12 @@ Anthropic-compatible forks DeepSeek and ZAI). On the response side the same
 package turns upstream SSE bytes (or buffered JSON) back into IR events and
 re-renders to the listener's wire format.
 
-Both directions share one FSM idiom built on
-`pydantic_graph.beta.GraphBuilder`: one `*_load.py` / `*_dump.py` /
-`*_intake.py` / `*_render.py` module per provider/listener-format. There is
-no LiteLLM dependency; `rg "litellm" src/` returns empty.
-
-**Graph composition**: `src/ccproxy/lightllm/graph_ext.py` applies a load-time
-monkey-patch to `pydantic_graph.beta.GraphBuilder`, adding an
-`add_subgraph(child, state_factory=None, node_id=None, label=None)` method for
-composing FSMs from child graphs. The patch is idempotent and applied from
-`ccproxy.lightllm.__init__`. This enables hierarchical FSM composition for
-complex SSE dispatch patterns without waiting for upstream pydantic_graph
-support (tracked at pydantic_graph/pydantic_graph/graph_builder.py:1469).
+The response side uses an FSM idiom built on `pydantic_graph.GraphBuilder`
+(pinned at >=1.99.0, importing from canonical paths — no longer `.beta`):
+`*_intake.py` / `*_render.py` modules per provider/listener-format handle
+streaming SSE transformations. Request-side wire ↔ IR translation lives in
+`src/ccproxy/lightllm/adapters/` as `UIAdapter` subclasses, one per wire
+format. There is no LiteLLM dependency; `rg "litellm" src/` returns empty.
 
 ---
 
@@ -36,12 +30,11 @@ Client                              ccproxy                                Provi
   │                                    │  │ Context.from_flow(flow)     │     │
   │                                    │  │   ↓                         │     │
   │                                    │  │ Context.parse_sync()        │     │
-  │                                    │  │   → _run_coro_sync(...)     │     │
-  │                                    │  │     ↓                       │     │
-  │                                    │  │   await dispatch_load(      │     │
-  │                                    │  │     body, listener_format=) │     │
-  │                                    │  │     ↓                       │     │
-  │                                    │  │   ParsedRequest (IR)        │     │
+  │                                    │  │   → populates ctx fields:   │     │
+  │                                    │  │     _cached_messages        │     │
+  │                                    │  │     _cached_settings        │     │
+  │                                    │  │     _cached_request_params  │     │
+  │                                    │  │     _cached_raw_extras      │     │
   │                                    │  └──────────┬──────────────────┘     │
   │                                    │             ↓                        │
   │                                    │  ┌──────────────────────┐            │
@@ -49,8 +42,8 @@ Client                              ccproxy                                Provi
   │                                    │  └──────────┬───────────┘            │
   │                                    │             ↓                        │
   │                                    │  ┌──────────────────────────────┐    │
-  │                                    │  │ dispatch_dump_sync(          │    │
-  │                                    │  │   parsed, provider=)         │    │
+  │                                    │  │ ctx.commit() calls           │    │
+  │                                    │  │ dispatch_dump_sync(ctx, ...)  │    │
   │                                    │  │   → provider wire bytes ────────▶│
   │                                    │  └──────────────────────────────┘    │
   │                                    │                                      │
@@ -83,31 +76,34 @@ operate on.
 
 ```
 src/ccproxy/lightllm/
-├── parsed.py             ParsedRequest, ParsedResponse, ListenerFormat
+├── parsed.py             ParsedRequest (reduced role), ListenerFormat
 ├── registry.py           Local Perplexity Pro registration (no LiteLLM fallback)
 ├── pplx.py               Perplexity Pro config + exceptions (no LiteLLM bases)
 ├── pplx_steps.py         Perplexity step trail renderer
 ├── pplx_threads.py       Perplexity thread continuation helpers
 │
-└── graph/                ← FSM modules (canonical)
-    ├── __init__.py       dispatch_load, dispatch_dump, dispatch_dump_sync,
-    │                      dispatch_intake, dispatch_render
+├── adapters/             ← UIAdapter subclasses (request-side wire ↔ IR)
+│   ├── __init__.py       LLMRenderInput Protocol + adapter exports
+│   ├── anthropic.py      AnthropicAdapter
+│   ├── openai_chat.py    OpenAIChatAdapter
+│   ├── google.py         GoogleAdapter (outbound-only)
+│   ├── perplexity.py     PerplexityAdapter (outbound-only)
+│   ├── _envelope.py      parse_request_into_fields, parse_request, render_request
+│   ├── _anthropic_envelope.py  Anthropic wire helpers
+│   └── _openai_envelope.py     OpenAI wire helpers
+│
+└── graph/                ← FSM modules for streaming responses
+    ├── __init__.py       dispatch_dump_sync, dispatch_intake, dispatch_render
     │
-    ├── anthropic_dump.py   IR → Anthropic Messages wire
-    ├── anthropic_load.py   Anthropic Messages wire → IR
     ├── anthropic_intake.py Anthropic SSE → IR events
     ├── anthropic_render.py IR events → Anthropic SSE
     │
-    ├── openai_dump.py    IR → OpenAI Chat Completions wire
-    ├── openai_load.py    OpenAI Chat Completions wire → IR
     ├── openai_intake.py  OpenAI SSE → IR events
     ├── openai_render.py  IR events → OpenAI SSE
     │
-    ├── google_dump.py    IR → Google Gemini generateContent (wraps GoogleModel)
     ├── google_intake.py  Google streamGenerateContent SSE → IR events
     │                      (cloudcode-pa envelope unwrap folded in)
     │
-    ├── perplexity_dump.py   IR → Perplexity Pro wire (wraps pplx.py helpers)
     ├── perplexity_intake.py Perplexity Pro SSE → IR events
     │
     ├── sse_pipeline.py   SSEPipeline — persistent asyncio loop per stream
@@ -115,46 +111,61 @@ src/ccproxy/lightllm/
                           cross-format transform via FSM
 ```
 
-There is no `response/` subpackage anymore (deleted), no `dispatch.py`
-(deleted), no `context_cache.py` (deleted — Gemini cachedContents is
-unsupported via the OAuth path the production deployment uses; restore it as
-an outbound hook if API-key Gemini ever needs it).
+There is no `*_load.py` / `*_dump.py` anymore (moved to `adapters/`), no
+`response/` subpackage (deleted), no `dispatch.py` (deleted), no
+`context_cache.py` (deleted — Gemini cachedContents is unsupported via the
+OAuth path the production deployment uses).
 
 ---
 
 ## The IR
 
-### `ParsedRequest` — the request envelope
+### `LLMRenderInput` Protocol — the request envelope
 
-`src/ccproxy/lightllm/parsed.py`:
+The canonical IR is now a Protocol defined in
+`src/ccproxy/lightllm/adapters/__init__.py`:
+
+```python
+@runtime_checkable
+class LLMRenderInput(Protocol):
+    @property
+    def model(self) -> str: ...
+    @property
+    def messages(self) -> list[ModelMessage]: ...
+    @property
+    def request_parameters(self) -> ModelRequestParameters: ...
+    @property
+    def settings(self) -> ModelSettings: ...
+    @property
+    def stream(self) -> bool: ...
+    @property
+    def raw_extras(self) -> dict[str, Any]: ...
+```
+
+Any object exposing these six properties satisfies the protocol.
+`Context` (in `src/ccproxy/pipeline/context.py`) is the production
+implementation; it owns `_cached_messages`, `_cached_request_parameters`,
+`_cached_settings`, `_cached_raw_extras` fields populated by `parse_sync()`.
+
+### `ParsedRequest` — reduced role
+
+`ParsedRequest` (in `src/ccproxy/lightllm/parsed.py`) still exists as a
+frozen dataclass implementing `LLMRenderInput`, but its role is now limited:
 
 ```python
 @dataclass(frozen=True)
 class ParsedRequest:
-    model: str                            # model name from the listener body
-    messages: list[ModelMessage]          # pydantic-ai IR conversation
-    request_parameters: ModelRequestParameters  # tools, output config
-    settings: ModelSettings               # max_tokens, temperature, top_p, ...
-    stream: bool = False                  # listener requested SSE
+    model: str
+    messages: list[ModelMessage]
+    request_parameters: ModelRequestParameters
+    settings: ModelSettings
+    stream: bool = False
     raw_extras: dict[str, Any] = field(default_factory=dict)
 ```
 
-`raw_extras` is the load-bearing field for round-trip fidelity (see
-"raw_extras contract" below).
-
-### `ParsedResponse` — the response envelope
-
-```python
-@dataclass(frozen=True)
-class ParsedResponse:
-    model: str                            # model from upstream response
-    response: ModelResponse               # pydantic-ai IR (TextPart/ToolCallPart/...)
-    stream: bool = False                  # was the response streamed?
-    raw_extras: dict[str, Any] = field(default_factory=dict)
-```
-
-Mirrors `ParsedRequest`. Used by the buffered path; streaming flows pass
-`ModelResponseStreamEvent` directly between intake and render FSMs.
+It's used primarily by tests as a test stub and by the inspector
+flow-enrichment path via `_envelope.parse_request()`. Production hot path
+goes through `Context` directly.
 
 ### `ModelMessage` and `ModelResponseStreamEvent` — the conversation IR
 
@@ -177,32 +188,34 @@ render FSM consumes them.
 
 ### `ListenerFormat` — what the client sent
 
+`src/ccproxy/lightllm/parsed.py`:
+
 ```python
-class ListenerFormat(str, Enum):
+class ListenerFormat(StrEnum):  # StrEnum native in pydantic_graph >=1.99.0
     UNKNOWN = "unknown"
     ANTHROPIC_MESSAGES = "anthropic_messages"   # /v1/messages
     OPENAI_CHAT = "openai_chat"                 # /v1/chat/completions
 ```
 
 Pinned at `Context` construction from path + headers. Drives the choice of
-inbound parser (`dispatch_load`) AND the choice of response renderer
-(`dispatch_render`). The **upstream provider** the request routes to is a
-separate decision (made by the transform router via sentinel-key or
+inbound parser (adapter's `load_messages`) AND the choice of response
+renderer (`dispatch_render`). The **upstream provider** the request routes
+to is a separate decision (made by the transform router via sentinel-key or
 `TransformOverride` rule).
 
 ---
 
 ## The FSM pattern
 
-Every file under `lightllm/graph/*_{dump,load,intake,render}.py` (except the
-google/perplexity dump wrappers) follows the same shape. Reading
-`anthropic_dump.py` end-to-end is the fastest way to understand it; the
-other 11 modules echo its idioms.
+Every file under `lightllm/graph/*_intake.py` and `*_render.py` follows the
+same shape. These handle streaming response transformations. Reading
+`anthropic_intake.py` end-to-end is the fastest way to understand it; the
+other modules echo its idioms.
 
-### Anatomy of one FSM
+**Graph builder import**: pydantic-graph >=1.99.0 uses canonical paths:
 
 ```python
-from pydantic_graph.beta import GraphBuilder, StepContext
+from pydantic_graph import GraphBuilder, StepContext
 
 # 1. State — a mutable dataclass carrying everything the FSM needs across steps.
 @dataclass
@@ -282,19 +295,27 @@ async def render_anthropic_dump(parsed: ParsedRequest) -> bytes:
 
 ### What each file does
 
+**Request-side (adapters/):**
+
+| File | What it does |
+|---|---|
+| `anthropic.py` | `AnthropicAdapter` — bidirectional wire ↔ IR for Anthropic Messages |
+| `openai_chat.py` | `OpenAIChatAdapter` — bidirectional wire ↔ IR for OpenAI Chat Completions |
+| `google.py` | `GoogleAdapter` — outbound-only IR → Google Gemini wire (wraps pydantic-ai's `GoogleModel`) |
+| `perplexity.py` | `PerplexityAdapter` — outbound-only IR → Perplexity Pro wire (wraps `pplx.py` helpers) |
+| `_envelope.py` | `parse_request_into_fields`, `parse_request`, `render_request` — test/inspector helpers |
+| `_anthropic_envelope.py` | Anthropic wire helpers |
+| `_openai_envelope.py` | OpenAI wire helpers |
+
+**Response-side (graph/):**
+
 | File | What its FSM does | Key marker classes |
 |---|---|---|
-| `anthropic_dump.py` | IR → Anthropic `BetaMessageParam` content blocks | `_DumpDone`, `_Skip` |
-| `anthropic_load.py` | Anthropic content block dict → IR (user-turn FSM + assistant-turn FSM, both per-message) | `_UserDone`, `_AssistantDone`, envelope dataclasses |
 | `anthropic_intake.py` | Anthropic SSE → IR `ModelResponseStreamEvent` (typed dispatch on `BetaRawMessageStreamEvent` union) | `_FeedDone`, `_IgnoredEvent` |
 | `anthropic_render.py` | IR `ModelResponseStreamEvent` → Anthropic SSE wire bytes | `_RenderDone` |
-| `openai_dump.py` | IR → OpenAI content parts (per-`UserPromptPart` only — rest is imperative because OpenAI's per-role message shape isn't polymorphic) | `_OpenAIDone`, `_OpenAISkip` |
-| `openai_load.py` | OpenAI user-content list → IR (system/tool/assistant role dispatch is imperative) | `_UserDone`, envelope dataclasses |
 | `openai_intake.py` | OpenAI Chat Completions SSE → IR (per-chunk envelope dispatch on content/tool_call/refusal shapes) | `_FeedDone`, `_RefusalChunk`, `_StandardChunk`, `_EmptyChoicesChunk` |
 | `openai_render.py` | IR → OpenAI Chat Completions SSE | `_RenderDone` |
-| `google_dump.py` | **Not really an FSM** — wraps pydantic-ai's `GoogleModel` via the `CaptureSentinel` pattern. Lives in `graph/` for uniformity. | — |
 | `google_intake.py` | Google `streamGenerateContent` chunks → IR (envelope unwrap of `{response: {...}}` from cloudcode-pa folded in) | `_FeedDone` |
-| `perplexity_dump.py` | **Not really an FSM** — wraps `pplx.py:_build_pplx_payload` and friends. | — |
 | `perplexity_intake.py` | Perplexity Pro SSE → IR (per-event-type dispatch driving `_extract_deltas`) | `_FeedDone`, `_PerplexityEventEnvelope` |
 | `sse_pipeline.py` | Sync mitmproxy stream callable backed by a persistent asyncio loop + daemon thread; drives an intake + render FSM pair per stream | — |
 | `buffered.py` | Non-streaming buffered-body cross-format transform; synthesizes streaming events from buffered JSON per provider, drives the intake FSM, emits listener-shape JSON | — |
@@ -306,30 +327,31 @@ async def render_anthropic_dump(parsed: ParsedRequest) -> bytes:
 ### Request side
 
 ```python
-from ccproxy.lightllm.graph import dispatch_load, dispatch_dump, dispatch_dump_sync
-from ccproxy.lightllm.parsed import ListenerFormat
+from ccproxy.lightllm.graph import dispatch_dump_sync
+from ccproxy.lightllm.adapters import LLMRenderInput
 
-# Inbound: wire → IR
-parsed: ParsedRequest = await dispatch_load(
-    body_dict, listener_format=ListenerFormat.ANTHROPIC_MESSAGES,
-)
-
-# Outbound (async)
-wire_bytes: bytes = await dispatch_dump(parsed, provider="anthropic")
+# Inbound: wire → IR (production path via Context)
+ctx = Context.from_flow(flow)
+ctx.parse_sync()  # returns None; populates ctx._cached_* fields
+# ctx's typed fields are now populated:
+messages = ctx.messages
+settings = ctx.settings
+request_params = ctx.request_parameters
 
 # Outbound (sync — from inside mitmproxy hooks or pipeline executors)
-wire_bytes: bytes = dispatch_dump_sync(parsed, provider="anthropic")
+# ctx satisfies LLMRenderInput Protocol
+wire_bytes: bytes = dispatch_dump_sync(ctx, provider="anthropic")
 ```
 
-`dispatch_dump` routes by upstream provider:
-* `anthropic` / `deepseek` / `zai` → `render_anthropic_dump`
-* `openai` → `render_openai_chat_dump`
-* `google` / `gemini` / `vertex_ai` / `vertex_ai_beta` → `render_google_dump`
-* `perplexity_pro` → `render_perplexity_pro_dump`
+`dispatch_dump_sync` routes by upstream provider:
+* `anthropic` / `deepseek` / `zai` → `AnthropicAdapter.render(req)`
+* `openai` → `OpenAIChatAdapter.render(req)`
+* `google` / `gemini` / `vertex_ai` / `vertex_ai_beta` → `GoogleAdapter.render(req)`
+* `perplexity_pro` → `PerplexityAdapter.render(req)`
 * anything else → `UnsupportedUpstreamError`
 
 The Anthropic-compatible forks (`deepseek`, `zai`) deliberately share the
-Anthropic renderer — their wire format is identical, only the upstream URL
+Anthropic adapter — their wire format is identical, only the upstream URL
 and auth differ (and those are handled by the `Provider` config).
 
 ### Response side
@@ -360,14 +382,14 @@ listener_body: bytes = transform_buffered_response_sync(
 `dispatch_intake` and `dispatch_render` return async FSM instances. The
 `SSEPipeline` adapts them to mitmproxy's sync stream callable contract.
 
-### `ParsedRequest` / `ParsedResponse` — direct construction
+### `ParsedRequest` — direct construction (tests only)
 
-You don't normally build these by hand — `dispatch_load` and `buffered.py`
-do it. For tests and tooling, the dataclasses are plain:
+Production code uses `Context`. For tests and tooling, `ParsedRequest` can
+be built directly as a test stub:
 
 ```python
-from ccproxy.lightllm.parsed import ParsedRequest, ParsedResponse
-from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, UserPromptPart
+from ccproxy.lightllm.parsed import ParsedRequest
+from pydantic_ai.messages import ModelRequest, UserPromptPart
 from pydantic_ai.models import ModelRequestParameters
 
 req = ParsedRequest(
@@ -376,43 +398,27 @@ req = ParsedRequest(
     request_parameters=ModelRequestParameters(),
     settings={"max_tokens": 1024},
 )
-resp = ParsedResponse(
-    model="claude-3-5-haiku-20241022",
-    response=ModelResponse(parts=[TextPart(content="hi")]),
-    stream=False,
-)
+
+# req satisfies LLMRenderInput Protocol
+wire_bytes = dispatch_dump_sync(req, provider="anthropic")
 ```
 
 ---
 
 ## The sync/async bridges
 
-### Request-side worker thread (`dispatch_dump_sync`)
+### Request-side is now pure sync
 
-`pydantic_graph.Graph.run_sync` is deprecated. Its implementation is:
+The adapters in `src/ccproxy/lightllm/adapters/` are pure Python (no async):
+`json.loads` + procedural dispatch over pydantic-ai objects. No asyncio
+bridge is needed. `Context.parse_sync()` calls
+`parse_request_into_fields()` which populates Context fields in-place
+synchronously. `dispatch_dump_sync` calls the adapter's `.render(req)`
+classmethod directly — also synchronous.
 
-```python
-return _utils.get_event_loop().run_until_complete(self.run(...))
-```
-
-Calling that from inside an already-running asyncio loop — which is what
-happens inside every mitmproxy addon hook — raises `RuntimeError: This
-event loop is already running`.
-
-`Context._run_coro_sync` (`pipeline/context.py:27-53`) spins a worker
-thread per invocation: a `ThreadPoolExecutor(max_workers=1)` that owns a
-fresh asyncio loop, runs the coro to completion, then tears down.
-`dispatch_dump_sync` in `lightllm/graph/__init__.py` does the same pattern
-for the outbound renderer.
-
-Use cases:
-* **From async code** (other async FSMs, async hooks, async tests): use
-  `await dispatch_load(...)` and `await dispatch_dump(...)`.
-* **From sync code inside mitmproxy hooks** or anywhere on the addon
-  event loop: use `Context.parse_sync()` or `dispatch_dump_sync(...)`.
-* **Never** call `dispatch_dump(...)` or `dispatch_load(...)` from a sync
-  context that has a running asyncio loop. The `_run_coro_sync` bridge
-  is the only safe way.
+The old worker-thread pattern (`_run_coro_sync`) was deleted along with the
+async load/dump FSMs. Request-side translation is fast enough (~10-100µs per
+request) to run inline.
 
 ### Response-side persistent loop (`SSEPipeline`)
 
@@ -473,7 +479,7 @@ outbound renderer (or response render) stitches it back onto the wire body.
 
 ### Request-side conventions
 
-**Anthropic load** (`anthropic_load.py`):
+**Anthropic adapter** (`adapters/anthropic.py`):
 
 | Key | What | Why |
 |---|---|---|
@@ -484,7 +490,7 @@ outbound renderer (or response render) stitches it back onto the wire body.
 | `metadata` | The body's `metadata` dict | Anthropic-specific; no IR slot |
 | Other unmodeled top-level keys | Copied verbatim under their wire name | E.g. `service_tier` |
 
-**OpenAI load** (`openai_load.py`):
+**OpenAI adapter** (`adapters/openai_chat.py`):
 
 | Key | What | Why |
 |---|---|---|
@@ -534,6 +540,45 @@ The lossiness regressions specifically called out:
 
 ---
 
+## `HookResult` and the pipeline executor
+
+Hook execution results are tracked via a discriminated union in
+`src/ccproxy/pipeline/results.py`:
+
+```python
+@dataclass(frozen=True)
+class _HookSuccess:
+    kind: Literal["success"] = "success"
+
+@dataclass(frozen=True)
+class _HookSkipped:
+    kind: Literal["skipped"] = "skipped"
+    reason: str
+
+@dataclass(frozen=True)
+class _HookError:
+    kind: Literal["error"] = "error"
+    error: str
+
+@dataclass(frozen=True)
+class _HookDeferred:
+    kind: Literal["deferred"] = "deferred"
+
+HookResult = _HookSuccess | _HookSkipped | _HookError | _HookDeferred
+```
+
+The executor in `src/ccproxy/pipeline/executor.py` wraps each hook
+invocation and stores the resulting `HookResult` on
+`flow.metadata[_HOOK_RESULTS_KEY]` (keyed by hook name). Hook
+implementations don't construct these directly — the executor emits the
+appropriate variant based on execution outcome, guard evaluation, and
+override headers.
+
+Stored results are consumed by `ccproxy status` for per-hook execution
+reporting and by inspector routes for flow debugging.
+
+---
+
 ## How Context wires the request side
 
 `src/ccproxy/pipeline/context.py:Context` is the per-request envelope
@@ -544,13 +589,16 @@ calls:
 
 ```python
 ctx = Context.from_flow(flow)        # builds Context with _listener_format
-parsed = ctx.parse_sync()            # → dispatch_load(body, listener_format=...)
-# ctx._parsed is now populated; subsequent access reads the cache.
+ctx.parse_sync()                     # returns None; populates ctx._cached_* fields
+# ctx's typed fields are now populated
+messages = ctx.messages
+settings = ctx.settings
+request_params = ctx.request_parameters
 ```
 
 The typed property accessors (`ctx.messages`, `ctx.system`, `ctx.tools`)
-all funnel through `ctx.parse_sync()`. They return mutable IR objects;
-hooks can edit them in place.
+all funnel through `ctx.parse_sync()` on first access. They return mutable
+IR objects; hooks can edit them in place.
 
 ### Outbound — committing
 
@@ -558,21 +606,23 @@ hooks can edit them in place.
 ctx.messages = new_messages          # mutate via setter (rebuilds IR)
 ctx.system = new_system_parts
 ctx.tools = new_tool_definitions
-ctx.commit()                         # → dispatch_dump_sync(parsed, provider=...)
+ctx.commit()                         # → _flush_parsed_to_body()
+                                     #   → <Adapter>.render(ctx)
                                      # body is re-rendered, written back to flow.request
 ```
 
-`commit()` is what hook executors call after the DAG runs. It rebuilds
-`ParsedRequest` from any mutated typed properties, runs the outbound
-renderer for the listener format, and writes the resulting bytes back to
+`commit()` is what hook executors call after the DAG runs. It calls
+`_flush_parsed_to_body()` which routes through the listener format's
+adapter (e.g., `AnthropicAdapter.render(ctx)` for
+`ANTHROPIC_MESSAGES`), then writes the resulting bytes back to
 `flow.request.content`.
 
-The provider name passed to `dispatch_dump_sync` is the **listener
+The provider name passed to the adapter's render method is the **listener
 format**, not the upstream provider — the transform router decides the
-upstream separately. Listener `anthropic_messages` → renderer
-`anthropic`; listener `openai_chat` → renderer `openai`. Cross-format
-transformation happens upstream of `commit()` — by then, the IR is in the
-target format already.
+upstream separately. Listener `anthropic_messages` → `AnthropicAdapter`;
+listener `openai_chat` → `OpenAIChatAdapter`. Cross-format transformation
+happens upstream of `commit()` — by then, the IR is in the target format
+already.
 
 ---
 
@@ -634,7 +684,7 @@ providers:
 ```
 
 Done. Sentinel key `sk-ant-oat-ccproxy-myvendor` now routes to
-`api.myvendor.com` with the Anthropic renderer + intake + render, because
+`api.myvendor.com` with the Anthropic adapter + intake + render, because
 `provider: anthropic` and `_ANTHROPIC_COMPATIBLE` includes it.
 
 If the wire is OpenAI-compatible, use `provider: openai`. If it's
@@ -642,24 +692,31 @@ Google-compatible, `provider: google`.
 
 ### 2. If the wire format is genuinely new
 
-Then you need a new set of FSMs. Files to add:
+Then you need a new adapter (request-side) and intake/render FSMs
+(response-side). Files to add:
 
-* `src/ccproxy/lightllm/graph/myvendor_dump.py` — IR → wire bytes. Pattern
-  from `anthropic_dump.py`.
+**Request side:**
+* `src/ccproxy/lightllm/adapters/myvendor.py` — `MyVendorAdapter`
+  subclass extending `pydantic_ai.ui.UIAdapter`. Implement
+  `load_messages` (wire → IR) and either `dump_messages` (IR → wire for
+  symmetric formats) or a `render(req)` classmethod (for outbound-only).
+  Pattern from `adapters/anthropic.py` or `adapters/google.py`.
+* Update `src/ccproxy/lightllm/adapters/__init__.py` to export the new
+  adapter in `__all__`.
+
+**Response side:**
 * `src/ccproxy/lightllm/graph/myvendor_intake.py` — wire SSE → IR events.
   Pattern from `anthropic_intake.py`.
-* `src/ccproxy/lightllm/graph/myvendor_load.py` (only if listener format
-  is also new — i.e. ccproxy needs to ACCEPT requests in MyVendor's wire
-  format. Most new providers are upstream-only.)
 * `src/ccproxy/lightllm/graph/myvendor_render.py` (only if listener
-  format is new — same reason.)
+  format is also new — i.e. ccproxy needs to ACCEPT requests AND render
+  responses in MyVendor's wire format. Most new providers are
+  upstream-only and only need intake.)
 * Update `src/ccproxy/lightllm/graph/__init__.py`:
-  * Add `myvendor` to the dispatch branches in `dispatch_dump`,
-    `dispatch_intake`, and `dispatch_render` (the last two only if the
+  * Add `myvendor` to the dispatch branches in `dispatch_dump_sync`,
+    `dispatch_intake`, and `dispatch_render` (the last only if the
     listener format is also new).
   * Add `MyVendorResponseIntakeFSM` to the `AnyAsyncIntakeFSM` union and
-    `MyVendorResponseRenderFSM` to `AnyAsyncRenderFSM`.
-  * Add `__all__` exports.
+    (if applicable) `MyVendorResponseRenderFSM` to `AnyAsyncRenderFSM`.
 
 If the new provider just needs buffered response support, add a synthesis
 branch to `buffered.py:_synthesize_chunks_for` covering its buffered-body
@@ -667,34 +724,15 @@ shape.
 
 ### 3. Write the tests
 
-Copy a `tests/test_lightllm_graph_*.py` file and adapt:
+Copy `tests/test_lightllm_graph_<vendor>_load.py` and
+`tests/test_lightllm_graph_<vendor>_dump.py` for the adapter, plus
+`tests/test_lightllm_graph_intake_<vendor>.py` (and a corresponding
+render file when the vendor is a listener format) for the FSMs:
 * Roundtrip cases — at minimum: simple_text, multi_turn_with_tool_use,
   system_as_string, image_with_media_type, sampling_settings.
 * Lossiness regressions: `test_metadata_preserved_via_raw_extras`,
   `test_render_returns_bytes`, `test_render_compact_json`.
 * Run `uv run pytest tests/test_lightllm_graph_myvendor_*.py -q --no-cov`.
-
-### 4. Wire mypy
-
-If your new file is the first user of a new pydantic-graph beta API, you
-may need to extend the per-module mypy override in `pyproject.toml`:
-
-```toml
-[[tool.mypy.overrides]]
-module = [
-  "ccproxy.lightllm.graph.anthropic_dump",
-  "ccproxy.lightllm.graph.anthropic_load",
-  # ... existing entries
-  "ccproxy.lightllm.graph.myvendor_dump",   # ← add here
-  "ccproxy.lightllm.graph.myvendor_intake",
-]
-disable_error_code = ["type-arg", "attr-defined", "no-any-return",
-                       "misc", "index", "arg-type", "unreachable"]
-```
-
-This compensates for `pydantic_graph.beta`'s `TypeVar(infer_variance=True)`
-which mypy 1.19 doesn't recognize. Pyright handles it correctly so editor
-IntelliSense is unaffected.
 
 ---
 
@@ -702,12 +740,16 @@ IntelliSense is unaffected.
 
 ### Roundtrip semantic equivalence (request side)
 
-`tests/test_lightllm_graph_anthropic_dump.py:test_roundtrip_semantic_equivalence`
-asserts:
+`tests/test_lightllm_graph_anthropic_dump.py` and
+`tests/test_lightllm_graph_anthropic_load.py` together assert the
+roundtrip:
 
 ```python
-parsed = await load_anthropic(case.body)
-rendered = await render_anthropic_dump(parsed)
+# Load wire → IR
+messages, settings, raw_extras = AnthropicAdapter.load_messages(case.body)
+# Rebuild wire from IR
+req = ParsedRequest(model=..., messages=messages, settings=settings, raw_extras=raw_extras)
+rendered = AnthropicAdapter.render(req)
 rebuilt = json.loads(rendered)
 assert_anthropic_bodies_equivalent(case.body, rebuilt)
 ```
@@ -722,7 +764,7 @@ settings.
 
 ### Roundtrip event-sequence equivalence (response side)
 
-`tests/test_lightllm_graph_render_anthropic.py:test_roundtrip_*` feeds a
+`tests/test_lightllm_graph_render_anthropic.py` feeds a
 canonical SSE byte stream through the intake FSM, captures the resulting
 IR event sequence, drives it back through the render FSM, parses the
 result back into IR via a fresh intake — and asserts structural equality.
@@ -744,15 +786,16 @@ them.
 
 ### Lossiness assertions
 
-`tests/test_lightllm_graph_intake_anthropic.py:TestLossinessRegressions`
-has four asserts that the dump can't drop:
+`tests/test_lightllm_graph_anthropic_dump.py` and
+`tests/test_lightllm_graph_anthropic_load.py` have tests ensuring the
+adapter doesn't drop:
 
 * `tool_name` populated for `ToolReturnPart` via two-pass lookup
 * `BinaryContent.media_type` preserved
 * Non-standard `cache_control.ttl` stashed in `raw_extras["cc:msg:N:block:M"]`
 * Unknown content blocks stashed in `raw_extras["unknown_block:msg:N:idx:M"]`
 
-Mirror these for any new provider's load FSM.
+Mirror these for any new provider's adapter.
 
 ---
 
@@ -813,17 +856,17 @@ keeping docs in sync.
 
 ### `RuntimeError: This event loop is already running`
 
-You called `dispatch_load(...)` or `dispatch_dump(...)` from sync code
-inside a running asyncio loop. Use `Context.parse_sync()` or
-`dispatch_dump_sync()` — they bridge through `_run_coro_sync`. For
-streaming response work, the `SSEPipeline`'s persistent loop handles
-this automatically.
+This should no longer occur on the request side — the adapters are pure
+sync. If you see it on the response side, ensure you're using
+`SSEPipeline` (which owns a persistent loop) instead of calling intake or
+render FSMs directly from sync code.
 
 ### `UnsupportedUpstreamError: no outbound renderer for provider='X'`
 
 Either the provider name is misspelled in `providers.X.provider` (config),
-or you're trying to route to a provider that has no dump FSM. Add the
-provider branch in `lightllm/graph/__init__.py:dispatch_dump`.
+or you're trying to route to a provider that has no adapter. Add the
+provider branch in `lightllm/graph/__init__.py:dispatch_dump_sync` and
+create the adapter in `lightllm/adapters/`.
 
 ### `UnsupportedUpstreamError: no response intake for upstream_provider='X'`
 
@@ -839,20 +882,14 @@ FSM module + a branch in `dispatch_render`.
 
 The listener-format detection in `Context.from_flow` didn't match the
 request path or headers. Check `_select_listener_format` in
-`pipeline/context.py:86-100`. Usual cause: a path that's neither
+`pipeline/context.py`. Usual cause: a path that's neither
 `/v1/messages` nor `/v1/chat/completions` and no `anthropic-version`
 header.
-
-### `mypy: type-arg ... cannot be parameterized`
-
-You're touching a file that uses `pydantic_graph.beta` types and your
-module isn't in the `pyproject.toml` mypy override list. Add it to the
-relevant `[[tool.mypy.overrides]]` block.
 
 ### Lossiness regression test failed
 
 A specific behavioral contract that's documented in the test docstring
-just broke. Look at `tests/test_lightllm_graph_intake_{anthropic,openai}.py:TestLossinessRegressions`.
+just broke. Look at `tests/test_lightllm_graph_{anthropic,openai_chat}_{load,dump}.py`.
 Restore the behavior — these are non-negotiable round-trip invariants.
 
 ### Streaming response is malformed / cut off
@@ -882,22 +919,28 @@ envelope without unwrap).
 
 | Component | Path |
 |---|---|
-| Request envelope | `src/ccproxy/lightllm/parsed.py` (`ParsedRequest`) |
-| Response envelope | `src/ccproxy/lightllm/parsed.py` (`ParsedResponse`) |
+| Request envelope Protocol | `src/ccproxy/lightllm/adapters/__init__.py` (`LLMRenderInput`) |
+| Test stub | `src/ccproxy/lightllm/parsed.py` (`ParsedRequest`) |
+| Listener format enum | `src/ccproxy/lightllm/parsed.py` (`ListenerFormat`) |
 | Public dispatchers | `src/ccproxy/lightllm/graph/__init__.py` |
-| Anthropic FSMs | `src/ccproxy/lightllm/graph/anthropic_{dump,load,intake,render}.py` |
-| OpenAI FSMs | `src/ccproxy/lightllm/graph/openai_{dump,load,intake,render}.py` |
-| Google FSMs | `src/ccproxy/lightllm/graph/google_{dump,intake}.py` (dump wraps `GoogleModel`) |
-| Perplexity FSMs | `src/ccproxy/lightllm/graph/perplexity_{dump,intake}.py` (dump wraps `pplx.py`) |
+| Anthropic adapter | `src/ccproxy/lightllm/adapters/anthropic.py` |
+| OpenAI Chat adapter | `src/ccproxy/lightllm/adapters/openai_chat.py` |
+| Google adapter | `src/ccproxy/lightllm/adapters/google.py` |
+| Perplexity adapter | `src/ccproxy/lightllm/adapters/perplexity.py` |
+| Envelope helpers | `src/ccproxy/lightllm/adapters/_envelope.py`, `_anthropic_envelope.py`, `_openai_envelope.py` |
+| Anthropic response FSMs | `src/ccproxy/lightllm/graph/anthropic_{intake,render}.py` |
+| OpenAI response FSMs | `src/ccproxy/lightllm/graph/openai_{intake,render}.py` |
+| Google response FSM | `src/ccproxy/lightllm/graph/google_intake.py` |
+| Perplexity response FSM | `src/ccproxy/lightllm/graph/perplexity_intake.py` |
 | Streaming response pipeline | `src/ccproxy/lightllm/graph/sse_pipeline.py` |
 | Buffered response transform | `src/ccproxy/lightllm/graph/buffered.py` |
-| Worker-thread bridge (inbound) | `src/ccproxy/pipeline/context.py:_run_coro_sync` |
-| Worker-thread bridge (outbound) | `src/ccproxy/lightllm/graph/__init__.py:dispatch_dump_sync` |
 | Persistent-loop bridge (response stream) | `src/ccproxy/lightllm/graph/sse_pipeline.py:SSEPipeline` |
 | Inspector streaming call site | `src/ccproxy/inspector/addon.py:_install_streaming_transformer` |
 | Inspector buffered call site | `src/ccproxy/inspector/routes/transform.py:handle_transform_response` |
 | Inspector transform call site | `src/ccproxy/inspector/routes/transform.py:_handle_transform` |
-| Tests | `tests/test_lightllm_graph_*.py` |
+| Tests (request side) | `tests/test_lightllm_graph_{anthropic,openai}_{load,dump}.py` + `_google_dump.py` + `_perplexity_dump.py` + `_dispatch_sync.py` |
+| Tests (response FSMs) | `tests/test_lightllm_graph_intake_*.py`, `test_lightllm_graph_render_*.py`, `test_lightllm_graph_buffered.py`, `test_lightllm_graph_sse_pipeline.py` |
 | Perplexity Pro provider config + exceptions | `src/ccproxy/lightllm/pplx.py` |
 | Perplexity business logic | `src/ccproxy/lightllm/pplx_steps.py`, `pplx_threads.py` |
 | Provider registry | `src/ccproxy/lightllm/registry.py` |
+| Hook results | `src/ccproxy/pipeline/results.py` (`HookResult` union) |

@@ -1,35 +1,31 @@
-"""Wire-format-neutral view of an incoming request and an outgoing response.
-
-``ParsedRequest`` is what a per-listener inbound parser produces. It carries
-pydantic-ai's IR objects (``ModelMessage``, ``ModelRequestParameters``,
-``ModelSettings``) plus the model name and the stream flag. ``raw_extras``
-preserves any wire fields the IR doesn't absorb, so passthrough rendering
-can stitch them back into the outbound wire body.
-
-``ParsedResponse`` is the symmetric envelope on the response side: a
-per-upstream-provider response intake produces it from a buffered response
-body, and a per-listener-format response renderer consumes it. Streaming
-responses don't ride this envelope — they flow as a chunk-fed
-``AsyncIterator[ModelResponseStreamEvent]`` between the intake FSM and the
-render FSM directly.
+"""Listener-format enum and the :class:`ParsedRequest` test/test-helper bundle.
 
 ``ListenerFormat`` enumerates the listener-side wire formats ccproxy
 accepts. Determined by path/headers in ``Context.from_flow``; selects the
-matching inbound parser and (later) the matching response renderer.
+matching inbound parser and the matching response renderer.
+
+``ParsedRequest`` is a frozen-dataclass implementation of
+:class:`ccproxy.lightllm.adapters.LLMRenderInput`. Production code uses
+:class:`ccproxy.pipeline.context.Context` directly (it satisfies the same
+Protocol). ``ParsedRequest`` survives because tests construct it as a
+simple, no-mitmproxy-flow stub for unit-testing adapters and dispatchers.
+The inspector flow-enrichment path also uses it via the
+:func:`ccproxy.lightllm.adapters._envelope.parse_request` convenience
+wrapper.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 
-from pydantic_ai.messages import ModelMessage, ModelResponse
+from pydantic_ai.messages import ModelMessage
 from pydantic_ai.models import ModelRequestParameters
 from pydantic_ai.settings import ModelSettings
 
 
-class ListenerFormat(str, Enum):
+class ListenerFormat(StrEnum):
     UNKNOWN = "unknown"
     ANTHROPIC_MESSAGES = "anthropic_messages"
     OPENAI_CHAT = "openai_chat"
@@ -37,6 +33,13 @@ class ListenerFormat(str, Enum):
 
 @dataclass(frozen=True)
 class ParsedRequest:
+    """Frozen-dataclass :class:`LLMRenderInput` implementation.
+
+    Satisfies the same Protocol Context does; useful for unit tests and
+    the inspector flow-enrichment path. Production hot path goes through
+    Context directly.
+    """
+
     model: str
     """Model name as declared in the listener wire body."""
 
@@ -54,23 +57,3 @@ class ParsedRequest:
 
     raw_extras: dict[str, Any] = field(default_factory=dict)
     """Wire fields not absorbed into the IR — preserved for passthrough rendering."""
-
-
-@dataclass(frozen=True)
-class ParsedResponse:
-    model: str
-    """Model name as reported by the upstream response body."""
-
-    response: ModelResponse
-    """Assistant turn as a pydantic-ai IR ``ModelResponse`` (text/tool_call/thinking parts, usage, ...)."""
-
-    stream: bool = False
-    """Whether the upstream response was streamed (``True``) or buffered (``False``)."""
-
-    raw_extras: dict[str, Any] = field(default_factory=dict)
-    """Provider-side response fields the IR doesn't absorb — preserved for passthrough rendering.
-
-    Mirrors :attr:`ParsedRequest.raw_extras`. Conventional keys on the response side:
-    ``usage:msg:N`` (per-message usage delta), ``safety:msg:N:rating:M`` (Gemini safety),
-    ``citations:msg:N`` (Perplexity), ``unknown_event:msg:N:event:K`` (unrecognized event).
-    """

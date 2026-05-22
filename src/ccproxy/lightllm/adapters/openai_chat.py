@@ -208,6 +208,45 @@ class OpenAIChatAdapter(
     # ── dump (IR → wire) ─────────────────────────────────────────────────────
 
     @classmethod
+    def render(cls, req: Any) -> bytes:
+        """Render an :class:`LLMRenderInput` (typically a Context) to wire bytes.
+
+        Single entry point used by :func:`dispatch_dump_sync` for OpenAI
+        Chat Completions upstreams. Pulls the typed fields from ``req``
+        (a Context-shaped Protocol), invokes :meth:`dump_messages`,
+        applies settings, formats tools, and stitches in ``raw_extras``.
+        """
+        from ccproxy.lightllm.adapters._openai_envelope import (
+            _apply_settings as _openai_apply_settings,
+        )
+        from ccproxy.lightllm.adapters._openai_envelope import (
+            _format_tools as _openai_format_tools,
+        )
+        from ccproxy.lightllm.adapters._openai_envelope import (
+            _stitch_raw_extras as _openai_stitch_raw_extras,
+        )
+
+        settings_dict = cast(dict[str, Any], req.settings)
+        messages = cls.dump_messages(req.messages)
+
+        body: dict[str, Any] = {
+            "model": req.model,
+            "messages": messages,
+        }
+        _openai_apply_settings(body, settings_dict)
+
+        tools = _openai_format_tools(req.request_parameters.function_tools)
+        if tools:
+            body["tools"] = tools
+
+        _openai_stitch_raw_extras(body, req.raw_extras)
+
+        if req.stream:
+            body["stream"] = True
+
+        return json.dumps(body, separators=(",", ":")).encode()
+
+    @classmethod
     def dump_messages(cls, messages: Sequence[ModelMessage]) -> list[ChatCompletionMessageParam]:
         """Convert pydantic-ai IR back to an OpenAI ``messages`` array."""
         result: list[ChatCompletionMessageParam] = []

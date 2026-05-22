@@ -29,7 +29,7 @@ from collections.abc import Callable
 
 import pytest
 
-from ccproxy.lightllm.adapters import google
+from ccproxy.lightllm.adapters.google import GoogleAdapter
 from ccproxy.lightllm.parsed import ParsedRequest
 
 Render = Callable[[ParsedRequest], bytes]
@@ -37,7 +37,7 @@ Render = Callable[[ParsedRequest], bytes]
 
 @pytest.fixture
 def render() -> Render:
-    return google.render
+    return GoogleAdapter.render
 
 
 def _build_parsed(

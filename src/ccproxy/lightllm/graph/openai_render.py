@@ -50,7 +50,7 @@ from pydantic_ai.messages import (
     ToolCallPart,
     ToolCallPartDelta,
 )
-from pydantic_graph.beta import GraphBuilder, StepContext
+from pydantic_graph import GraphBuilder, StepContext
 
 if TYPE_CHECKING:
     from pydantic_ai.messages import ModelResponseStreamEvent

@@ -51,7 +51,7 @@ from pydantic import TypeAdapter, ValidationError
 # and there is no public replacement.
 from pydantic_ai._parts_manager import ModelResponsePartsManager
 from pydantic_ai.messages import BinaryContent, FilePart, ModelResponseStreamEvent
-from pydantic_graph.beta import GraphBuilder, StepContext
+from pydantic_graph import GraphBuilder, StepContext
 
 if TYPE_CHECKING:
     from pydantic_ai.models import ModelRequestParameters
@@ -226,7 +226,7 @@ class GoogleResponseIntakeFSM:
         self._sse_buffer = bytearray()
         self.upstream_raw_bytes = bytearray()
         self._state = _GoogleIntakeState(
-            parts_manager=ModelResponsePartsManager(),
+            parts_manager=ModelResponsePartsManager(model_request_parameters=request_params),
         )
 
     @property

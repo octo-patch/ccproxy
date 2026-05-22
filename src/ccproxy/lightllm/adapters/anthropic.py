@@ -423,6 +423,61 @@ class AnthropicAdapter(UIAdapter[MessageCreateParamsBase, BetaMessageParam, Any,
     # ── dump (IR → wire) ─────────────────────────────────────────────────────
 
     @classmethod
+    def render(cls, req: Any) -> bytes:
+        """Render an :class:`LLMRenderInput` (typically a Context) to wire bytes.
+
+        Single entry point used by :func:`dispatch_dump_sync` for any
+        Anthropic-compatible upstream (anthropic, deepseek, zai). Pulls
+        the typed fields from ``req`` (a Context-shaped Protocol), invokes
+        :meth:`dump_messages` and :meth:`dump_system`, stitches in tools,
+        settings, and ``raw_extras``, and returns JSON-encoded wire bytes.
+        """
+        from ccproxy.lightllm.adapters._anthropic_envelope import (
+            _format_tools as _anthropic_format_tools,
+        )
+        from ccproxy.lightllm.adapters._anthropic_envelope import (
+            _stitch_raw_extras as _anthropic_stitch_raw_extras,
+        )
+
+        settings_dict = cast(dict[str, Any], req.settings)
+        system = cls.dump_system(req.messages)
+        messages = cls.dump_messages(req.messages)
+        tools = _anthropic_format_tools(req.request_parameters.function_tools, settings_dict)
+
+        # Lift the uniform-cache TTL captured during load back onto every system
+        # block so the wire round-trips. Non-uniform / non-standard TTLs flow
+        # through ``raw_extras['system']`` instead — _stitch_raw_extras overwrites
+        # below.
+        cache_ttl = settings_dict.get("anthropic_cache_instructions")
+        if cache_ttl and system is not None:
+            if isinstance(system, str):
+                system = [{"type": "text", "text": system, "cache_control": {"type": "ephemeral", "ttl": cache_ttl}}]
+            else:
+                for block in system:
+                    cast(dict[str, Any], block).setdefault(
+                        "cache_control", {"type": "ephemeral", "ttl": cache_ttl}
+                    )
+
+        body: dict[str, Any] = {
+            "model": req.model,
+            "messages": messages,
+        }
+        for key in ("max_tokens", "temperature", "top_p", "top_k", "stop_sequences"):
+            if key in settings_dict:
+                body[key] = settings_dict[key]
+        if system is not None:
+            body["system"] = system
+        if tools:
+            body["tools"] = tools
+
+        _anthropic_stitch_raw_extras(body, req.raw_extras)
+
+        if req.stream:
+            body["stream"] = True
+
+        return json.dumps(body, separators=(",", ":")).encode()
+
+    @classmethod
     def dump_system(cls, messages: Sequence[ModelMessage]) -> str | list[BetaTextBlockParam] | None:
         """Extract the system prompt from IR in Anthropic ``system`` format.
 

@@ -35,8 +35,8 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from pydantic_ai.messages import (
-    BuiltinToolCallPart,
     FinalResultEvent,
+    NativeToolCallPart,
     PartDeltaEvent,
     PartEndEvent,
     PartStartEvent,
@@ -47,7 +47,7 @@ from pydantic_ai.messages import (
     ToolCallPart,
     ToolCallPartDelta,
 )
-from pydantic_graph.beta import GraphBuilder, StepContext
+from pydantic_graph import GraphBuilder, StepContext
 
 if TYPE_CHECKING:
     from pydantic_ai.messages import ModelResponseStreamEvent
@@ -92,7 +92,7 @@ def _emit_content_block_start(idx: int, part: Any) -> bytes:
             block = {"type": "redacted_thinking", "data": part.signature or ""}
         else:
             block = {"type": "thinking", "thinking": "", "signature": ""}
-    elif isinstance(part, ToolCallPart | BuiltinToolCallPart):
+    elif isinstance(part, ToolCallPart | NativeToolCallPart):
         block = {
             "type": "tool_use",
             "id": part.tool_call_id,
@@ -167,7 +167,7 @@ def _emit_initial_content_deltas(idx: int, part: Any) -> bytes:
                     "delta": {"type": "signature_delta", "signature": part.signature},
                 },
             )
-    elif isinstance(part, ToolCallPart | BuiltinToolCallPart):
+    elif isinstance(part, ToolCallPart | NativeToolCallPart):
         partial_json = _tool_args_to_json_string(part.args)
         if partial_json:
             out += _emit(

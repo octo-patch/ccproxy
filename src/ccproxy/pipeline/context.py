@@ -1,9 +1,14 @@
 """Context dataclass for pipeline execution.
 
 Wraps a mitmproxy HTTPFlow (or bare http.Request for shapes) as a
-first-class member. Content fields (messages, system, tools) are
-lazy-parsed into Pydantic AI typed objects and flushed back via
-commit(). Header mutations are live — they hit the flow immediately.
+first-class member. Content fields (messages, system, tools, settings,
+raw_extras, request_parameters) are lazy-parsed into Pydantic AI typed
+objects and flushed back via commit(). Header mutations are live — they
+hit the flow immediately.
+
+Context satisfies :class:`ccproxy.lightllm.adapters.LLMRenderInput` —
+adapters and the outbound dispatcher accept Context directly via that
+Protocol; there is no intermediate IR bundle.
 """
 
 from __future__ import annotations
@@ -14,9 +19,11 @@ from dataclasses import replace as _dataclass_replace
 from typing import TYPE_CHECKING, Any
 
 from pydantic_ai.messages import ModelMessage, SystemPromptPart
+from pydantic_ai.models import ModelRequestParameters
+from pydantic_ai.settings import ModelSettings
 from pydantic_ai.tools import ToolDefinition
 
-from ccproxy.lightllm.parsed import ListenerFormat, ParsedRequest
+from ccproxy.lightllm.parsed import ListenerFormat
 
 if TYPE_CHECKING:
     from mitmproxy import http
@@ -75,7 +82,10 @@ class Context:
     """Typed context for hook pipeline execution.
 
     The flow (or bare request) is the source of truth. Body fields are
-    parsed once on first access and flushed back via commit().
+    parsed once on first access and flushed back via :meth:`commit`.
+
+    Satisfies :class:`ccproxy.lightllm.adapters.LLMRenderInput` —
+    adapters consume Context directly for outbound wire rendering.
     """
 
     flow: HTTPFlow | None
@@ -87,40 +97,62 @@ class Context:
     _request: http.Request | None = field(default=None, repr=False)
     """Bare request for shape contexts (no flow)."""
 
-    _cached_messages: list[ModelMessage] | None = field(default=None, repr=False)
-    """Lazy-parsed typed messages, populated on first access."""
-
-    _cached_system: list[SystemPromptPart] | None = field(default=None, repr=False)
-    """Lazy-parsed typed system prompts, populated on first access."""
-
-    _cached_tools: list[ToolDefinition] | None = field(default=None, repr=False)
-    """Lazy-parsed typed tool definitions, populated on first access."""
-
     _listener_format: ListenerFormat = field(default=ListenerFormat.UNKNOWN, repr=False)
     """Listener-side wire format, pinned at construction. UNKNOWN for unmatched routes."""
 
-    _parsed: ParsedRequest | None = field(default=None, repr=False)
-    """Lazy-parsed IR view of the request. Populated by per-listener parser on demand."""
+    # Lazy-parsed IR cache. ``None`` = not yet parsed; ``parse_sync()`` populates.
+    _cached_messages: list[ModelMessage] | None = field(default=None, repr=False)
+    """Lazy-parsed typed messages, populated by parse_sync()."""
+
+    _cached_system: list[SystemPromptPart] | None = field(default=None, repr=False)
+    """Lazy-parsed typed system prompts, populated by parse_sync()."""
+
+    _cached_request_parameters: ModelRequestParameters | None = field(default=None, repr=False)
+    """Lazy-parsed tool / output config, populated by parse_sync()."""
+
+    _cached_settings: ModelSettings | None = field(default=None, repr=False)
+    """Lazy-parsed sampling settings, populated by parse_sync()."""
+
+    _cached_raw_extras: dict[str, Any] | None = field(default=None, repr=False)
+    """Lazy-parsed raw_extras (wire fields not absorbed into IR), populated by parse_sync()."""
 
     def invalidate_parsed(self) -> None:
-        """Drop the cached ``ParsedRequest`` so the next ``parse_sync`` re-parses."""
-        self._parsed = None
+        """Drop cached parse state so the next access re-parses from ``_body``."""
+        self._cached_messages = None
+        self._cached_system = None
+        self._cached_request_parameters = None
+        self._cached_settings = None
+        self._cached_raw_extras = None
 
-    def parse_sync(self) -> ParsedRequest:
-        """Parse ``self._body`` via the listener-format-matched UIAdapter.
+    def parse_sync(self) -> None:
+        """Parse ``self._body`` via the listener-format-matched parser.
 
-        Sync because the new UIAdapters in :mod:`ccproxy.lightllm.adapters`
+        Populates the five lazy-parsed slots in-place. Returns ``None``.
+        Subsequent calls are no-ops until :meth:`invalidate_parsed` clears
+        the cache.
+
+        Sync because the new adapters in :mod:`ccproxy.lightllm.adapters`
         are pure (``json.loads`` + procedural dispatch), so there's no
-        asyncio bridge to maintain. Subsequent calls return the cached
-        :class:`ParsedRequest` even if ``_body`` has been mutated; call
-        :meth:`invalidate_parsed` to force a re-parse.
+        asyncio bridge to maintain.
         """
-        if self._parsed is not None:
-            return self._parsed
-        from ccproxy.lightllm.adapters._envelope import parse_request
+        if self._cached_messages is not None:
+            return  # already parsed
 
-        self._parsed = parse_request(self._body, listener_format=self._listener_format)
-        return self._parsed
+        if self._listener_format is ListenerFormat.UNKNOWN:
+            self._cached_messages = []
+            self._cached_system = []
+            self._cached_request_parameters = ModelRequestParameters()
+            self._cached_settings = ModelSettings()
+            self._cached_raw_extras = {}
+            return
+
+        from ccproxy.lightllm.adapters._envelope import parse_request_into_fields
+
+        parse_request_into_fields(
+            body=self._body,
+            listener_format=self._listener_format,
+            ctx=self,
+        )
 
     @classmethod
     def from_flow(cls, flow: HTTPFlow) -> Context:
@@ -149,59 +181,7 @@ class Context:
             _listener_format=_select_listener_format(req),
         )
 
-    # --- Typed content properties ---
-
-    @property
-    def messages(self) -> list[ModelMessage]:
-        if self._cached_messages is None:
-            if self._listener_format is ListenerFormat.UNKNOWN:
-                self._cached_messages = []
-            else:
-                self._cached_messages = self.parse_sync().messages
-        return self._cached_messages
-
-    @messages.setter
-    def messages(self, value: list[ModelMessage]) -> None:
-        self._cached_messages = value
-        if self._parsed is not None:
-            self._parsed = _dataclass_replace(self._parsed, messages=value)
-        # _body re-serialization happens at commit() via the outbound renderer.
-
-    @property
-    def system(self) -> list[SystemPromptPart]:
-        if self._cached_system is None:
-            if self._listener_format is ListenerFormat.UNKNOWN:
-                self._cached_system = []
-            else:
-                # SystemPromptParts live inside the ModelRequest parts of the IR.
-                # Extract them so hooks that read ctx.system see the canonical view.
-                self._cached_system = [
-                    part
-                    for msg in self.parse_sync().messages
-                    if hasattr(msg, "parts")
-                    for part in msg.parts
-                    if isinstance(part, SystemPromptPart)
-                ]
-        return self._cached_system
-
-    @system.setter
-    def system(self, value: list[SystemPromptPart]) -> None:
-        self._cached_system = value
-        # No direct write-back to _body — commit() re-renders via outbound.
-
-    @property
-    def tools(self) -> list[ToolDefinition]:
-        if self._cached_tools is None:
-            if self._listener_format is ListenerFormat.UNKNOWN:
-                self._cached_tools = []
-            else:
-                self._cached_tools = list(self.parse_sync().request_parameters.function_tools)
-        return self._cached_tools
-
-    @tools.setter
-    def tools(self, value: list[ToolDefinition]) -> None:
-        self._cached_tools = value
-        # No direct write-back to _body — commit() re-renders via outbound.
+    # --- LLMRenderInput Protocol properties ---
 
     @property
     def model(self) -> str:
@@ -212,6 +192,50 @@ class Context:
         self._body["model"] = value
 
     @property
+    def messages(self) -> list[ModelMessage]:
+        self.parse_sync()
+        assert self._cached_messages is not None
+        return self._cached_messages
+
+    @messages.setter
+    def messages(self, value: list[ModelMessage]) -> None:
+        self.parse_sync()
+        self._cached_messages = value
+
+    @property
+    def request_parameters(self) -> ModelRequestParameters:
+        self.parse_sync()
+        assert self._cached_request_parameters is not None
+        return self._cached_request_parameters
+
+    @request_parameters.setter
+    def request_parameters(self, value: ModelRequestParameters) -> None:
+        self.parse_sync()
+        self._cached_request_parameters = value
+
+    @property
+    def settings(self) -> ModelSettings:
+        self.parse_sync()
+        assert self._cached_settings is not None
+        return self._cached_settings
+
+    @settings.setter
+    def settings(self, value: ModelSettings) -> None:
+        self.parse_sync()
+        self._cached_settings = value
+
+    @property
+    def raw_extras(self) -> dict[str, Any]:
+        self.parse_sync()
+        assert self._cached_raw_extras is not None
+        return self._cached_raw_extras
+
+    @raw_extras.setter
+    def raw_extras(self, value: dict[str, Any]) -> None:
+        self.parse_sync()
+        self._cached_raw_extras = value
+
+    @property
     def stream(self) -> bool:
         """Whether the request uses SSE streaming."""
         return bool(self._body.get("stream", False))
@@ -219,6 +243,40 @@ class Context:
     @stream.setter
     def stream(self, value: bool) -> None:
         self._body["stream"] = value
+
+    # --- Convenience accessors (not in LLMRenderInput) ---
+
+    @property
+    def system(self) -> list[SystemPromptPart]:
+        """Top-level system prompts extracted from the message stream."""
+        self.parse_sync()
+        if self._cached_system is None:
+            self._cached_system = [
+                part
+                for msg in (self._cached_messages or [])
+                if hasattr(msg, "parts")
+                for part in msg.parts
+                if isinstance(part, SystemPromptPart)
+            ]
+        return self._cached_system
+
+    @system.setter
+    def system(self, value: list[SystemPromptPart]) -> None:
+        self.parse_sync()
+        self._cached_system = value
+
+    @property
+    def tools(self) -> list[ToolDefinition]:
+        """Function tool definitions extracted from request_parameters."""
+        return list(self.request_parameters.function_tools)
+
+    @tools.setter
+    def tools(self, value: list[ToolDefinition]) -> None:
+        self.parse_sync()
+        assert self._cached_request_parameters is not None
+        self._cached_request_parameters = _dataclass_replace(
+            self._cached_request_parameters, function_tools=list(value)
+        )
 
     @property
     def tool_choice(self) -> Any:
@@ -295,45 +353,44 @@ class Context:
     def _flush_parsed_to_body(self) -> None:
         """Re-render mutated typed properties back into ``self._body``.
 
-        Builds (or refreshes) ``self._parsed`` from the cached typed
-        properties, then calls the listener-format outbound renderer to
-        produce wire bytes, and replaces ``self._body`` with the result.
+        Invokes the listener-format outbound dispatcher to produce wire
+        bytes from Context's typed state, then replaces ``self._body``
+        with the result.
 
-        UNKNOWN listener format is a no-op — there's no IR roundtrip
-        path, and the typed-property getters return ``[]`` for that case
-        so there's nothing to flush.
+        UNKNOWN listener format is a no-op — there's no IR roundtrip path,
+        and the typed-property getters return empty defaults so there's
+        nothing to flush.
         """
         if self._listener_format is ListenerFormat.UNKNOWN:
             return
 
-        from ccproxy.lightllm.adapters._envelope import render_request
+        # If the caller mutated ctx.system, rebuild messages so the first
+        # ModelRequest carries the new system parts and any prior system
+        # parts are stripped.
+        if self._cached_system is not None:
+            self._cached_messages = _replace_system_parts(
+                list(self._cached_messages or []),
+                self._cached_system,
+            )
 
-        # Ensure we have a base ParsedRequest to mutate.
-        parsed = self.parse_sync()
+        # Pick the listener-side adapter and render bytes.
+        from ccproxy.lightllm.adapters.anthropic import AnthropicAdapter
+        from ccproxy.lightllm.adapters.openai_chat import OpenAIChatAdapter
 
-        if self._cached_messages is not None or self._cached_system is not None:
-            # System parts live INSIDE ModelRequest.parts in the IR — when the
-            # caller mutated ``ctx.system``, rebuild messages so the first
-            # ModelRequest carries the new system parts and any prior system
-            # parts are stripped.
-            messages = list(self._cached_messages if self._cached_messages is not None else parsed.messages)
-            if self._cached_system is not None:
-                messages = _replace_system_parts(messages, self._cached_system)
-            parsed = _dataclass_replace(parsed, messages=messages)
+        if self._listener_format is ListenerFormat.ANTHROPIC_MESSAGES:
+            rendered = AnthropicAdapter.render(self)
+        elif self._listener_format is ListenerFormat.OPENAI_CHAT:
+            rendered = OpenAIChatAdapter.render(self)
+        else:
+            raise ValueError(f"no outbound renderer for listener_format={self._listener_format}")
 
-        if self._cached_tools is not None:
-            new_params = _dataclass_replace(parsed.request_parameters, function_tools=list(self._cached_tools))
-            parsed = _dataclass_replace(parsed, request_parameters=new_params)
-
-        self._parsed = parsed
-        rendered = render_request(parsed, listener_format=self._listener_format)
         self._body = json.loads(rendered)
 
     def commit(self) -> None:
         """Flush body mutations back to the underlying request content.
 
-        If a typed property setter mutated ``self._parsed``, re-render the
-        IR back to listener-wire bytes via the matching outbound renderer
+        If a typed property setter mutated the cached IR, re-render the
+        IR back to listener-wire bytes via the matching outbound adapter
         and refresh ``self._body`` from that. Raw ``_body`` mutations (the
         shaping inner-DAG, ``extract_pplx_files``) are picked up directly.
 
@@ -341,7 +398,13 @@ class Context:
         upstream APIs reject unknown fields (e.g. Google: "Unknown name
         metadata").
         """
-        if self._cached_messages is not None or self._cached_system is not None or self._cached_tools is not None:
+        if (
+            self._cached_messages is not None
+            or self._cached_system is not None
+            or self._cached_request_parameters is not None
+            or self._cached_settings is not None
+            or self._cached_raw_extras is not None
+        ):
             self._flush_parsed_to_body()
         body = self._body
         if "metadata" in body and isinstance(body["metadata"], dict) and not body["metadata"]:

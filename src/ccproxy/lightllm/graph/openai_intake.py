@@ -47,7 +47,7 @@ from pydantic import TypeAdapter, ValidationError
 # and there is no public replacement.
 from pydantic_ai._parts_manager import ModelResponsePartsManager
 from pydantic_ai.messages import ModelResponseStreamEvent
-from pydantic_graph.beta import GraphBuilder, StepContext
+from pydantic_graph import GraphBuilder, StepContext
 
 if TYPE_CHECKING:
     from openai.types.chat import chat_completion_chunk
@@ -287,7 +287,7 @@ class OpenAIResponseIntakeFSM:
         # same private names the legacy intake exposes so tests reaching for
         # them work unchanged.
         self._state = _OpenAIIntakeState(
-            parts_manager=ModelResponsePartsManager(),
+            parts_manager=ModelResponsePartsManager(model_request_parameters=request_params),
             model=model,
         )
 

@@ -1,18 +1,32 @@
-"""ParsedRequest bridge for the new UIAdapters.
+"""Wire-body parsing into typed IR fields.
 
-Phase B scaffolding: ``Context.ensure_parsed`` and ``Context._flush_parsed_to_body``
-still operate on :class:`ParsedRequest`. This module builds + renders one
-using the new :class:`AnthropicAdapter` / :class:`OpenAIChatAdapter` for
-the messages, and uses local envelope helpers for tools, settings, and raw_extras.
+Companion to the four ``UIAdapter`` subclasses
+(:class:`AnthropicAdapter`, :class:`OpenAIChatAdapter`,
+:class:`GoogleAdapter`, :class:`PerplexityAdapter`). Each listener-format
+parser destructures a wire JSON body into a tuple of the IR fields
+(messages, request_parameters, settings, raw_extras) that
+:class:`ccproxy.pipeline.context.Context` and :class:`ParsedRequest`
+share.
+
+The render side lives on the adapters themselves —
+:meth:`AnthropicAdapter.render` and :meth:`OpenAIChatAdapter.render` take
+:class:`~ccproxy.lightllm.adapters.LLMRenderInput` (the Protocol Context
+satisfies) and return wire bytes directly.
+
+:func:`parse_request` and :func:`render_request` are thin wrappers used
+by tests and inspector flow enrichment; production code uses
+:meth:`Context.parse_sync` and :func:`dispatch_dump_sync` directly.
 """
 
 from __future__ import annotations
 
-import json
-from typing import Any, cast
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, cast
 
 from openai.types.chat import ChatCompletionMessageParam
+from pydantic_ai.messages import ModelMessage
 from pydantic_ai.models import ModelRequestParameters
+from pydantic_ai.settings import ModelSettings
 
 from ccproxy.lightllm.adapters._anthropic_envelope import (
     _ABSORBED_TOP_LEVEL as _ANTHROPIC_ABSORBED,
@@ -24,25 +38,13 @@ from ccproxy.lightllm.adapters._anthropic_envelope import (
     _build_settings as _anthropic_build_settings,
 )
 from ccproxy.lightllm.adapters._anthropic_envelope import (
-    _format_tools as _anthropic_format_tools,
-)
-from ccproxy.lightllm.adapters._anthropic_envelope import (
     _parse_system as _anthropic_parse_system,
 )
 from ccproxy.lightllm.adapters._anthropic_envelope import (
     _parse_tools as _anthropic_parse_tools,
 )
-from ccproxy.lightllm.adapters._anthropic_envelope import (
-    _stitch_raw_extras as _anthropic_stitch_raw_extras,
-)
 from ccproxy.lightllm.adapters._openai_envelope import (
     _ABSORBED_BODY_KEYS as _OPENAI_ABSORBED,
-)
-from ccproxy.lightllm.adapters._openai_envelope import (
-    _apply_settings as _openai_apply_settings,
-)
-from ccproxy.lightllm.adapters._openai_envelope import (
-    _format_tools as _openai_format_tools,
 )
 from ccproxy.lightllm.adapters._openai_envelope import (
     _parse_settings as _openai_parse_settings,
@@ -50,16 +52,71 @@ from ccproxy.lightllm.adapters._openai_envelope import (
 from ccproxy.lightllm.adapters._openai_envelope import (
     _parse_tools as _openai_parse_tools,
 )
-from ccproxy.lightllm.adapters._openai_envelope import (
-    _stitch_raw_extras as _openai_stitch_raw_extras,
-)
 from ccproxy.lightllm.adapters.anthropic import AnthropicAdapter
 from ccproxy.lightllm.adapters.openai_chat import OpenAIChatAdapter
 from ccproxy.lightllm.parsed import ListenerFormat, ParsedRequest
 
+if TYPE_CHECKING:
+    from ccproxy.pipeline.context import Context
+
+
+@dataclass(frozen=True)
+class _ParsedFields:
+    """Bundle of IR fields produced by a listener-format parser."""
+
+    messages: list[ModelMessage]
+    request_parameters: ModelRequestParameters
+    settings: ModelSettings
+    raw_extras: dict[str, Any]
+
+
+def parse_request_into_fields(
+    *,
+    body: dict[str, Any],
+    listener_format: ListenerFormat,
+    ctx: Context,
+) -> None:
+    """Parse ``body`` and populate ``ctx``'s lazy-parsed slots."""
+    fields = _parse_fields(body=body, listener_format=listener_format)
+    ctx._cached_messages = fields.messages
+    ctx._cached_request_parameters = fields.request_parameters
+    ctx._cached_settings = fields.settings
+    ctx._cached_raw_extras = fields.raw_extras
+
 
 def parse_request(body: dict[str, Any], *, listener_format: ListenerFormat) -> ParsedRequest:
-    """Build a :class:`ParsedRequest` from a wire body using the new adapters."""
+    """Parse ``body`` into a :class:`ParsedRequest` bundle.
+
+    Convenience wrapper for tests and inspector flow enrichment.
+    Production code uses :meth:`Context.parse_sync` which routes through
+    :func:`parse_request_into_fields`.
+    """
+    fields = _parse_fields(body=body, listener_format=listener_format)
+    return ParsedRequest(
+        model=str(body.get("model", "")),
+        messages=fields.messages,
+        request_parameters=fields.request_parameters,
+        settings=fields.settings,
+        stream=bool(body.get("stream", False)),
+        raw_extras=fields.raw_extras,
+    )
+
+
+def render_request(parsed: ParsedRequest, *, listener_format: ListenerFormat) -> bytes:
+    """Render a :class:`ParsedRequest` to wire bytes via the matching adapter.
+
+    Convenience wrapper for tests and inspector flow enrichment. Production
+    code routes through :func:`ccproxy.lightllm.graph.dispatch_dump_sync`
+    with a :class:`~ccproxy.pipeline.context.Context`.
+    """
+    if listener_format is ListenerFormat.ANTHROPIC_MESSAGES:
+        return AnthropicAdapter.render(parsed)
+    if listener_format is ListenerFormat.OPENAI_CHAT:
+        return OpenAIChatAdapter.render(parsed)
+    raise ValueError(f"no IR renderer for listener_format={listener_format}")
+
+
+def _parse_fields(*, body: dict[str, Any], listener_format: ListenerFormat) -> _ParsedFields:
     if listener_format is ListenerFormat.ANTHROPIC_MESSAGES:
         return _parse_anthropic(body)
     if listener_format is ListenerFormat.OPENAI_CHAT:
@@ -67,23 +124,11 @@ def parse_request(body: dict[str, Any], *, listener_format: ListenerFormat) -> P
     raise ValueError(f"no IR parser for listener_format={listener_format}")
 
 
-def render_request(parsed: ParsedRequest, *, listener_format: ListenerFormat) -> bytes:
-    """Render a :class:`ParsedRequest` to wire bytes using the new adapters."""
-    if listener_format is ListenerFormat.ANTHROPIC_MESSAGES:
-        return _render_anthropic(parsed)
-    if listener_format is ListenerFormat.OPENAI_CHAT:
-        return _render_openai_chat(parsed)
-    raise ValueError(f"no IR renderer for listener_format={listener_format}")
-
-
 # ── Anthropic ───────────────────────────────────────────────────────────────
 
 
-def _parse_anthropic(body: dict[str, Any]) -> ParsedRequest:
+def _parse_anthropic(body: dict[str, Any]) -> _ParsedFields:
     raw_extras: dict[str, Any] = {}
-
-    model = str(body.get("model", ""))
-    stream = bool(body.get("stream", False))
 
     raw_messages = body.get("messages") or []
     # System is handled by _anthropic_parse_system below — pass system=None to the
@@ -98,9 +143,7 @@ def _parse_anthropic(body: dict[str, Any]) -> ParsedRequest:
         raw_extras["tools"] = raw_tools
     request_parameters = ModelRequestParameters(function_tools=function_tools)
 
-    system_parts = _anthropic_parse_system(
-        body.get("system"), settings=settings, raw_extras=raw_extras
-    )
+    system_parts = _anthropic_parse_system(body.get("system"), settings=settings, raw_extras=raw_extras)
     if system_parts:
         messages = _anthropic_attach_system_prompts(messages, system_parts)
 
@@ -109,59 +152,18 @@ def _parse_anthropic(body: dict[str, Any]) -> ParsedRequest:
             continue
         raw_extras.setdefault(key, value)
 
-    return ParsedRequest(
-        model=model,
+    return _ParsedFields(
         messages=messages,
         request_parameters=request_parameters,
         settings=settings,
-        stream=stream,
         raw_extras=raw_extras,
     )
-
-
-def _render_anthropic(parsed: ParsedRequest) -> bytes:
-    settings_dict = cast(dict[str, Any], parsed.settings)
-    system = AnthropicAdapter.dump_system(parsed.messages)
-    messages = AnthropicAdapter.dump_messages(parsed.messages)
-    tools = _anthropic_format_tools(parsed.request_parameters.function_tools, settings_dict)
-
-    # Lift the uniform-cache TTL captured during load back onto every system
-    # block so the wire round-trips. Non-uniform / non-standard TTLs flow
-    # through ``raw_extras['system']`` instead — _stitch_raw_extras overwrites
-    # below.
-    cache_ttl = settings_dict.get("anthropic_cache_instructions")
-    if cache_ttl and system is not None:
-        if isinstance(system, str):
-            system = [{"type": "text", "text": system, "cache_control": {"type": "ephemeral", "ttl": cache_ttl}}]
-        else:
-            for block in system:
-                block.setdefault("cache_control", {"type": "ephemeral", "ttl": cache_ttl})
-
-    body: dict[str, Any] = {
-        "model": parsed.model,
-        "messages": messages,
-    }
-    for key in ("max_tokens", "temperature", "top_p", "top_k", "stop_sequences"):
-        if key in settings_dict:
-            body[key] = settings_dict[key]
-    if system is not None:
-        body["system"] = system
-    if tools:
-        body["tools"] = tools
-
-    _anthropic_stitch_raw_extras(body, parsed.raw_extras)
-
-    if parsed.stream:
-        body["stream"] = True
-
-    return json.dumps(body, separators=(",", ":")).encode()
 
 
 # ── OpenAI Chat Completions ─────────────────────────────────────────────────
 
 
-def _parse_openai_chat(body: dict[str, Any]) -> ParsedRequest:
-    model = cast(str, body.get("model", ""))
+def _parse_openai_chat(body: dict[str, Any]) -> _ParsedFields:
     raw_messages: list[dict[str, Any]] = cast(list[dict[str, Any]], body.get("messages", []) or [])
 
     raw_extras: dict[str, Any] = {}
@@ -187,35 +189,9 @@ def _parse_openai_chat(body: dict[str, Any]) -> ParsedRequest:
             continue
         raw_extras[key] = value
 
-    stream = bool(body.get("stream", False))
-
-    return ParsedRequest(
-        model=model,
+    return _ParsedFields(
         messages=messages,
         request_parameters=request_parameters,
         settings=settings,
-        stream=stream,
         raw_extras=raw_extras,
     )
-
-
-def _render_openai_chat(parsed: ParsedRequest) -> bytes:
-    settings_dict = cast(dict[str, Any], parsed.settings)
-    messages = OpenAIChatAdapter.dump_messages(parsed.messages)
-
-    body: dict[str, Any] = {
-        "model": parsed.model,
-        "messages": messages,
-    }
-    _openai_apply_settings(body, settings_dict)
-
-    tools = _openai_format_tools(parsed.request_parameters.function_tools)
-    if tools:
-        body["tools"] = tools
-
-    _openai_stitch_raw_extras(body, parsed.raw_extras)
-
-    if parsed.stream:
-        body["stream"] = True
-
-    return json.dumps(body, separators=(",", ":")).encode()

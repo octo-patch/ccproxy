@@ -140,7 +140,7 @@ def _decode_data_uri(url: str) -> FileInfo | None:
     mimetype = _DEFAULT_MIMETYPE
     is_b64 = False
     for token in meta.split(";"):
-        if token == "base64":
+        if token == "base64":  # noqa: S105  # "token" is a data: URI parameter, not a secret
             is_b64 = True
         elif "/" in token:
             mimetype = token

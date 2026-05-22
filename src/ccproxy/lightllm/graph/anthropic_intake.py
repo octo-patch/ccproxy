@@ -63,9 +63,9 @@ from pydantic import TypeAdapter, ValidationError
 # and there is no public replacement.
 from pydantic_ai._parts_manager import ModelResponsePartsManager
 from pydantic_ai.messages import (
-    BuiltinToolCallPart,
     CompactionPart,
     ModelResponseStreamEvent,
+    NativeToolCallPart,
 )
 from pydantic_ai.models.anthropic import (
     _map_code_execution_tool_result_block,
@@ -75,7 +75,7 @@ from pydantic_ai.models.anthropic import (
     _map_web_fetch_tool_result_block,
     _map_web_search_tool_result_block,
 )
-from pydantic_graph.beta import GraphBuilder, StepContext
+from pydantic_graph import GraphBuilder, StepContext
 
 if TYPE_CHECKING:
     from anthropic.types.beta import BetaContentBlock
@@ -109,7 +109,7 @@ class _AnthropicIntakeState:
     parts_manager: ModelResponsePartsManager
     provider_name: str
     current_block: BetaContentBlock | None = None
-    builtin_tool_calls: dict[str, BuiltinToolCallPart] = field(default_factory=dict)
+    builtin_tool_calls: dict[str, NativeToolCallPart] = field(default_factory=dict)
     events_queue: deque[BetaRawMessageStreamEvent] = field(default_factory=deque)
     out_events: list[ModelResponseStreamEvent] = field(default_factory=list)
 
@@ -415,9 +415,6 @@ class AnthropicResponseIntakeFSM:
     name = "anthropic"
 
     def __init__(self, *, model: str, request_params: ModelRequestParameters) -> None:
-        # ``request_params`` is accepted to honor the same constructor signature as
-        # the legacy intake; pydantic-ai 1.85.1's ``ModelResponsePartsManager`` is
-        # a no-arg dataclass.
         self._model = model
         self._request_params = request_params
         self._sse_buffer = bytearray()
@@ -427,7 +424,7 @@ class AnthropicResponseIntakeFSM:
         # anthropic-family upstreams (anthropic, deepseek-anthropic-compat,
         # zai-anthropic-compat).
         self._state = _AnthropicIntakeState(
-            parts_manager=ModelResponsePartsManager(),
+            parts_manager=ModelResponsePartsManager(model_request_parameters=request_params),
             provider_name="anthropic",
         )
 

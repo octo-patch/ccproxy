@@ -6,10 +6,7 @@ and upstream provider formats. The per-provider FSMs live in
 public entry points for the rest of ccproxy.
 """
 
-from ccproxy.lightllm.graph_ext import apply_patches
-
-apply_patches()
-
+from ccproxy.lightllm.adapters import LLMRenderInput
 from ccproxy.lightllm.graph import (
     UnsupportedUpstreamError,
     dispatch_dump,
@@ -17,7 +14,7 @@ from ccproxy.lightllm.graph import (
     dispatch_intake,
     dispatch_render,
 )
-from ccproxy.lightllm.parsed import ListenerFormat, ParsedRequest
+from ccproxy.lightllm.parsed import ListenerFormat
 from ccproxy.lightllm.pplx import (
     LightllmException,
     PerplexityException,
@@ -25,9 +22,9 @@ from ccproxy.lightllm.pplx import (
 )
 
 __all__ = [
+    "LLMRenderInput",
     "LightllmException",
     "ListenerFormat",
-    "ParsedRequest",
     "PerplexityException",
     "PerplexityProConfig",
     "UnsupportedUpstreamError",

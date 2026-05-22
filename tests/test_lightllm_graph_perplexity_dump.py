@@ -20,7 +20,7 @@ from pydantic_ai.models import ModelRequestParameters
 
 from collections.abc import Callable
 
-from ccproxy.lightllm.adapters import perplexity
+from ccproxy.lightllm.adapters.perplexity import PerplexityAdapter
 from ccproxy.lightllm.parsed import ParsedRequest
 
 Render = Callable[[ParsedRequest], bytes]
@@ -28,7 +28,7 @@ Render = Callable[[ParsedRequest], bytes]
 
 @pytest.fixture
 def render() -> Render:
-    return perplexity.render
+    return PerplexityAdapter.render
 
 
 def _make_parsed(

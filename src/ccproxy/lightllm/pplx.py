@@ -40,7 +40,7 @@ from typing import Any
 from ccproxy.lightllm.pplx_steps import _KNOWN_INTENDED_USAGES, render_step
 
 
-class LightllmException(Exception):
+class LightllmException(Exception):  # noqa: N818  # project-specific naming convention
     """ccproxy-internal exception base.
 
     Carries ``status_code`` so downstream error handlers can map to HTTP
@@ -59,7 +59,7 @@ PERPLEXITY_URL_BASE = "https://www.perplexity.ai"
 PERPLEXITY_URL = f"{PERPLEXITY_URL_BASE}/rest/sse/perplexity_ask"
 PERPLEXITY_PREFLIGHT_URL = f"{PERPLEXITY_URL_BASE}/search/new"
 PERPLEXITY_API_VERSION = "2.18"
-PERPLEXITY_BROWSER_UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+PERPLEXITY_BROWSER_UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"  # noqa: E501  # browser UA is the value we send
 PERPLEXITY_SESSION_COOKIE = "__Secure-next-auth.session-token"
 PERPLEXITY_PROVIDER_NAME = "perplexity_pro"
 
@@ -488,25 +488,31 @@ def _extract_deltas(
         mb = block.get("markdown_block")
         if isinstance(mb, dict) and not block.get("diff_block") and intended_usage != "ask_text":
             answer_str = mb.get("answer")
-            if isinstance(answer_str, str) and answer_str:
-                if answer_str.startswith(state.answer_seen):
-                    bare_delta = answer_str[len(state.answer_seen) :]
-                    if bare_delta:
-                        answer_delta = (answer_delta or "") + bare_delta
-                    state.answer_seen = answer_str
+            if (
+                isinstance(answer_str, str)
+                and answer_str
+                and answer_str.startswith(state.answer_seen)
+            ):
+                bare_delta = answer_str[len(state.answer_seen) :]
+                if bare_delta:
+                    answer_delta = (answer_delta or "") + bare_delta
+                state.answer_seen = answer_str
 
         diff_block = block.get("diff_block")
         if not isinstance(diff_block, dict):
             # No diff_block on this block — log unknown intended_usage so we
             # discover new block types instead of silently dropping them.
-            if intended_usage and intended_usage not in _KNOWN_INTENDED_USAGES:
-                if intended_usage not in state.logged_unknown_intended_usages:
-                    state.logged_unknown_intended_usages.add(intended_usage)
-                    logger.debug(
-                        "pplx: unhandled intended_usage=%s keys=%s",
-                        intended_usage,
-                        list(block.keys()),
-                    )
+            if (
+                intended_usage
+                and intended_usage not in _KNOWN_INTENDED_USAGES
+                and intended_usage not in state.logged_unknown_intended_usages
+            ):
+                state.logged_unknown_intended_usages.add(intended_usage)
+                logger.debug(
+                    "pplx: unhandled intended_usage=%s keys=%s",
+                    intended_usage,
+                    list(block.keys()),
+                )
             continue
 
         # Perplexity sends the answer in two parallel blocks: ``ask_text_0_markdown``
@@ -561,12 +567,15 @@ def _extract_deltas(
                         answer_delta = (answer_delta or "") + new_text
                         state.answer_seen += new_text
                 answer_str = value.get("answer")
-                if isinstance(answer_str, str) and answer_str:
-                    if answer_str.startswith(state.answer_seen):
-                        delta = answer_str[len(state.answer_seen) :]
-                        if delta:
-                            answer_delta = (answer_delta or "") + delta
-                        state.answer_seen = answer_str
+                if (
+                    isinstance(answer_str, str)
+                    and answer_str
+                    and answer_str.startswith(state.answer_seen)
+                ):
+                    delta = answer_str[len(state.answer_seen) :]
+                    if delta:
+                        answer_delta = (answer_delta or "") + delta
+                    state.answer_seen = answer_str
                 continue
 
             # Mode B — incremental chunk append at ``/chunks/N``. Each patch

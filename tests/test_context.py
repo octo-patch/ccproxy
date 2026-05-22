@@ -252,8 +252,8 @@ class TestFromRequest:
 
 
 class TestParseSync:
-    def test_parse_sync_returns_parsed_request(self):
-        from ccproxy.lightllm.parsed import ListenerFormat, ParsedRequest
+    def test_parse_sync_populates_typed_fields(self):
+        from ccproxy.lightllm.parsed import ListenerFormat
 
         flow = _make_flow(
             body={"model": "claude-3", "messages": [{"role": "user", "content": "hi"}]},
@@ -263,12 +263,11 @@ class TestParseSync:
         ctx = Context.from_flow(flow)
         assert ctx._listener_format is ListenerFormat.ANTHROPIC_MESSAGES
 
-        parsed = ctx.parse_sync()
-        assert isinstance(parsed, ParsedRequest)
-        assert parsed.model == "claude-3"
-        assert len(parsed.messages) == 1
+        ctx.parse_sync()
+        assert ctx.model == "claude-3"
+        assert len(ctx.messages) == 1
 
-    def test_parse_sync_caches_result(self):
+    def test_parse_sync_is_idempotent(self):
         flow = _make_flow(
             body={"model": "claude-3", "messages": [{"role": "user", "content": "hi"}]},
             headers={"anthropic-version": "2023-06-01"},
@@ -276,16 +275,17 @@ class TestParseSync:
         flow.request.path = "/v1/messages"
         ctx = Context.from_flow(flow)
 
-        first = ctx.parse_sync()
-        second = ctx.parse_sync()
+        ctx.parse_sync()
+        first = ctx.messages
+        ctx.parse_sync()
+        second = ctx.messages
         assert first is second
 
-    def test_parse_sync_raises_for_unknown_listener_format(self):
-        import pytest
-
+    def test_parse_sync_returns_empty_for_unknown_listener_format(self):
         flow = _make_flow(body={"model": "?", "messages": []}, headers={})
         flow.request.path = "/unknown/path"
         ctx = Context.from_flow(flow)
 
-        with pytest.raises(ValueError, match="no IR parser"):
-            ctx.parse_sync()
+        ctx.parse_sync()
+        # UNKNOWN listener format yields empty defaults instead of raising.
+        assert ctx.messages == []

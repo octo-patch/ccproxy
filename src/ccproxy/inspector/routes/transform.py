@@ -306,8 +306,6 @@ def _handle_transform(
     or the :class:`TransformOverride` overrides.
     """
     # deferred: avoid pulling pydantic-ai at module import time
-    import dataclasses
-
     from ccproxy.lightllm.graph import dispatch_dump_sync
     from ccproxy.pipeline.context import Context
 
@@ -335,11 +333,11 @@ def _handle_transform(
 
     ctx = Context.from_flow(flow)
     flow.metadata.setdefault("ccproxy.listener_format", ctx._listener_format.value)
-    parsed = ctx.parse_sync()
-    if model and model != parsed.model:
-        parsed = dataclasses.replace(parsed, model=model)
-    flow.metadata["ccproxy.parsed_request_parameters"] = parsed.request_parameters
-    new_body = dispatch_dump_sync(parsed, provider=provider_str)
+    ctx.parse_sync()
+    if model and model != ctx.model:
+        ctx.model = model
+    flow.metadata["ccproxy.parsed_request_parameters"] = ctx.request_parameters
+    new_body = dispatch_dump_sync(ctx, provider=provider_str)
 
     try:
         url, headers = _build_upstream_url_and_headers(
