@@ -309,9 +309,11 @@ GeminiAddon.responseheaders fires (after outbound pipeline)
             → flow.response.stream = EnvelopeUnwrapStream()  [unwrap v1internal]
 ```
 
-**`SSETransformer`** (cross-provider transform): Stateful callable on `flow.response.stream`.
-Parses SSE events from the upstream provider, transforms each chunk via LiteLLM's per-provider
-`ModelResponseIterator.chunk_parser()`, re-serializes as OpenAI-format SSE.
+**`SSEPipeline`** (cross-provider transform): Stateful callable on `flow.response.stream`.
+Drives a per-provider intake FSM (`lightllm/graph/*_intake.py`) to parse upstream SSE bytes
+into IR `ModelResponseStreamEvent`s, then a per-listener render FSM (`lightllm/graph/*_render.py`)
+to re-emit the listener-shape SSE. Persistent asyncio loop in a daemon thread bridges
+mitmproxy's sync stream callable to the async FSMs.
 
 **`EnvelopeUnwrapStream`** (Gemini redirect-mode streaming): Stateful callable on
 `flow.response.stream`. Parses SSE events from cloudcode-pa, strips the outer

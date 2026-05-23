@@ -179,6 +179,7 @@ module = [
   "ccproxy.lightllm.graph.openai_render",
   "ccproxy.lightllm.graph.perplexity_intake",
   "ccproxy.lightllm.graph.sse_pipeline",
+  "ccproxy.lightllm.graph._subgraph_patch",
 ]
 disable_error_code = ["type-arg", "attr-defined", "no-any-return", "misc", "index", "arg-type", "unreachable"]
 

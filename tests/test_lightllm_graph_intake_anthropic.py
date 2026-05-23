@@ -342,6 +342,81 @@ class TestRoundtrip:
         # Args accumulate as the concatenated JSON string of all input_json_delta payloads.
         assert tool_part.args == '{"city": "Paris"}'
 
+    def test_typed_search_tool_promotes_tool_call_part(self) -> None:
+        """When ``ToolDefinition`` carries ``tool_kind='tool-search'``, the parts manager
+        promotes the matching ``ToolCallPart`` to ``ToolSearchCallPart``.
+
+        Regression for Phase H: the listener-side ``_parse_tools`` now sets
+        ``tool_kind`` from Anthropic's wire ``type`` discriminator (e.g.
+        ``web_search_20250305``). The ``ModelResponsePartsManager``'s
+        ``_typed_call_part`` lookups that registry and promotes the IR part
+        when ``tool_call_delta`` matches.
+        """
+        from pydantic_ai.messages import ToolSearchCallPart
+        from pydantic_ai.tools import ToolDefinition
+
+        request_params = ModelRequestParameters(
+            function_tools=[
+                ToolDefinition(
+                    name="web_search",
+                    description="Built-in web search",
+                    parameters_json_schema={"type": "object", "properties": {}},
+                    tool_kind="tool-search",
+                )
+            ]
+        )
+        intake = _AnthropicFSMAdapter(
+            model="claude-3-haiku-20240307",
+            request_params=request_params,
+        )
+
+        events = [
+            {
+                "type": "message_start",
+                "message": {
+                    "id": "msg_search",
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [],
+                    "model": "claude-3-haiku-20240307",
+                    "stop_reason": None,
+                    "stop_sequence": None,
+                    "usage": {"input_tokens": 8, "output_tokens": 0},
+                },
+            },
+            {
+                "type": "content_block_start",
+                "index": 0,
+                "content_block": {
+                    "type": "tool_use",
+                    "id": "toolu_search1",
+                    "name": "web_search",
+                    "input": {},
+                },
+            },
+            {
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {"type": "input_json_delta", "partial_json": '{"query": "pydantic-ai"}'},
+            },
+            {"type": "content_block_stop", "index": 0},
+            {
+                "type": "message_delta",
+                "delta": {"stop_reason": "tool_use", "stop_sequence": None},
+                "usage": {"output_tokens": 3},
+            },
+            {"type": "message_stop"},
+        ]
+        list(intake.feed(_frames(events)))
+        list(intake.close())
+
+        parts = intake.parts_manager.get_parts()
+        assert len(parts) == 1
+        promoted = parts[0]
+        assert isinstance(promoted, ToolSearchCallPart)
+        assert promoted.tool_name == "web_search"
+        assert promoted.tool_kind == "tool-search"
+
     def test_thinking_stream_assembles_thinking_part(self, intake_factory: _IntakeFactory) -> None:
         intake = intake_factory()
         sse = _frames(THINKING_STREAM.events)

@@ -7,10 +7,10 @@ to the SSE buffer, complete SSE frames are drained, each frame's ``data:``
 payload JSON is checked for the cloudcode-pa ``{response: {...}}`` envelope
 and unwrapped if present, then validated into a typed
 :class:`GenerateContentResponse`. Each chunk is wrapped in a dispatch
-envelope, those envelopes are pushed onto an in-state queue, and the FSM
-router drains the queue dispatching each envelope to a per-variant handler
-step. Handler steps mutate ``state.parts_manager`` and append emitted
-:class:`ModelResponseStreamEvent` objects to ``state.out_events``.
+envelope, those envelopes are pushed onto an in-state queue, and the outer
+FSM router drains the queue dispatching each envelope into a nested
+per-chunk subgraph that pops one ``Part`` at a time and routes it through
+the matching arm (text / function_call / inline_data / function_response).
 
 The behavioral contract matches
 :mod:`ccproxy.lightllm.response.intake_google` byte-for-byte for unwrapped
@@ -26,6 +26,12 @@ with exactly one key ``"response"`` whose value is a dict, the inner dict
 is taken as the chunk payload. Otherwise the JSON is treated as the chunk
 payload directly. This makes the FSM-driven path the single source of
 truth for Gemini response handling.
+
+The per-chunk subgraph composes into the outer graph via
+:meth:`GraphBuilder.add_subgraph` (installed by
+:mod:`ccproxy.lightllm.graph._subgraph_patch`). Per-chunk scratch state
+(``parts_queue``) is reset implicitly — the queue empties as
+``pop_next_part`` drains it.
 
 The persistent-loop bridge between sync mitmproxy callables and this async
 FSM lives in :class:`SSEPipeline` (Phase Q). For tests, the parametrize
@@ -43,7 +49,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
-from google.genai.types import GenerateContentResponse
+from google.genai.types import GenerateContentResponse, Part
 from pydantic import TypeAdapter, ValidationError
 
 # Private pydantic-ai imports — same justification as the matching note in
@@ -52,6 +58,8 @@ from pydantic import TypeAdapter, ValidationError
 from pydantic_ai._parts_manager import ModelResponsePartsManager
 from pydantic_ai.messages import BinaryContent, FilePart, ModelResponseStreamEvent
 from pydantic_graph import GraphBuilder, StepContext
+
+import ccproxy.lightllm.graph._subgraph_patch  # noqa: F401  — installs add_subgraph
 
 if TYPE_CHECKING:
     from pydantic_ai.models import ModelRequestParameters
@@ -67,13 +75,24 @@ _RESPONSE_ADAPTER: TypeAdapter[GenerateContentResponse] = TypeAdapter(GenerateCo
 
 @dataclass(frozen=True)
 class _GenerateChunk:
-    """Chunk carrying one ``GenerateContentResponse`` to dispatch through the parts loop."""
+    """Chunk carrying one ``GenerateContentResponse`` to dispatch through the per-chunk subgraph."""
 
     chunk: GenerateContentResponse
 
 
+@dataclass(frozen=True)
+class _PartDispatch:
+    """Per-part dispatch envelope routed into one of the four part-type arms."""
+
+    part: Part
+
+
+class _ChunkDone:
+    """Sentinel — no more parts to process for the current chunk."""
+
+
 class _FeedDone:
-    """Marker returned by the router when the events queue is exhausted."""
+    """Marker returned by the outer router when the events queue is exhausted."""
 
 
 # ── State ──────────────────────────────────────────────────────────────────
@@ -84,24 +103,227 @@ class _GoogleIntakeState:
     """FSM state for one Google intake graph run.
 
     The ``events_queue`` is the queue of dispatch envelopes drained from the
-    SSE buffer *before* the graph run starts; the FSM router pops from it.
-    The ``out_events`` list accumulates :class:`ModelResponseStreamEvent`
-    instances emitted by handler steps; the terminal step returns it.
-    ``parts_manager`` persists across feed calls so multi-feed reassembly
-    works.
+    SSE buffer *before* the outer graph run starts; the outer router pops
+    from it. The ``out_events`` list accumulates
+    :class:`ModelResponseStreamEvent` instances; the terminal outer step
+    drains and returns it. ``parts_manager`` persists across feed calls so
+    multi-feed reassembly works. ``parts_queue`` is per-chunk scratch
+    drained inside the per-chunk subgraph.
     """
 
     parts_manager: ModelResponsePartsManager
     events_queue: deque[Any] = field(default_factory=deque)
     out_events: list[ModelResponseStreamEvent] = field(default_factory=list)
+    parts_queue: deque[Part] = field(default_factory=deque)
+    """Per-chunk queue of ``Part`` instances; drained by the per-chunk subgraph."""
 
 
-# ── Graph ──────────────────────────────────────────────────────────────────
+# ── Per-chunk dispatch subgraph ─────────────────────────────────────────────
+
+
+_cg: GraphBuilder[
+    _GoogleIntakeState, None, _GenerateChunk, None
+] = GraphBuilder(
+    name="google_chunk_dispatch",
+    state_type=_GoogleIntakeState,
+    input_type=_GenerateChunk,
+)
+
+
+@_cg.step
+async def absorb_chunk(
+    ctx: StepContext[_GoogleIntakeState, None, _GenerateChunk],
+) -> None:
+    """Walk ``chunk.candidates[0].content.parts`` and enqueue every ``Part``.
+
+    Mirrors the front matter of the original ``handle_generate_chunk``:
+    nothing happens when the chunk has no candidates or no parts. Otherwise
+    every part on the first candidate's content is appended to
+    ``state.parts_queue`` for the per-chunk loop to drain.
+    """
+    state = ctx.state
+    chunk = ctx.inputs.chunk
+    if not chunk.candidates:
+        return
+    candidate = chunk.candidates[0]
+    if candidate.content is None or candidate.content.parts is None:
+        return
+    state.parts_queue.extend(candidate.content.parts)
+
+
+@_cg.step
+async def pop_next_part(
+    ctx: StepContext[_GoogleIntakeState, None, None],
+) -> Any:
+    """Pop one ``Part`` from the queue, or signal end-of-chunk via :class:`_ChunkDone`."""
+    state = ctx.state
+    if not state.parts_queue:
+        return _ChunkDone()
+    return _PartDispatch(part=state.parts_queue.popleft())
+
+
+# Per-arm dispatch envelopes emitted by :func:`classify_part`. Each wraps
+# the same ``Part`` instance; the type discriminator routes through the
+# decision branches to the matching handler step.
+
+
+@dataclass(frozen=True)
+class _TextPart:
+    part: Part
+
+
+@dataclass(frozen=True)
+class _FunctionCallPart:
+    part: Part
+
+
+@dataclass(frozen=True)
+class _InlineDataPart:
+    part: Part
+
+
+@dataclass(frozen=True)
+class _FunctionResponsePart:
+    part: Part
+
+
+class _UnknownPart:
+    """Sentinel — a Part with no populated field of interest (skipped silently)."""
+
+
+@_cg.step
+async def classify_part(
+    ctx: StepContext[_GoogleIntakeState, None, _PartDispatch],
+) -> Any:
+    """Route one ``Part`` to the matching arm via its populated field.
+
+    Preserves the original imperative ladder's order: ``text`` first,
+    ``function_call`` second, ``inline_data`` third, ``function_response``
+    last (logged + dropped).
+    """
+    part = ctx.inputs.part
+    if part.text is not None:
+        return _TextPart(part=part)
+    if part.function_call is not None:
+        return _FunctionCallPart(part=part)
+    if part.inline_data is not None:
+        return _InlineDataPart(part=part)
+    if part.function_response is not None:
+        return _FunctionResponsePart(part=part)
+    return _UnknownPart()
+
+
+@_cg.step
+async def handle_text_typed(
+    ctx: StepContext[_GoogleIntakeState, None, _TextPart],
+) -> None:
+    """Emit text-delta IR event for the typed text-part envelope."""
+    state = ctx.state
+    text = ctx.inputs.part.text
+    if not text:
+        return
+    state.out_events.extend(
+        state.parts_manager.handle_text_delta(vendor_part_id=None, content=text)
+    )
+
+
+@_cg.step
+async def handle_function_call_typed(
+    ctx: StepContext[_GoogleIntakeState, None, _FunctionCallPart],
+) -> None:
+    """Emit tool-call-delta IR event for the typed function-call envelope."""
+    state = ctx.state
+    fc = ctx.inputs.part.function_call
+    if fc is None:
+        return
+    event = state.parts_manager.handle_tool_call_delta(
+        vendor_part_id=uuid4(),
+        tool_name=fc.name,
+        args=fc.args,
+        tool_call_id=fc.id,
+    )
+    if event is not None:
+        state.out_events.append(event)
+
+
+@_cg.step
+async def handle_inline_data_typed(
+    ctx: StepContext[_GoogleIntakeState, None, _InlineDataPart],
+) -> None:
+    """Emit :class:`FilePart` IR event for the typed inline-data envelope."""
+    state = ctx.state
+    inline = ctx.inputs.part.inline_data
+    if inline is None:
+        return
+    data = inline.data
+    mime_type = inline.mime_type
+    if not data or not mime_type:
+        logger.debug("google intake: skipping inlineData part with missing data/mime_type")
+        return
+    binary = BinaryContent(data=data, media_type=mime_type)
+    state.out_events.append(
+        state.parts_manager.handle_part(
+            vendor_part_id=uuid4(),
+            part=FilePart(content=BinaryContent.narrow_type(binary)),
+        )
+    )
+
+
+@_cg.step
+async def handle_function_response_typed(
+    ctx: StepContext[_GoogleIntakeState, None, _FunctionResponsePart],
+) -> None:
+    """Log and drop unexpected ``functionResponse`` parts."""
+    del ctx  # StepFunction protocol requires ``ctx`` parameter name; nothing to read here
+    logger.warning(
+        "google intake: unexpected functionResponse part in upstream response; skipping"
+    )
+
+
+@_cg.step
+async def handle_unknown_part(
+    ctx: StepContext[_GoogleIntakeState, None, _UnknownPart],
+) -> None:
+    """No-op for parts with no recognized field. Reserved for future part kinds."""
+    del ctx  # StepFunction protocol requires ``ctx`` parameter name; nothing to read here
+
+
+_cg.add(
+    _cg.edge_from(_cg.start_node).to(absorb_chunk),
+    _cg.edge_from(absorb_chunk).to(pop_next_part),
+    _cg.edge_from(pop_next_part).to(
+        _cg.decision()
+        .branch(_cg.match(_ChunkDone).to(_cg.end_node))
+        .branch(_cg.match(_PartDispatch).to(classify_part))
+    ),
+    _cg.edge_from(classify_part).to(
+        _cg.decision()
+        .branch(_cg.match(_TextPart).to(handle_text_typed))
+        .branch(_cg.match(_FunctionCallPart).to(handle_function_call_typed))
+        .branch(_cg.match(_InlineDataPart).to(handle_inline_data_typed))
+        .branch(_cg.match(_FunctionResponsePart).to(handle_function_response_typed))
+        .branch(_cg.match(_UnknownPart).to(handle_unknown_part))
+    ),
+    _cg.edge_from(
+        handle_text_typed,
+        handle_function_call_typed,
+        handle_inline_data_typed,
+        handle_function_response_typed,
+        handle_unknown_part,
+    ).to(pop_next_part),
+)
+
+
+_chunk_dispatch_graph = _cg.build()
+
+
+# ── Outer intake graph (events queue dispatcher) ──────────────────────────
 
 
 _g: GraphBuilder[
     _GoogleIntakeState, None, None, list[ModelResponseStreamEvent]
 ] = GraphBuilder(
+    name="google_intake",
     state_type=_GoogleIntakeState,
     output_type=list[ModelResponseStreamEvent],
 )
@@ -118,62 +340,7 @@ async def frame_next_event(
     return state.events_queue.popleft()
 
 
-@_g.step
-async def handle_generate_chunk(
-    ctx: StepContext[_GoogleIntakeState, None, _GenerateChunk],
-) -> None:
-    """Dispatch a ``GenerateContentResponse`` chunk to the parts manager.
-
-    Sync transliteration of ``GeminiStreamedResponse._get_event_iterator``.
-    """
-    state = ctx.state
-    chunk = ctx.inputs.chunk
-    pm = state.parts_manager
-
-    if not chunk.candidates:
-        return
-    candidate = chunk.candidates[0]
-    if candidate.content is None or candidate.content.parts is None:
-        return
-    for part in candidate.content.parts:
-        if part.text is not None:
-            if not part.text:
-                continue
-            state.out_events.extend(
-                pm.handle_text_delta(
-                    vendor_part_id=None,
-                    content=part.text,
-                )
-            )
-        elif part.function_call is not None:
-            event = pm.handle_tool_call_delta(
-                vendor_part_id=uuid4(),
-                tool_name=part.function_call.name,
-                args=part.function_call.args,
-                tool_call_id=part.function_call.id,
-            )
-            if event is not None:
-                state.out_events.append(event)
-        elif part.inline_data is not None:
-            data = part.inline_data.data
-            mime_type = part.inline_data.mime_type
-            if not data or not mime_type:
-                logger.debug(
-                    "google intake: skipping inlineData part with missing data/mime_type"
-                )
-                continue
-            binary = BinaryContent(data=data, media_type=mime_type)
-            state.out_events.append(
-                pm.handle_part(
-                    vendor_part_id=uuid4(),
-                    part=FilePart(content=BinaryContent.narrow_type(binary)),
-                )
-            )
-        elif part.function_response is not None:
-            logger.warning(
-                "google intake: unexpected functionResponse part in upstream response; skipping"
-            )
-            continue
+_dispatch_chunk_step = _g.add_subgraph(_chunk_dispatch_graph, label="dispatch_chunk")  # ty: ignore[unresolved-attribute]
 
 
 @_g.step
@@ -191,9 +358,9 @@ _g.add(
     _g.edge_from(frame_next_event).to(
         _g.decision()
         .branch(_g.match(_FeedDone).to(emit_done))
-        .branch(_g.match(_GenerateChunk).to(handle_generate_chunk))
+        .branch(_g.match(_GenerateChunk).to(_dispatch_chunk_step))
     ),
-    _g.edge_from(handle_generate_chunk).to(frame_next_event),
+    _g.edge_from(_dispatch_chunk_step).to(frame_next_event),
     _g.edge_from(emit_done).to(_g.end_node),
 )
 
@@ -209,13 +376,11 @@ class GoogleResponseIntakeFSM:
 
     Behavioral twin of
     :class:`ccproxy.lightllm.response.intake_google.GoogleResponseIntake`,
-    re-expressed as a :mod:`pydantic_graph.beta` ``GraphBuilder`` FSM. One
-    graph run per :meth:`feed` call drains all complete SSE frames buffered
-    by that call into typed ``GenerateContentResponse`` chunks (transparently
-    peeling off the cloudcode-pa ``{response: {...}}`` envelope when present),
-    wraps each in a dispatch envelope, dispatches each to a handler step,
-    and returns the accumulated IR events. Partial frames remain in the SSE
-    buffer for the next call. ``parts_manager`` persists across calls.
+    re-expressed as a two-level :class:`GraphBuilder` FSM: an outer graph
+    drains the events queue and dispatches each chunk into a nested
+    per-chunk subgraph that pops one ``Part`` at a time and routes it
+    through the matching part-type arm. ``parts_manager`` persists across
+    feed calls; per-chunk scratch (``parts_queue``) drains naturally.
     """
 
     name = "google"

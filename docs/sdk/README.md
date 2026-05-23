@@ -87,7 +87,8 @@ Using LiteLLM's Python SDK with async completion API.
 
 **Prerequisites:**
 ```bash
-# litellm is a core dep of ccproxy — no extra install needed
+# litellm is a client-side choice — install it where you're running the example
+uv pip install litellm
 
 # Configure credentials in ~/.config/ccproxy/ccproxy.yaml
 # Start ccproxy

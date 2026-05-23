@@ -26,7 +26,13 @@ _RAW_JSON_INSTRUCTION = (
 
 
 def commitbee_compat_guard(ctx: Context) -> bool:
-    """Only run for requests whose system prompt contains the commitbee signature."""
+    """Only run for requests whose system prompt contains the commitbee signature.
+
+    Routes like Anthropic's ``/api/v2/logs`` post a list-shaped body — short-
+    circuit those before ``.get()`` raises.
+    """
+    if not isinstance(ctx._body, dict):
+        return False  # type: ignore[unreachable]
     system = ctx._body.get("system")
     if isinstance(system, str):
         return _COMMITBEE_SIGNATURE in system
@@ -38,6 +44,8 @@ def commitbee_compat_guard(ctx: Context) -> bool:
 @hook(reads=["system"], writes=["system"])
 def commitbee_compat(ctx: Context, _: dict[str, Any]) -> Context:
     """Append raw-JSON instruction to commitbee's system prompt."""
+    if not isinstance(ctx._body, dict):
+        return ctx  # type: ignore[unreachable]
     system = ctx._body.get("system")
     if isinstance(system, str):
         ctx._body["system"] = system + _RAW_JSON_INSTRUCTION

@@ -13,6 +13,8 @@ from typing import Any, cast
 from pydantic_ai.settings import ModelSettings
 from pydantic_ai.tools import ToolDefinition
 
+from ccproxy.lightllm.adapters._tool_kinds import OPENAI_TYPED_TOOLS
+
 # Wire fields absorbed into ModelSettings. Everything else lands in raw_extras.
 _COMMON_SETTINGS_KEYS = frozenset(
     {
@@ -46,7 +48,13 @@ _ABSORBED_BODY_KEYS = frozenset(
 
 
 def _parse_tools(raw_tools: Sequence[Any]) -> list[ToolDefinition]:
-    """Parse OpenAI ``tools[].function`` entries into :class:`ToolDefinition`."""
+    """Parse OpenAI ``tools[].function`` entries into :class:`ToolDefinition`.
+
+    Tools whose wire ``type`` is recognized in :data:`OPENAI_TYPED_TOOLS`
+    (typed server-side tools) get ``tool_kind`` set so the parts_manager
+    can promote response parts to their typed subclass. ``function`` tools
+    and other user-defined shapes get ``tool_kind=None``.
+    """
     result: list[ToolDefinition] = []
     for tool in raw_tools:
         if not isinstance(tool, dict):
@@ -54,6 +62,8 @@ def _parse_tools(raw_tools: Sequence[Any]) -> list[ToolDefinition]:
         function = tool.get("function") or {}
         if not isinstance(function, dict):
             continue
+        wire_type = tool.get("type")
+        tool_kind = OPENAI_TYPED_TOOLS.get(wire_type) if isinstance(wire_type, str) else None
         result.append(
             ToolDefinition(
                 name=cast(str, function.get("name", "")),
@@ -62,6 +72,7 @@ def _parse_tools(raw_tools: Sequence[Any]) -> list[ToolDefinition]:
                     function.get("parameters") or {"type": "object", "properties": {}},
                 ),
                 description=cast("str | None", function.get("description")),
+                tool_kind=tool_kind,
             )
         )
     return result

@@ -3,7 +3,7 @@
 **Version**: 1.0
 **Status**: Contract for implementation
 **Producer**: mcptty (Go MCP server)
-**Consumer**: ccproxy (LiteLLM proxy with hook pipeline)
+**Consumer**: ccproxy (transparent LLM API interceptor with hook pipeline)
 
 ## Overview
 

@@ -90,10 +90,14 @@ src/ccproxy/lightllm/
 │   ├── perplexity.py     PerplexityAdapter (outbound-only)
 │   ├── _envelope.py      parse_request_into_fields, parse_request, render_request
 │   ├── _anthropic_envelope.py  Anthropic wire helpers
-│   └── _openai_envelope.py     OpenAI wire helpers
+│   ├── _openai_envelope.py     OpenAI wire helpers
+│   └── _tool_kinds.py    wire-type → ToolPartKind mapping for typed promotion
 │
 └── graph/                ← FSM modules for streaming responses
     ├── __init__.py       dispatch_dump_sync, dispatch_intake, dispatch_render
+    │
+    ├── _subgraph_patch.py Monkey-patch installing GraphBuilder.add_subgraph
+    │                      (temporary until pydantic_graph ships it natively)
     │
     ├── anthropic_intake.py Anthropic SSE → IR events
     ├── anthropic_render.py IR events → Anthropic SSE
@@ -102,9 +106,11 @@ src/ccproxy/lightllm/
     ├── openai_render.py  IR events → OpenAI SSE
     │
     ├── google_intake.py  Google streamGenerateContent SSE → IR events
-    │                      (cloudcode-pa envelope unwrap folded in)
+    │                      (cloudcode-pa envelope unwrap folded in;
+    │                       two-level FSM with per-chunk subgraph)
     │
     ├── perplexity_intake.py Perplexity Pro SSE → IR events
+    │                      (two-level FSM with per-event subgraph)
     │
     ├── sse_pipeline.py   SSEPipeline — persistent asyncio loop per stream
     └── buffered.py       transform_buffered_response_sync — non-streaming
@@ -327,6 +333,61 @@ the terminal step returns `bytes(state.out_bytes)`.
 | **Per-chunk drive** | `feed(data)` parses SSE frames out of an internal buffer into typed events, clears `state.out_events`, runs the graph once, returns the accumulated IR events. State persists across chunks (current block, parts_manager, etc.). |
 | **Mermaid visualization** | Free via `graph.render(title=..., direction='LR')`. See the Visualization section below. |
 
+### Subgraph composition
+
+The Anthropic and OpenAI intake FSMs are single-level — one router, a typed
+decision, a per-event-kind handler step. The Google and Perplexity intakes
+have a second axis of dispatch *within* each event (Google: walk
+`chunk.candidates[0].content.parts`; Perplexity: walk `event.blocks[]`).
+Inlining that walk inside a single handler produces 40-line (Google) and
+142-line (Perplexity) imperative ladders that are awkward to reason about
+and to mermaid.
+
+To collapse those ladders back into the declarative graph idiom, the
+graph layer ships a temporary monkey-patch at
+`src/ccproxy/lightllm/graph/_subgraph_patch.py` that installs a
+`GraphBuilder.add_subgraph` method. The patch tracks the upstream TODO at
+`pydantic_graph/graph_builder.py:1469`:
+
+```
+# TODO(DavidM): Support adding subgraphs; I think this behaves like a step
+# with the same inputs/outputs but gets rendered as a subgraph in mermaid
+```
+
+The patch follows that contract literally: `add_subgraph(subgraph, *,
+node_id=None, label=None)` wraps a built `Graph` in a synthetic `Step`
+whose body awaits `subgraph.run(state=ctx.state, deps=ctx.deps,
+inputs=ctx.inputs)`. The returned `Step` is usable in `edge_from(...).to(...)`
+like any other step. Shared `StateT` flows through unchanged — the inner
+graph sees and mutates the same state instance as the parent, which is how
+cross-block invariants (e.g. Perplexity's `state.answer_seen` prefix
+accumulation) survive the decomposition.
+
+Both call sites import the patch module at top-level to install the
+method before they use it:
+
+```python
+import ccproxy.lightllm.graph._subgraph_patch  # noqa: F401  — installs add_subgraph
+```
+
+Mermaid renders the composed step as a single labelled node:
+
+```
+subgraph_pplx_event_dispatch: dispatch_event
+```
+
+The inner graph is exposed at module scope (`_event_dispatch_graph` in
+perplexity_intake, `_chunk_dispatch_graph` in google_intake) so it can be
+rendered standalone for the visualization sanity check (see the
+Visualization section). The patch deliberately does NOT integrate with
+mermaid's `subgraph` cluster syntax — that needs upstream cooperation.
+
+Removal trigger: delete `_subgraph_patch.py` and remove its
+`# noqa: F401` import the day `pydantic_graph.GraphBuilder` exposes a
+native `add_subgraph` (or equivalent). The call sites should work
+unchanged unless upstream picks a different method name, in which case
+one rename pass at the two import sites suffices.
+
 ### What each file does
 
 **Request-side (adapters/):**
@@ -345,12 +406,13 @@ the terminal step returns `bytes(state.out_bytes)`.
 
 | File | What its FSM does | Key marker classes |
 |---|---|---|
+| `_subgraph_patch.py` | Installs `GraphBuilder.add_subgraph` via monkey-patch (tracks upstream TODO at `pydantic_graph/graph_builder.py:1469`). Registers a built `Graph` as a synthetic `Step` whose body awaits `subgraph.run(state=ctx.state, deps=ctx.deps, inputs=ctx.inputs)`. Shared `StateT` flows through unchanged; inner subgraph mutates the same state instance as the parent. Mermaid renders the subgraph as a single labelled node. Removable when upstream ships native subgraph composition. | — |
 | `anthropic_intake.py` | Anthropic SSE → IR `ModelResponseStreamEvent` (typed dispatch on `BetaRawMessageStreamEvent` union) | `_FeedDone`, `_IgnoredEvent` |
 | `anthropic_render.py` | IR `ModelResponseStreamEvent` → Anthropic SSE wire bytes | `_RenderDone` |
 | `openai_intake.py` | OpenAI Chat Completions SSE → IR (per-chunk envelope dispatch on content/tool_call/refusal shapes) | `_FeedDone`, `_RefusalChunk`, `_StandardChunk`, `_EmptyChoicesChunk` |
 | `openai_render.py` | IR → OpenAI Chat Completions SSE | `_RenderDone` |
-| `google_intake.py` | Google `streamGenerateContent` chunks → IR (envelope unwrap of `{response: {...}}` from cloudcode-pa folded in) | `_FeedDone` |
-| `perplexity_intake.py` | Perplexity Pro SSE → IR (per-event-type dispatch driving `_extract_deltas`) | `_FeedDone`, `_PerplexityEventEnvelope` |
+| `google_intake.py` | Google `streamGenerateContent` chunks → IR. Two-level FSM: outer pops chunks from the events queue; the inner `_chunk_dispatch_graph` (composed via `add_subgraph`) pops one `Part` at a time and routes it through a typed-marker decision to the matching arm (`_TextPart` → text delta, `_FunctionCallPart` → tool-call delta, `_InlineDataPart` → `FilePart`, `_FunctionResponsePart` → log + drop, `_UnknownPart` → no-op). Envelope unwrap of `{response: {...}}` from cloudcode-pa folded in at the SSE-frame parser. | `_FeedDone`, `_GenerateChunk`, `_PartDispatch`, `_ChunkDone`, `_TextPart`, `_FunctionCallPart`, `_InlineDataPart`, `_FunctionResponsePart`, `_UnknownPart` |
+| `perplexity_intake.py` | Perplexity Pro SSE → IR. Two-level FSM: outer pops events from the queue; the inner `_event_dispatch_graph` (composed via `add_subgraph`) runs `absorb_event → apply_text_mirror → pop_next_block → {plan_arm → bare_markdown_arm → diff_block_arm | flush}` per event. Cross-block invariants (`has_plan_block` precondition, batched `pending_*_delta` accumulation, single end-of-event flush) preserved via per-event scratch fields on `_PerplexityIntakeState` that `flush_event_deltas` resets. The four documented diff-block patch modes (Mode A root cumulative, Mode B chunks-array, Mode C `/chunks/N` append, Mode D `/markdown_block`) are still handled by `_apply_markdown_patch`. | `_FeedDone`, `_PerplexityEventEnvelope`, `_BlockDispatch`, `_EventDone` |
 | `sse_pipeline.py` | Sync mitmproxy stream callable backed by a persistent asyncio loop + daemon thread; drives an intake + render FSM pair per stream | — |
 | `buffered.py` | Non-streaming buffered-body cross-format transform; synthesizes streaming events from buffered JSON per provider, drives the intake FSM, emits listener-shape JSON | — |
 
@@ -574,6 +636,61 @@ The lossiness invariants specifically called out:
   re-applied verbatim by the adapter's `render()` path.
 * Unknown content blocks (anything with an unrecognized `type`) preserved
   in `raw_extras["unknown_block:msg:N:idx:M"]` and re-emitted on dump.
+
+---
+
+## Typed-part promotion (`tool_kind`)
+
+`pydantic_ai.messages.ModelResponsePartsManager` (pinned 1.99+) auto-promotes
+a base `ToolCallPart` to its typed subclass (e.g. `ToolSearchCallPart`) when
+the matching `ToolDefinition` in the request's `ModelRequestParameters.
+function_tools` carries a `tool_kind` discriminator. The promotion happens
+inside `handle_tool_call_delta` and `handle_tool_call_part` via
+`ToolCallPart.narrow_type(part, tool_kind=kind)` — no extra call needed
+from intake code.
+
+`ToolPartKind` is a `Literal['tool-search']` today (extensible — new kinds
+appear in `pydantic_ai/messages.py`'s `ToolPartKind` alias). The native
+server-side path narrows to `NativeToolSearchCallPart`; the local-fallback
+path narrows to `ToolSearchCallPart`.
+
+The listener-side gap was the wire `type` → `ToolPartKind` mapping. The
+adapter's `_parse_tools` functions now consult
+`src/ccproxy/lightllm/adapters/_tool_kinds.py`:
+
+```python
+# Anthropic — versioned wire-type discriminators
+ANTHROPIC_TYPED_TOOLS: dict[str, ToolPartKind] = {
+    "web_search_20250305": "tool-search",
+}
+
+# OpenAI — built-in server tools (Chat Completions sees these rarely)
+OPENAI_TYPED_TOOLS: dict[str, ToolPartKind] = {}
+```
+
+`_anthropic_envelope._parse_tools` reads `tool["type"]` and looks up the
+kind; `_openai_envelope._parse_tools` does the same with its own table.
+Tools without a recognized `type` (most user-defined tools) keep
+`tool_kind=None` and pass through as base `ToolCallPart` instances.
+
+The threading from listener → FSM is straight-through:
+
+```
+incoming wire body
+  → _parse_tools           sets ToolDefinition.tool_kind
+  → ModelRequestParameters carries function_tools (with kind)
+  → TransformMeta          stamps request_parameters on flow.metadata
+  → dispatch_intake        passes request_params into FSM constructor
+  → ModelResponsePartsManager.__init__
+                           builds _tool_kind_by_name from function_tools
+  → handle_tool_call_delta auto-promotes ToolCallPart via _typed_call_part
+```
+
+Add a new entry to `_tool_kinds.py` when a new typed server-side tool
+ships upstream (e.g. a new Anthropic dated web-search variant). Tests
+asserting typed parts go alongside the existing intake tests; see
+`tests/test_lightllm_graph_intake_anthropic.py::test_typed_search_tool_promotes_tool_call_part`
+for the canonical pattern.
 
 ---
 
@@ -892,6 +1009,19 @@ The render-side graph lives at `_render_graph` in `anthropic_render.py`;
 likewise `openai_intake._intake_graph`, `openai_render._render_graph`,
 `google_intake._intake_graph`, `perplexity_intake._intake_graph`.
 
+For the subgraph-composed intakes, the outer graph renders the composed
+step as a single labelled node (`subgraph_pplx_event_dispatch:
+dispatch_event` and `subgraph_google_chunk_dispatch: dispatch_chunk`).
+The inner graphs are exposed at module scope and can be rendered
+standalone:
+
+```python
+from ccproxy.lightllm.graph.perplexity_intake import _event_dispatch_graph
+from ccproxy.lightllm.graph.google_intake import _chunk_dispatch_graph
+print(_event_dispatch_graph.render(title="pplx_event_dispatch", direction="TB"))
+print(_chunk_dispatch_graph.render(title="google_chunk_dispatch", direction="TB"))
+```
+
 Useful for debugging surprising routing, for code reviews, and for
 keeping docs in sync.
 
@@ -973,6 +1103,8 @@ envelope without unwrap).
 | Google adapter | `src/ccproxy/lightllm/adapters/google.py` |
 | Perplexity adapter | `src/ccproxy/lightllm/adapters/perplexity.py` |
 | Envelope helpers | `src/ccproxy/lightllm/adapters/_envelope.py`, `_anthropic_envelope.py`, `_openai_envelope.py` |
+| Typed-tool wire-type mapping | `src/ccproxy/lightllm/adapters/_tool_kinds.py` |
+| `GraphBuilder.add_subgraph` patch | `src/ccproxy/lightllm/graph/_subgraph_patch.py` |
 | Anthropic response FSMs | `src/ccproxy/lightllm/graph/anthropic_{intake,render}.py` |
 | OpenAI response FSMs | `src/ccproxy/lightllm/graph/openai_{intake,render}.py` |
 | Google response FSM | `src/ccproxy/lightllm/graph/google_intake.py` |

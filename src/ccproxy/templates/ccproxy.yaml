@@ -21,6 +21,7 @@ ccproxy:
     - ccproxy.hooks.pplx_thread_inject
     outbound:
     - ccproxy.hooks.gemini_cli
+    - ccproxy.hooks.pplx_stamp_headers
     - ccproxy.hooks.pplx_preflight
     - ccproxy.hooks.inject_mcp_notifications
     - ccproxy.hooks.verbose_mode
@@ -74,7 +75,7 @@ ccproxy:
       provider: gemini
     perplexity_pro:
       auth:
-        file: ~/.config/ccproxy/perplexity-session-token
+        file: ~/.opnix/secrets/perplexity-pro-api-key
         type: file
       fingerprint_profile: chrome131
       host: www.perplexity.ai

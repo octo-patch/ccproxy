@@ -44,7 +44,7 @@ ccproxy:
         command: "jq -r '.claudeAiOauth.accessToken' ~/.claude/.credentials.json"
       host: api.anthropic.com
       path: /v1/messages
-      provider: anthropic    # LiteLLM provider identifier (drives format dispatch)
+      provider: anthropic    # adapter-family name (drives wire-format dispatch)
 
   hooks:
     inbound:
@@ -151,7 +151,7 @@ This does NOT affect the main request/response forwarding path (mitmproxy handle
 
 ### providers
 
-`providers` maps a sentinel suffix to a `Provider` entry: an auth source, a single destination (`host` + `path`), and a LiteLLM `provider` identifier that names the wire format the destination speaks. When ccproxy sees a sentinel key matching `sk-ant-oat-ccproxy-{name}`, the matching `Provider` drives both token injection (`forward_oauth`) and routing (auto-redirect or cross-format `transform` via lightllm).
+`providers` maps a sentinel suffix to a `Provider` entry: an auth source, a single destination (`host` + `path`), and an adapter-family `provider` identifier that names the wire format the destination speaks (one of `anthropic`, `openai`, `google` / `gemini` / `vertex_ai` / `vertex_ai_beta`, `perplexity_pro`; Anthropic-compatible forks like `deepseek` and `zai` use `provider: anthropic`). When ccproxy sees a sentinel key matching `sk-ant-oat-ccproxy-{name}`, the matching `Provider` drives both token injection (`forward_oauth`) and routing (auto-redirect or cross-format `transform` via lightllm).
 
 **Simple form** — auth dispatched as a bare shell command:
 

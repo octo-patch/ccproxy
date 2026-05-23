@@ -18,6 +18,8 @@ from pydantic_ai.messages import (
 from pydantic_ai.settings import ModelSettings
 from pydantic_ai.tools import ToolDefinition
 
+from ccproxy.lightllm.adapters._tool_kinds import ANTHROPIC_TYPED_TOOLS
+
 # pydantic-ai's CachePoint accepts only these two TTLs (Literal['5m', '1h']).
 _SUPPORTED_TTLS: frozenset[str] = frozenset({"5m", "1h"})
 
@@ -41,17 +43,28 @@ _ABSORBED_TOP_LEVEL: frozenset[str] = frozenset(
 
 
 def _parse_tools(raw_tools: Sequence[Any], *, settings: ModelSettings) -> tuple[list[ToolDefinition], bool]:
-    """Parse Anthropic tool definitions."""
+    """Parse Anthropic tool definitions.
+
+    Server-side tools carry a versioned ``type`` discriminator (e.g.
+    ``web_search_20250305``) that maps to a ``ToolPartKind`` in
+    :data:`ANTHROPIC_TYPED_TOOLS`. When matched, ``tool_kind`` is set so the
+    parts_manager's ``_typed_call_part`` promotes the response's
+    ``ToolCallPart`` to its typed subclass (e.g. ``ToolSearchCallPart``).
+    User-defined tools (no ``type`` field) get ``tool_kind=None``.
+    """
     tools: list[ToolDefinition] = []
     cache_ttls: list[str | None] = []
     for tool in raw_tools:
         if not isinstance(tool, dict):
             continue
+        wire_type = tool.get("type")
+        tool_kind = ANTHROPIC_TYPED_TOOLS.get(wire_type) if isinstance(wire_type, str) else None
         tools.append(
             ToolDefinition(
                 name=tool.get("name", ""),
                 description=tool.get("description"),
                 parameters_json_schema=tool.get("input_schema") or {},
+                tool_kind=tool_kind,
             )
         )
         cc = tool.get("cache_control")

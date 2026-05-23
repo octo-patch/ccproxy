@@ -36,7 +36,7 @@
       perplexity_pro = {
         auth = {
           type = "file";
-          file = "~/.config/ccproxy/perplexity-session-token";
+          file = "~/.opnix/secrets/perplexity-pro-api-key";
         };
         host = "www.perplexity.ai";
         path = "/rest/sse/perplexity_ask";
@@ -53,6 +53,7 @@
       ];
       outbound = [
         "ccproxy.hooks.gemini_cli"
+        "ccproxy.hooks.pplx_stamp_headers"
         "ccproxy.hooks.pplx_preflight"
         "ccproxy.hooks.inject_mcp_notifications"
         "ccproxy.hooks.verbose_mode"
