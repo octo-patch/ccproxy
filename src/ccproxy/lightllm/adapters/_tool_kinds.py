@@ -15,9 +15,28 @@ Tools whose wire ``type`` is not in this map (e.g. user-defined Anthropic
 ``{"type": "function", ...}`` tools) get ``tool_kind=None`` — the typed
 promotion path is a no-op for them.
 
-Add new entries as ``pydantic_ai.messages.ToolPartKind`` gains values.
-The current registered set is documented in
-``pydantic_ai/messages.py`` under the ``ToolPartKind`` ``Literal`` alias.
+**Scope constraint** — pydantic-ai's :data:`ToolPartKind` is currently
+``Literal['tool-search']``. The only registered narrowers (in
+``pydantic_ai._tool_search``) are ``_TOOL_CALL_NARROWERS['tool-search']``
+and ``_NATIVE_CALL_NARROWERS['tool-search']``. Mapping a non-search wire
+``type`` to ``'tool-search'`` would mis-promote it; mapping to any other
+string is a no-op (the narrower lookup returns ``None``). So today only
+search-flavored server-side tools should appear in this map. When
+pydantic-ai adds new kinds (e.g. ``'tool-browse'``, ``'tool-code'``),
+extend with the corresponding wire types here.
+
+Currently shipped Anthropic dated tool variants per ``anthropic/types/``:
+
+- ``web_search_20250305`` (mapped)
+- ``web_search_20260209`` (mapped)
+- ``web_fetch_20250910`` / ``web_fetch_20260209`` / ``web_fetch_20260309`` — fetch, not search
+- ``bash_20241022`` / ``bash_20250124`` — bash, no ToolPartKind yet
+- ``code_execution_20250522`` / ``code_execution_20250825`` / ``code_execution_20260120`` — code, no ToolPartKind yet
+- ``computer_20241022`` / ``computer_20250124`` / ``computer_20251124`` — computer-use, no ToolPartKind yet
+- ``text_editor_20241022`` / ``text_editor_20250124`` / ``text_editor_20250429`` /
+  ``text_editor_20250728`` — file editor, no ToolPartKind yet
+
+Add new ``web_search_*`` dated variants as Anthropic ships them.
 """
 
 from __future__ import annotations
@@ -29,17 +48,20 @@ if TYPE_CHECKING:
 
 
 # Anthropic server-side tools — wire ``type`` discriminator → ``ToolPartKind``.
-# Versioned ``type`` strings (e.g. ``web_search_20250305``) are stable per
-# Anthropic's release notes; add new dated variants here as they ship.
+# Only ``web_search_*`` variants map today; the other Anthropic server-side
+# tool families (bash, code_execution, computer, text_editor, web_fetch) don't
+# have ``ToolPartKind`` equivalents in pydantic-ai yet.
 ANTHROPIC_TYPED_TOOLS: dict[str, ToolPartKind] = {
     "web_search_20250305": "tool-search",
+    "web_search_20260209": "tool-search",
 }
 
 
 # OpenAI typed tool wire shapes — ``type`` discriminator → ``ToolPartKind``.
-# OpenAI Chat Completions tools are almost always ``{"type": "function", ...}``
-# (user-defined); built-in server-side tools like ``web_search`` live in the
-# Responses API and are not currently routed through ccproxy's Chat Completions
-# listener. The dict is intentionally empty — extend when adding Responses API
-# support or other typed OpenAI tools.
+# OpenAI Chat Completions tools are typed ``Literal["function"]`` only
+# (verified against ``openai/types/chat/chat_completion_function_tool.py``);
+# all server-side tools (``web_search_preview``, ``file_search``,
+# ``code_interpreter``) live in the Responses API. ccproxy's listener
+# currently routes ``/v1/chat/completions`` only, so this dict stays
+# intentionally empty. Populate when ccproxy adds a Responses API listener.
 OPENAI_TYPED_TOOLS: dict[str, ToolPartKind] = {}

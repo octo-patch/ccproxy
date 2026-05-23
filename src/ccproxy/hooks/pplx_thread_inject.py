@@ -20,8 +20,8 @@ hook implements the three-mode resolution chain:
    ``query_source: "home"`` (fresh thread).
 
 Resolved identifiers go into ``ctx._body["pplx"]`` so they flow through
-:class:`PerplexityProConfig.transform_request` →
-``_build_pplx_payload(extras=optional_params["pplx"])`` chain.
+:class:`~ccproxy.lightllm.adapters.perplexity.PerplexityAdapter.render` →
+``_build_pplx_payload(extras=ctx.raw_extras["pplx"])`` chain.
 """
 
 from __future__ import annotations

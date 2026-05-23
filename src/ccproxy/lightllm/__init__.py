@@ -18,7 +18,6 @@ from ccproxy.lightllm.parsed import ListenerFormat
 from ccproxy.lightllm.pplx import (
     LightllmException,
     PerplexityException,
-    PerplexityProConfig,
 )
 
 __all__ = [
@@ -26,7 +25,6 @@ __all__ = [
     "LightllmException",
     "ListenerFormat",
     "PerplexityException",
-    "PerplexityProConfig",
     "UnsupportedUpstreamError",
     "dispatch_dump",
     "dispatch_dump_sync",

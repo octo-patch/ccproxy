@@ -169,9 +169,12 @@ class ParsedRequest:
     raw_extras: dict[str, Any] = field(default_factory=dict)
 ```
 
-It's used primarily by tests as a test stub and by the inspector
-flow-enrichment path via `_envelope.parse_request()`. Production hot path
-goes through `Context` directly.
+It's a **test-only helper today**. The convenience wrappers
+`_envelope.parse_request()` and `_envelope.render_request()` build it for
+roundtrip tests; production code (including the inspector) uses `Context`
+directly via `Context.parse_sync()`, which calls
+`parse_request_into_fields()` to populate Context's lazy-parse slots
+in-place without an intermediate bundle.
 
 ### `ModelMessage` and `ModelResponseStreamEvent` — the conversation IR
 

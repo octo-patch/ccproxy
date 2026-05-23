@@ -13,8 +13,8 @@ The render side lives on the adapters themselves —
 :class:`~ccproxy.lightllm.adapters.LLMRenderInput` (the Protocol Context
 satisfies) and return wire bytes directly.
 
-:func:`parse_request` and :func:`render_request` are thin wrappers used
-by tests and inspector flow enrichment; production code uses
+:func:`parse_request` and :func:`render_request` are thin test-fixture
+wrappers around :func:`parse_request_into_fields`; production code uses
 :meth:`Context.parse_sync` and :func:`dispatch_dump_sync` directly.
 """
 
@@ -87,9 +87,10 @@ def parse_request_into_fields(
 def parse_request(body: dict[str, Any], *, listener_format: ListenerFormat) -> ParsedRequest:
     """Parse ``body`` into a :class:`ParsedRequest` bundle.
 
-    Convenience wrapper for tests and inspector flow enrichment.
-    Production code uses :meth:`Context.parse_sync` which routes through
-    :func:`parse_request_into_fields`.
+    Test-fixture convenience wrapper. Production code (including the
+    inspector) uses :meth:`Context.parse_sync` which routes through
+    :func:`parse_request_into_fields` to populate Context's lazy-parse
+    slots in place.
     """
     fields = _parse_fields(body=body, listener_format=listener_format)
     return ParsedRequest(
@@ -105,7 +106,7 @@ def parse_request(body: dict[str, Any], *, listener_format: ListenerFormat) -> P
 def render_request(parsed: ParsedRequest, *, listener_format: ListenerFormat) -> bytes:
     """Render a :class:`ParsedRequest` to wire bytes via the matching adapter.
 
-    Convenience wrapper for tests and inspector flow enrichment. Production
+    Test-fixture convenience wrapper. Production
     code routes through :func:`ccproxy.lightllm.graph.dispatch_dump_sync`
     with a :class:`~ccproxy.pipeline.context.Context`.
     """

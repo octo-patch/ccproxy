@@ -13,7 +13,6 @@ from ccproxy.lightllm.pplx import (
     PERPLEXITY_BLOCK_USE_CASES,
     PERPLEXITY_MODELS,
     PerplexityClarifyingQuestionsError,
-    PerplexityProConfig,
     StreamState,
     _build_pplx_payload,
     _extract_deltas,
@@ -27,12 +26,6 @@ from ccproxy.lightllm.pplx_threads import (
     clear_pplx_threads,
     get_pplx_thread_store,
 )
-from ccproxy.lightllm.registry import get_config
-
-
-def test_registry_resolves_perplexity_pro() -> None:
-    config = get_config("perplexity_pro", "perplexity/best")
-    assert type(config).__name__ == "PerplexityProConfig"
 
 
 def test_models_catalog_has_known_ids() -> None:
@@ -159,38 +152,6 @@ def test_flatten_last_user_turn_extracts_only_new_turn() -> None:
         )
         == ""
     )
-
-
-def test_transform_request_followup_sends_only_new_turn() -> None:
-    config = PerplexityProConfig()
-    payload = config.transform_request(
-        model="perplexity/best",
-        messages=[
-            {"role": "user", "content": "Name a fruit"},
-            {"role": "assistant", "content": "Apple"},
-            {"role": "user", "content": "Name a vegetable"},
-        ],
-        optional_params={"pplx": {"last_backend_uuid": "B1"}},
-    )
-    assert payload["query_str"] == "Name a vegetable"
-    assert payload["params"]["dsl_query"] == "Name a vegetable"
-    assert payload["params"]["query_source"] == "followup"
-    assert payload["params"]["last_backend_uuid"] == "B1"
-
-
-def test_transform_request_first_turn_still_flattens_full_history() -> None:
-    config = PerplexityProConfig()
-    payload = config.transform_request(
-        model="perplexity/best",
-        messages=[
-            {"role": "system", "content": "helpful"},
-            {"role": "user", "content": "what is quantum?"},
-        ],
-        optional_params={},
-    )
-    assert payload["query_str"].startswith("[System]: helpful")
-    assert "what is quantum?" in payload["query_str"]
-    assert payload["params"]["query_source"] == "home"
 
 
 def test_parse_sse_line_basic() -> None:
