@@ -50,3 +50,9 @@ def apply_shape(shape: Shape, ctx: Context, preserve_headers: Sequence[str]) -> 
     except (json.JSONDecodeError, TypeError):
         parsed = {}
     ctx._body = parsed if isinstance(parsed, dict) else {}
+
+    # Invalidate the cached IR — earlier hooks may have populated
+    # ``_cached_messages`` / ``_cached_settings`` / etc. from the pre-shape
+    # body via the typed accessors. Without this drop, ``Context.commit()``
+    # would re-render the IR back to ``_body``, clobbering the shape's bytes.
+    ctx.invalidate_parsed()
