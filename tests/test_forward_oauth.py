@@ -34,7 +34,7 @@ def _make_provider(*, value: str = "tok", header: str | None = None) -> Provider
         auth=CommandAuthSource(command=f"printf '%s' {value}", header=header),
         host="api.example.com",
         path="/v1/messages",
-        provider="anthropic",
+        type="anthropic",
     )
 
 

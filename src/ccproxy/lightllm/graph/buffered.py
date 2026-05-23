@@ -46,8 +46,8 @@ assembled :class:`ModelResponsePartsManager.get_parts()` list after the
 intake drains, then serializes those parts into the listener's buffered
 JSON shape:
 
-* :data:`ListenerFormat.OPENAI_CHAT` → OpenAI ``ChatCompletion`` JSON.
-* :data:`ListenerFormat.ANTHROPIC_MESSAGES` → Anthropic ``BetaMessage``
+* :data:`InboundFormat.OPENAI_CHAT` → OpenAI ``ChatCompletion`` JSON.
+* :data:`InboundFormat.ANTHROPIC_MESSAGES` → Anthropic ``BetaMessage``
   JSON.
 
 The function is sync. For one-shot per-response use the simpler per-call
@@ -74,7 +74,7 @@ from ccproxy.lightllm.graph import (
     UnsupportedUpstreamError,
     dispatch_intake,
 )
-from ccproxy.lightllm.parsed import ListenerFormat
+from ccproxy.lightllm.parsed import InboundFormat
 
 if TYPE_CHECKING:
     from pydantic_ai.messages import ModelResponsePart
@@ -508,8 +508,8 @@ def _parts_to_anthropic_message(
 def transform_buffered_response_sync(
     *,
     raw_bytes: bytes,
-    upstream_provider: str,
-    listener_format: ListenerFormat,
+    provider_type: str,
+    inbound_format: InboundFormat,
     model: str,
     request_params: ModelRequestParameters,
 ) -> bytes:
@@ -531,41 +531,41 @@ def transform_buffered_response_sync(
     listener's buffered JSON shape (OpenAI ``ChatCompletion`` or Anthropic
     ``BetaMessage``).
     """
-    if upstream_provider in _ANTHROPIC_COMPATIBLE:
+    if provider_type in _ANTHROPIC_COMPATIBLE:
         body = _parse_json_body(raw_bytes)
         synthetic_sse = _synthesize_anthropic_sse(body) if isinstance(body, dict) else b""
-    elif upstream_provider == "openai":
+    elif provider_type == "openai":
         body = _parse_json_body(raw_bytes)
         synthetic_sse = _synthesize_openai_sse(body) if isinstance(body, dict) else b""
-    elif upstream_provider in _GOOGLE_COMPATIBLE:
+    elif provider_type in _GOOGLE_COMPATIBLE:
         body = _parse_json_body(raw_bytes)
         synthetic_sse = _synthesize_google_sse(body) if isinstance(body, dict) else b""
-    elif upstream_provider == "perplexity_pro":
+    elif provider_type == "perplexity_pro":
         synthetic_sse = raw_bytes
     else:
         raise UnsupportedUpstreamError(
-            f"no buffered transform for upstream_provider={upstream_provider!r}"
+            f"no buffered transform for provider_type={provider_type!r}"
         )
 
     intake = dispatch_intake(
-        upstream_provider=upstream_provider,
+        provider_type=provider_type,
         model=model,
         request_params=request_params,
     )
     parts = _run_intake_one_shot(intake=intake, raw=synthetic_sse)
 
-    if listener_format is ListenerFormat.OPENAI_CHAT:
+    if inbound_format is InboundFormat.OPENAI_CHAT:
         out_dict = _parts_to_openai_chat_completion(
             parts=parts,
             model=model,
             provider_response_id=_intake_provider_response_id(intake),
             finish_reason=_intake_finish_reason(intake),
         )
-    elif listener_format is ListenerFormat.ANTHROPIC_MESSAGES:
+    elif inbound_format is InboundFormat.ANTHROPIC_MESSAGES:
         out_dict = _parts_to_anthropic_message(parts=parts, model=model)
     else:
         raise UnsupportedListenerError(
-            f"no buffered renderer for listener_format={listener_format}"
+            f"no buffered renderer for inbound_format={inbound_format}"
         )
 
     return json.dumps(out_dict, separators=(",", ":")).encode()

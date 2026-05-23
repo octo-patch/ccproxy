@@ -141,3 +141,34 @@ class HookDAG:
             if hook_name in hook_deps:
                 dependents.add(name)
         return dependents
+
+    def render(self, *, title: str = "hook_dag", direction: str = "LR") -> str:
+        """Render the topo-sorted hook DAG as mermaid ``stateDiagram-v2`` markup.
+
+        Walks ``self.execution_order``, emits one state node per hook, and one
+        edge for each (writer, reader) pair declared via the hook's
+        ``reads``/``writes`` glom dot-paths. ``[*]`` markers bracket sources
+        (no in-edges) and sinks (no out-edges).
+
+        Suitable for paste into the mermaid live editor or rendering tools that
+        accept ``stateDiagram-v2`` syntax.
+        """
+        deps = self._build_dependencies()
+
+        lines: list[str] = ["---", f"title: {title}", "---", "stateDiagram-v2", f"  direction {direction}"]
+
+        for name in self._execution_order:
+            lines.append(f"  state \"{name}\" as {name}")
+
+        sources = {n for n in self._execution_order if not deps[n]}
+        sinks = {n for n in self._execution_order if not self.get_dependents(n)}
+
+        for name in self._execution_order:
+            if name in sources:
+                lines.append(f"  [*] --> {name}")
+            for writer in deps[name]:
+                lines.append(f"  {writer} --> {name}")
+            if name in sinks:
+                lines.append(f"  {name} --> [*]")
+
+        return "\n".join(lines) + "\n"

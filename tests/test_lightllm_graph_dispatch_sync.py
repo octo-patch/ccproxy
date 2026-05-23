@@ -41,7 +41,7 @@ def _make_parsed(
 
 
 @pytest.mark.parametrize(
-    ("provider", "model"),
+    ("provider_type", "model"),
     [
         ("anthropic", "claude-3"),
         ("deepseek", "deepseek-chat"),
@@ -52,10 +52,10 @@ def _make_parsed(
         ("vertex_ai", "gemini-1.5-pro"),
     ],
 )
-def test_dispatch_dump_sync_matches_async(provider: str, model: str) -> None:
+def test_dispatch_dump_sync_matches_async(provider_type: str, model: str) -> None:
     parsed = _make_parsed(model=model)
-    expected = asyncio.run(dispatch_dump(parsed, provider=provider))
-    actual = dispatch_dump_sync(parsed, provider=provider)
+    expected = asyncio.run(dispatch_dump(parsed, provider_type=provider_type))
+    actual = dispatch_dump_sync(parsed, provider_type=provider_type)
     assert actual == expected
 
 
@@ -77,12 +77,12 @@ def test_dispatch_dump_sync_matches_async_perplexity_pro() -> None:
         "ccproxy.lightllm.pplx.uuid.uuid4",
         return_value="33333333-3333-3333-3333-333333333333",
     ):
-        expected = asyncio.run(dispatch_dump(parsed, provider="perplexity_pro"))
+        expected = asyncio.run(dispatch_dump(parsed, provider_type="perplexity_pro"))
     with patch(
         "ccproxy.lightllm.pplx.uuid.uuid4",
         return_value="33333333-3333-3333-3333-333333333333",
     ):
-        actual = dispatch_dump_sync(parsed, provider="perplexity_pro")
+        actual = dispatch_dump_sync(parsed, provider_type="perplexity_pro")
 
     assert actual == expected
 
@@ -90,4 +90,4 @@ def test_dispatch_dump_sync_matches_async_perplexity_pro() -> None:
 def test_dispatch_dump_sync_raises_for_unknown_provider() -> None:
     parsed = _make_parsed()
     with pytest.raises(UnsupportedUpstreamError, match="no outbound renderer"):
-        dispatch_dump_sync(parsed, provider="not-a-real-provider")
+        dispatch_dump_sync(parsed, provider_type="not-a-real-provider")

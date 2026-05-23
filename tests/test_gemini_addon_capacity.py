@@ -73,7 +73,7 @@ def _make_flow(
 
     record = FlowRecord(direction="inbound")
     record.transform = TransformMeta(
-        provider="gemini",
+        provider_type="gemini",
         model=request_model,
         request_data={},
         is_streaming=is_streaming,
@@ -703,7 +703,7 @@ class TestResponseHeadersDeferEntrypoint:
         flow.response.stream = None
         record = FlowRecord(direction="inbound")
         record.transform = TransformMeta(
-            provider="gemini",
+            provider_type="gemini",
             model="gemini-3.1-pro-preview",
             request_data={},
             is_streaming=True,

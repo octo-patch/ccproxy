@@ -38,7 +38,7 @@ def _make_gemini_flow(
     content: bytes | None = None,
     content_type: str = "text/event-stream",
     oauth_provider: str | None = "gemini",
-    transform_provider: str = "gemini",
+    transform_provider_type: str = "gemini",
     include_transform: bool = True,
 ) -> MagicMock:
     """Build a mock flow approximating a Gemini-routed request/response."""
@@ -51,7 +51,7 @@ def _make_gemini_flow(
     if include_transform:
         record = FlowRecord(direction="inbound")
         record.transform = TransformMeta(
-            provider=transform_provider,
+            provider_type=transform_provider_type,
             model="gemini-2.5-flash",
             request_data={},
             is_streaming=is_streaming,

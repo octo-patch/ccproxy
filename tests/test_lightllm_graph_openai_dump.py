@@ -13,7 +13,7 @@ from typing import Any, cast
 import pytest
 
 from ccproxy.lightllm.adapters._envelope import parse_request, render_request
-from ccproxy.lightllm.parsed import ListenerFormat
+from ccproxy.lightllm.parsed import InboundFormat
 
 Roundtrip = Callable[[dict[str, Any]], dict[str, Any]]
 
@@ -23,8 +23,8 @@ def roundtrip() -> Roundtrip:
     """Inbound parse (adapter) → outbound render (adapter) → JSON-decode."""
 
     def _rt(body: dict[str, Any]) -> dict[str, Any]:
-        parsed = parse_request(body, listener_format=ListenerFormat.OPENAI_CHAT)
-        out = render_request(parsed, listener_format=ListenerFormat.OPENAI_CHAT)
+        parsed = parse_request(body, inbound_format=InboundFormat.OPENAI_CHAT)
+        out = render_request(parsed, inbound_format=InboundFormat.OPENAI_CHAT)
         return cast("dict[str, Any]", json.loads(out))
 
     return _rt

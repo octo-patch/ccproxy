@@ -581,6 +581,7 @@ class TestMainFunction:
             check_proxy=False,
             check_inspect=False,
             check_mcp=False,
+            mermaid=False,
         )
 
     @patch("ccproxy.cli.show_status")
@@ -597,6 +598,7 @@ class TestMainFunction:
             check_proxy=False,
             check_inspect=False,
             check_mcp=False,
+            mermaid=False,
         )
 
 

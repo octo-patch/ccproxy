@@ -54,7 +54,7 @@ from ccproxy.lightllm.adapters._openai_envelope import (
 )
 from ccproxy.lightllm.adapters.anthropic import AnthropicAdapter
 from ccproxy.lightllm.adapters.openai_chat import OpenAIChatAdapter
-from ccproxy.lightllm.parsed import ListenerFormat, ParsedRequest
+from ccproxy.lightllm.parsed import InboundFormat, ParsedRequest
 
 if TYPE_CHECKING:
     from ccproxy.pipeline.context import Context
@@ -73,18 +73,18 @@ class _ParsedFields:
 def parse_request_into_fields(
     *,
     body: dict[str, Any],
-    listener_format: ListenerFormat,
+    inbound_format: InboundFormat,
     ctx: Context,
 ) -> None:
     """Parse ``body`` and populate ``ctx``'s lazy-parsed slots."""
-    fields = _parse_fields(body=body, listener_format=listener_format)
+    fields = _parse_fields(body=body, inbound_format=inbound_format)
     ctx._cached_messages = fields.messages
     ctx._cached_request_parameters = fields.request_parameters
     ctx._cached_settings = fields.settings
     ctx._cached_raw_extras = fields.raw_extras
 
 
-def parse_request(body: dict[str, Any], *, listener_format: ListenerFormat) -> ParsedRequest:
+def parse_request(body: dict[str, Any], *, inbound_format: InboundFormat) -> ParsedRequest:
     """Parse ``body`` into a :class:`ParsedRequest` bundle.
 
     Test-fixture convenience wrapper. Production code (including the
@@ -92,7 +92,7 @@ def parse_request(body: dict[str, Any], *, listener_format: ListenerFormat) -> P
     :func:`parse_request_into_fields` to populate Context's lazy-parse
     slots in place.
     """
-    fields = _parse_fields(body=body, listener_format=listener_format)
+    fields = _parse_fields(body=body, inbound_format=inbound_format)
     return ParsedRequest(
         model=str(body.get("model", "")),
         messages=fields.messages,
@@ -103,26 +103,26 @@ def parse_request(body: dict[str, Any], *, listener_format: ListenerFormat) -> P
     )
 
 
-def render_request(parsed: ParsedRequest, *, listener_format: ListenerFormat) -> bytes:
+def render_request(parsed: ParsedRequest, *, inbound_format: InboundFormat) -> bytes:
     """Render a :class:`ParsedRequest` to wire bytes via the matching adapter.
 
     Test-fixture convenience wrapper. Production
     code routes through :func:`ccproxy.lightllm.graph.dispatch_dump_sync`
     with a :class:`~ccproxy.pipeline.context.Context`.
     """
-    if listener_format is ListenerFormat.ANTHROPIC_MESSAGES:
+    if inbound_format is InboundFormat.ANTHROPIC_MESSAGES:
         return AnthropicAdapter.render(parsed)
-    if listener_format is ListenerFormat.OPENAI_CHAT:
+    if inbound_format is InboundFormat.OPENAI_CHAT:
         return OpenAIChatAdapter.render(parsed)
-    raise ValueError(f"no IR renderer for listener_format={listener_format}")
+    raise ValueError(f"no IR renderer for inbound_format={inbound_format}")
 
 
-def _parse_fields(*, body: dict[str, Any], listener_format: ListenerFormat) -> _ParsedFields:
-    if listener_format is ListenerFormat.ANTHROPIC_MESSAGES:
+def _parse_fields(*, body: dict[str, Any], inbound_format: InboundFormat) -> _ParsedFields:
+    if inbound_format is InboundFormat.ANTHROPIC_MESSAGES:
         return _parse_anthropic(body)
-    if listener_format is ListenerFormat.OPENAI_CHAT:
+    if inbound_format is InboundFormat.OPENAI_CHAT:
         return _parse_openai_chat(body)
-    raise ValueError(f"no IR parser for listener_format={listener_format}")
+    raise ValueError(f"no IR parser for inbound_format={inbound_format}")
 
 
 # ── Anthropic ───────────────────────────────────────────────────────────────

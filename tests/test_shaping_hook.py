@@ -21,7 +21,7 @@ from ccproxy.shaping.store import ShapeStore, clear_store_instance
 
 @dataclass
 class _MockTransformMeta:
-    provider: str
+    provider_type: str
     model: str = ""
     request_data: dict[str, Any] = field(default_factory=dict)
     is_streaming: bool = False
@@ -88,7 +88,7 @@ def _make_flow(
         flow.client_conn.proxy_mode = MagicMock()
 
     record = _MockRecord(
-        transform=_MockTransformMeta(provider=provider) if has_transform else None,
+        transform=_MockTransformMeta(provider_type=provider) if has_transform else None,
     )
     flow.metadata[InspectorMeta.RECORD] = record
     if oauth_injected:

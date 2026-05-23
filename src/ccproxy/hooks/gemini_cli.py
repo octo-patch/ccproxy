@@ -210,7 +210,7 @@ def gemini_cli(ctx: Context, _: dict[str, Any]) -> Context:
     record = flow.metadata.get(InspectorMeta.RECORD)
     if record is not None and getattr(record, "transform", None) is None:
         record.transform = TransformMeta(
-            provider="gemini",
+            provider_type="gemini",
             model=model,
             request_data=dict(ctx._body) if isinstance(ctx._body, dict) else {},
             is_streaming=is_streaming,

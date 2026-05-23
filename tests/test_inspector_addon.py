@@ -496,12 +496,12 @@ class TestResponseHeadersEdgeCases:
 
         addon = InspectorAddon()
         meta = TransformMeta(
-            provider="anthropic",
+            provider_type="anthropic",
             model="claude-3",
             request_data={"messages": []},
             is_streaming=True,
             mode="transform",
-            listener_format="openai_chat",
+            inbound_format="openai_chat",
             request_parameters=ModelRequestParameters(),
         )
         record = FlowRecord(direction="inbound", transform=meta)

@@ -65,7 +65,7 @@ def _make_flow(
 def _set_provider(name: str, *, fingerprint_profile: str | None) -> None:
     provider = Provider(
         host="api.anthropic.com",
-        provider="anthropic",
+        type="anthropic",
         fingerprint_profile=fingerprint_profile,
     )
     cfg = CCProxyConfig(providers={name: provider})

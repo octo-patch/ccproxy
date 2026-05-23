@@ -79,8 +79,8 @@ ClientRequest = HttpSnapshot
 class TransformMeta:
     """Transform context for the response phase."""
 
-    provider: str
-    """Destination provider name for lightllm dispatch."""
+    provider_type: str
+    """Destination provider wire-dialect for lightllm dispatch."""
 
     model: str
     """Destination model name."""
@@ -94,12 +94,12 @@ class TransformMeta:
     mode: Literal["redirect", "transform"] = "redirect"
     """Transform mode: redirect preserves body, transform rewrites it."""
 
-    listener_format: str = "unknown"
-    """Listener-side wire format (anthropic_messages / openai_chat / unknown).
+    inbound_format: str = "unknown"
+    """Inbound (listener-side) wire format (anthropic_messages / openai_chat / unknown).
 
-    Stamped by the transform router from ``Context._listener_format``.
+    Stamped by the transform router from ``Context._inbound_format``.
     Consumed by the response-side pipeline to select the matching
-    listener renderer. String-valued for dataclass-hashability.
+    inbound renderer. String-valued for dataclass-hashability.
     """
 
     request_parameters: Any = None

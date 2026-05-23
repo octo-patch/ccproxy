@@ -23,7 +23,7 @@ from pydantic_ai.models import ModelRequestParameters
 
 from ccproxy.lightllm.graph import dispatch_intake, dispatch_render
 from ccproxy.lightllm.graph.sse_pipeline import SSEPipeline
-from ccproxy.lightllm.parsed import ListenerFormat
+from ccproxy.lightllm.parsed import InboundFormat
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -72,15 +72,15 @@ def _build_anthropic_text_sse(text: str) -> bytes:
 
 
 def _make_fsm_pipeline(
-    *, upstream_provider: str = "anthropic", listener_format: ListenerFormat
+    *, provider_type: str = "anthropic", inbound_format: InboundFormat
 ) -> SSEPipeline:
     intake = dispatch_intake(
-        upstream_provider=upstream_provider,
+        provider_type=provider_type,
         model="claude-3-5-haiku-20241022",
         request_params=ModelRequestParameters(),
     )
     render = dispatch_render(
-        listener_format=listener_format,
+        inbound_format=inbound_format,
         model="claude-3-5-haiku-20241022",
     )
     return SSEPipeline(intake=intake, render=render)
@@ -127,13 +127,13 @@ class TestChunkBoundaryRobustness:
     def test_anthropic_to_anthropic(self, chunk_size: int) -> None:
         upstream_bytes = _build_anthropic_text_sse("chunked content")
 
-        reference = _make_fsm_pipeline(listener_format=ListenerFormat.ANTHROPIC_MESSAGES)
+        reference = _make_fsm_pipeline(inbound_format=InboundFormat.ANTHROPIC_MESSAGES)
         try:
             reference_out = _drive_pipeline(reference, upstream_bytes, chunk_size=0)
         finally:
             reference.close()
 
-        candidate = _make_fsm_pipeline(listener_format=ListenerFormat.ANTHROPIC_MESSAGES)
+        candidate = _make_fsm_pipeline(inbound_format=InboundFormat.ANTHROPIC_MESSAGES)
         try:
             candidate_out = _drive_pipeline(candidate, upstream_bytes, chunk_size=chunk_size)
         finally:
@@ -144,13 +144,13 @@ class TestChunkBoundaryRobustness:
     def test_anthropic_to_openai(self, chunk_size: int) -> None:
         upstream_bytes = _build_anthropic_text_sse("chunked cross-format")
 
-        reference = _make_fsm_pipeline(listener_format=ListenerFormat.OPENAI_CHAT)
+        reference = _make_fsm_pipeline(inbound_format=InboundFormat.OPENAI_CHAT)
         try:
             reference_out = _drive_pipeline(reference, upstream_bytes, chunk_size=0)
         finally:
             reference.close()
 
-        candidate = _make_fsm_pipeline(listener_format=ListenerFormat.OPENAI_CHAT)
+        candidate = _make_fsm_pipeline(inbound_format=InboundFormat.OPENAI_CHAT)
         try:
             candidate_out = _drive_pipeline(candidate, upstream_bytes, chunk_size=chunk_size)
         finally:
@@ -169,7 +169,7 @@ class TestEndOfStream:
 
     def test_anthropic_eos_emits_message_stop(self) -> None:
         upstream_bytes = _build_anthropic_text_sse("eos test")
-        pipeline = _make_fsm_pipeline(listener_format=ListenerFormat.ANTHROPIC_MESSAGES)
+        pipeline = _make_fsm_pipeline(inbound_format=InboundFormat.ANTHROPIC_MESSAGES)
         try:
             out = _drive_pipeline(pipeline, upstream_bytes, chunk_size=0)
         finally:
@@ -181,7 +181,7 @@ class TestEndOfStream:
 
     def test_openai_eos_emits_done_terminator(self) -> None:
         upstream_bytes = _build_anthropic_text_sse("openai eos test")
-        pipeline = _make_fsm_pipeline(listener_format=ListenerFormat.OPENAI_CHAT)
+        pipeline = _make_fsm_pipeline(inbound_format=InboundFormat.OPENAI_CHAT)
         try:
             out = _drive_pipeline(pipeline, upstream_bytes, chunk_size=0)
         finally:
@@ -193,7 +193,7 @@ class TestEndOfStream:
     def test_empty_data_without_content_emits_terminator(self) -> None:
         """A pipeline that sees only ``b""`` still emits the render terminator
         so the client gets a well-formed (empty) end-of-stream."""
-        pipeline = _make_fsm_pipeline(listener_format=ListenerFormat.ANTHROPIC_MESSAGES)
+        pipeline = _make_fsm_pipeline(inbound_format=InboundFormat.ANTHROPIC_MESSAGES)
         try:
             result = pipeline(b"")
         finally:
@@ -215,14 +215,14 @@ class TestLifecycle:
     """Explicit close, idempotency, post-close behavior."""
 
     def test_explicit_close_is_idempotent(self) -> None:
-        pipeline = _make_fsm_pipeline(listener_format=ListenerFormat.ANTHROPIC_MESSAGES)
+        pipeline = _make_fsm_pipeline(inbound_format=InboundFormat.ANTHROPIC_MESSAGES)
         pipeline.close()
         # Second close must not raise.
         pipeline.close()
 
     def test_close_then_feed_passes_through(self) -> None:
         """After explicit close, the loop is gone; further chunks pass through."""
-        pipeline = _make_fsm_pipeline(listener_format=ListenerFormat.ANTHROPIC_MESSAGES)
+        pipeline = _make_fsm_pipeline(inbound_format=InboundFormat.ANTHROPIC_MESSAGES)
         pipeline.close()
         result = pipeline(b"junk bytes after close")
         # The pipeline can't process anything, so it returns the input bytes.
@@ -231,7 +231,7 @@ class TestLifecycle:
     def test_close_after_eos_is_noop(self) -> None:
         """EOS path tears down the loop; ``close()`` afterward must not crash."""
         upstream_bytes = _build_anthropic_text_sse("close after eos")
-        pipeline = _make_fsm_pipeline(listener_format=ListenerFormat.ANTHROPIC_MESSAGES)
+        pipeline = _make_fsm_pipeline(inbound_format=InboundFormat.ANTHROPIC_MESSAGES)
         _drive_pipeline(pipeline, upstream_bytes, chunk_size=0)
         pipeline.close()
         pipeline.close()
@@ -249,8 +249,8 @@ class TestConcurrentPipelines:
         a_bytes = _build_anthropic_text_sse("pipeline A content")
         b_bytes = _build_anthropic_text_sse("pipeline B content")
 
-        pa = _make_fsm_pipeline(listener_format=ListenerFormat.ANTHROPIC_MESSAGES)
-        pb = _make_fsm_pipeline(listener_format=ListenerFormat.ANTHROPIC_MESSAGES)
+        pa = _make_fsm_pipeline(inbound_format=InboundFormat.ANTHROPIC_MESSAGES)
+        pb = _make_fsm_pipeline(inbound_format=InboundFormat.ANTHROPIC_MESSAGES)
         try:
             a_out = _drive_pipeline(pa, a_bytes, chunk_size=16)
             b_out = _drive_pipeline(pb, b_bytes, chunk_size=16)
@@ -275,7 +275,7 @@ class TestRawBytesTeeing:
 
     def test_upstream_raw_bytes_tee(self) -> None:
         upstream_bytes = _build_anthropic_text_sse("teed bytes")
-        pipeline = _make_fsm_pipeline(listener_format=ListenerFormat.ANTHROPIC_MESSAGES)
+        pipeline = _make_fsm_pipeline(inbound_format=InboundFormat.ANTHROPIC_MESSAGES)
         try:
             for start in range(0, len(upstream_bytes), 16):
                 pipeline(upstream_bytes[start : start + 16])
@@ -294,7 +294,7 @@ class TestErrorHandling:
     """Failures during feed don't stall mitmproxy — the chunk passes through."""
 
     def test_malformed_chunk_does_not_crash(self) -> None:
-        pipeline = _make_fsm_pipeline(listener_format=ListenerFormat.ANTHROPIC_MESSAGES)
+        pipeline = _make_fsm_pipeline(inbound_format=InboundFormat.ANTHROPIC_MESSAGES)
         try:
             result = pipeline(b"event: unknown\ndata: {not valid json\n\n")
         finally:

@@ -76,7 +76,7 @@ operate on.
 
 ```
 src/ccproxy/lightllm/
-├── parsed.py             ParsedRequest (reduced role), ListenerFormat
+├── parsed.py             ParsedRequest (reduced role), InboundFormat
 ├── registry.py           Local Perplexity Pro registration (no LiteLLM fallback)
 ├── pplx.py               Perplexity Pro config + exceptions (no LiteLLM bases)
 ├── pplx_steps.py         Perplexity step trail renderer
@@ -195,12 +195,12 @@ Streaming uses `ModelResponseStreamEvent` — a union of `PartStartEvent`,
 pydantic-ai's `ModelResponsePartsManager` and yields these events; the
 render FSM consumes them.
 
-### `ListenerFormat` — what the client sent
+### `InboundFormat` — what the client sent (inbound wire format)
 
 `src/ccproxy/lightllm/parsed.py`:
 
 ```python
-class ListenerFormat(StrEnum):  # StrEnum native in pydantic_graph >=1.99.0
+class InboundFormat(StrEnum):  # StrEnum native in pydantic_graph >=1.99.0
     UNKNOWN = "unknown"
     ANTHROPIC_MESSAGES = "anthropic_messages"   # /v1/messages
     OPENAI_CHAT = "openai_chat"                 # /v1/chat/completions
@@ -439,7 +439,7 @@ request_params = ctx.request_parameters
 
 # Outbound (sync — from inside mitmproxy hooks or pipeline executors)
 # ctx satisfies LLMRenderInput Protocol
-wire_bytes: bytes = dispatch_dump_sync(ctx, provider="anthropic")
+wire_bytes: bytes = dispatch_dump_sync(ctx, provider_type="anthropic")
 ```
 
 `dispatch_dump_sync` routes by upstream provider:
@@ -462,17 +462,17 @@ from ccproxy.lightllm.graph.buffered import transform_buffered_response_sync
 
 # Streaming (mitmproxy installs this on flow.response.stream)
 intake = dispatch_intake(
-    upstream_provider="anthropic", model="claude-...", request_params=...,
+    provider_type="anthropic", model="claude-...", request_params=...,
 )
-render = dispatch_render(listener_format=ListenerFormat.OPENAI_CHAT, model="claude-...")
+render = dispatch_render(inbound_format=InboundFormat.OPENAI_CHAT, model="claude-...")
 pipeline = SSEPipeline(intake=intake, render=render)
 flow.response.stream = pipeline
 
 # Buffered (one-shot from inspector route handler)
 listener_body: bytes = transform_buffered_response_sync(
     raw_bytes=flow.response.content,
-    upstream_provider="anthropic",
-    listener_format=ListenerFormat.OPENAI_CHAT,
+    provider_type="anthropic",
+    inbound_format=InboundFormat.OPENAI_CHAT,
     model="claude-...",
     request_params=...,
 )
@@ -499,7 +499,7 @@ req = ParsedRequest(
 )
 
 # req satisfies LLMRenderInput Protocol
-wire_bytes = dispatch_dump_sync(req, provider="anthropic")
+wire_bytes = dispatch_dump_sync(req, provider_type="anthropic")
 ```
 
 ---
@@ -569,6 +569,29 @@ one-shot per response (no streaming) so it just uses the per-call
 asyncio-loop pattern. No persistent thread, no overhead.
 
 ---
+
+## Context.extras — typed glom accessor
+
+Hooks reach raw body fields via `ctx.extras`, a typed wrapper around
+`glom` calls on `ctx._body`:
+
+```python
+session_id = ctx.extras.get("metadata.user_id", default=None)
+ctx.extras.set("pplx.attachments", [...])
+ctx.extras.delete("tool_choice")
+exists = ctx.extras.has("metadata.user_id")  # bool
+```
+
+Path strings are standard glom dot-paths. The accessor reads/writes
+`ctx._body` directly — no parse cache interaction, no commit needed for
+the mutation to be visible to later hooks. Existing
+`glom(ctx._body, ...)` / `assign(...)` / `delete(...)` call sites stay
+valid; migration is opportunistic.
+
+This is layer 3 of the three-layer access model:
+1. Header ops (`ctx.get_header()` / `ctx.set_header()`)
+2. Typed ops (`ctx.system`, `ctx.messages`, `ctx.tools`)
+3. Raw body ops (`ctx.extras.*`)
 
 ## raw_extras contract
 
@@ -745,7 +768,7 @@ calls:
 ### Inbound — parsing
 
 ```python
-ctx = Context.from_flow(flow)        # builds Context with _listener_format
+ctx = Context.from_flow(flow)        # builds Context with _inbound_format
 ctx.parse_sync()                     # returns None; populates ctx._cached_* fields
 # ctx's typed fields are now populated
 messages = ctx.messages
@@ -790,13 +813,13 @@ pipeline in `responseheaders`:
 
 ```python
 def _install_streaming_transformer(self, flow, transform):
-    listener_format = ListenerFormat(transform.listener_format)
+    inbound_format = InboundFormat(transform.inbound_format)
     intake = dispatch_intake(
-        upstream_provider=transform.provider,
+        provider_type=transform.provider_type,
         model=transform.model,
         request_params=transform.request_parameters,
     )
-    render = dispatch_render(listener_format=listener_format, model=transform.model)
+    render = dispatch_render(inbound_format=inbound_format, model=transform.model)
     pipeline = SSEPipeline(intake=intake, render=render)
     flow.response.stream = pipeline
     flow.metadata["ccproxy.sse_transformer"] = pipeline
@@ -837,15 +860,15 @@ providers:
       file: ~/.myvendor/token
     host: api.myvendor.com
     path: /v1/messages
-    provider: anthropic    # ← wire format = anthropic-compatible
+    type: anthropic        # ← wire format = anthropic-compatible
 ```
 
 Done. Sentinel key `sk-ant-oat-ccproxy-myvendor` now routes to
 `api.myvendor.com` with the Anthropic adapter + intake + render, because
-`provider: anthropic` and `_ANTHROPIC_COMPATIBLE` includes it.
+`type: anthropic` and `_ANTHROPIC_COMPATIBLE` includes it.
 
-If the wire is OpenAI-compatible, use `provider: openai`. If it's
-Google-compatible, `provider: google`.
+If the wire is OpenAI-compatible, use `type: openai`. If it's
+Google-compatible, `type: google`.
 
 ### 2. If the wire format is genuinely new
 
@@ -1046,20 +1069,20 @@ or you're trying to route to a provider that has no adapter. Add the
 provider branch in `lightllm/graph/__init__.py:dispatch_dump_sync` and
 create the adapter in `lightllm/adapters/`.
 
-### `UnsupportedUpstreamError: no response intake for upstream_provider='X'`
+### `UnsupportedUpstreamError: no response intake for provider_type='X'`
 
 Same diagnosis, but for the response side. Add a branch in
 `dispatch_intake` plus the per-provider intake FSM module.
 
-### `UnsupportedListenerError: no response render for listener_format=X`
+### `UnsupportedListenerError: no response render for inbound_format=X`
 
 The listener format wasn't recognized by `dispatch_render`. Add a render
 FSM module + a branch in `dispatch_render`.
 
-### `ValueError: no IR parser for listener_format=UNKNOWN`
+### `ValueError: no IR parser for inbound_format=UNKNOWN`
 
 The listener-format detection in `Context.from_flow` didn't match the
-request path or headers. Check `_select_listener_format` in
+request path or headers. Check `_select_inbound_format` in
 `pipeline/context.py`. Usual cause: a path that's neither
 `/v1/messages` nor `/v1/chat/completions` and no `anthropic-version`
 header.
@@ -1073,7 +1096,7 @@ Restore the behavior — these are non-negotiable round-trip invariants.
 ### Streaming response is malformed / cut off
 
 * Check `inspector/addon.py:_install_streaming_transformer` ran — search
-  the logs for "SSEPipeline missing listener_format / request_parameters".
+  the logs for "SSEPipeline missing inbound_format / request_parameters".
   The pipeline only installs when both are stamped on the `TransformMeta`.
 * Check the persistent loop is alive — `pipeline.close()` shouldn't have
   fired before EOS. `InspectorAddon.response` is the explicit-close
@@ -1099,7 +1122,7 @@ envelope without unwrap).
 |---|---|
 | Request envelope Protocol | `src/ccproxy/lightllm/adapters/__init__.py` (`LLMRenderInput`) |
 | Test stub | `src/ccproxy/lightllm/parsed.py` (`ParsedRequest`) |
-| Listener format enum | `src/ccproxy/lightllm/parsed.py` (`ListenerFormat`) |
+| Listener format enum | `src/ccproxy/lightllm/parsed.py` (`InboundFormat`) |
 | Public dispatchers | `src/ccproxy/lightllm/graph/__init__.py` |
 | Anthropic adapter | `src/ccproxy/lightllm/adapters/anthropic.py` |
 | OpenAI Chat adapter | `src/ccproxy/lightllm/adapters/openai_chat.py` |

@@ -18,16 +18,59 @@ from dataclasses import dataclass, field
 from dataclasses import replace as _dataclass_replace
 from typing import TYPE_CHECKING, Any
 
+from glom import assign as _glom_assign
+from glom import delete as _glom_delete
+from glom import glom as _glom_get
 from pydantic_ai.messages import ModelMessage, SystemPromptPart
 from pydantic_ai.models import ModelRequestParameters
 from pydantic_ai.settings import ModelSettings
 from pydantic_ai.tools import ToolDefinition
 
-from ccproxy.lightllm.parsed import ListenerFormat
+from ccproxy.lightllm.parsed import InboundFormat
 
 if TYPE_CHECKING:
     from mitmproxy import http
     from mitmproxy.http import HTTPFlow
+
+
+_EXTRAS_MISSING = object()
+
+
+class _ExtrasAccessor:
+    """Typed glom-pathed accessor over ``Context._body``.
+
+    Layer 3 of the three-layer access model — equivalent to raw
+    ``glom(ctx._body, path)`` calls but typed and discoverable.
+
+    Operates directly on ``ctx._body`` so mutations are visible to the
+    rest of the pipeline immediately; ``commit()`` re-renders the IR on
+    top later. Existing ``glom(ctx._body, ...)`` call sites stay
+    valid — migration is opportunistic.
+
+    Path strings are standard glom dot-paths
+    (``"metadata.user_id"``, ``"pplx.attachments"``, etc.).
+    """
+
+    __slots__ = ("_ctx",)
+
+    def __init__(self, ctx: Context) -> None:
+        self._ctx = ctx
+
+    def get(self, path: str, default: Any = None) -> Any:
+        """Read ``path`` from the body; returns ``default`` if missing."""
+        return _glom_get(self._ctx._body, path, default=default)
+
+    def set(self, path: str, value: Any) -> None:
+        """Write ``value`` at ``path``, creating intermediate dicts as needed."""
+        _glom_assign(self._ctx._body, path, value, missing=dict)
+
+    def delete(self, path: str) -> None:
+        """Delete ``path`` from the body; no-op if missing."""
+        _glom_delete(self._ctx._body, path, ignore_missing=True)
+
+    def has(self, path: str) -> bool:
+        """True if ``path`` resolves to a value (including falsy values)."""
+        return _glom_get(self._ctx._body, path, default=_EXTRAS_MISSING) is not _EXTRAS_MISSING
 
 
 def _replace_system_parts(
@@ -60,7 +103,7 @@ def _replace_system_parts(
     return result
 
 
-def _select_listener_format(req: http.Request | None) -> ListenerFormat:
+def _select_inbound_format(req: http.Request | None) -> InboundFormat:
     """Determine the listener-side wire format from path + headers.
 
     The choice is independent of upstream OAuth provider resolution
@@ -68,13 +111,13 @@ def _select_listener_format(req: http.Request | None) -> ListenerFormat:
     format is dictated by what the client SENT, not what we route to.
     """
     if req is None:
-        return ListenerFormat.UNKNOWN
+        return InboundFormat.UNKNOWN
     path = (req.path or "").split("?", 1)[0]
     if path.startswith("/v1/messages") or req.headers.get("anthropic-version"):
-        return ListenerFormat.ANTHROPIC_MESSAGES
+        return InboundFormat.ANTHROPIC_MESSAGES
     if path.startswith("/v1/chat/completions") or path.startswith("/chat/completions"):
-        return ListenerFormat.OPENAI_CHAT
-    return ListenerFormat.UNKNOWN
+        return InboundFormat.OPENAI_CHAT
+    return InboundFormat.UNKNOWN
 
 
 @dataclass
@@ -97,7 +140,7 @@ class Context:
     _request: http.Request | None = field(default=None, repr=False)
     """Bare request for shape contexts (no flow)."""
 
-    _listener_format: ListenerFormat = field(default=ListenerFormat.UNKNOWN, repr=False)
+    _inbound_format: InboundFormat = field(default=InboundFormat.UNKNOWN, repr=False)
     """Listener-side wire format, pinned at construction. UNKNOWN for unmatched routes."""
 
     # Lazy-parsed IR cache. ``None`` = not yet parsed; ``parse_sync()`` populates.
@@ -138,7 +181,7 @@ class Context:
         if self._cached_messages is not None:
             return  # already parsed
 
-        if self._listener_format is ListenerFormat.UNKNOWN:
+        if self._inbound_format is InboundFormat.UNKNOWN:
             self._cached_messages = []
             self._cached_system = []
             self._cached_request_parameters = ModelRequestParameters()
@@ -150,7 +193,7 @@ class Context:
 
         parse_request_into_fields(
             body=self._body,
-            listener_format=self._listener_format,
+            inbound_format=self._inbound_format,
             ctx=self,
         )
 
@@ -164,7 +207,7 @@ class Context:
         return cls(
             flow=flow,
             _body=body,
-            _listener_format=_select_listener_format(flow.request),
+            _inbound_format=_select_inbound_format(flow.request),
         )
 
     @classmethod
@@ -178,8 +221,18 @@ class Context:
             flow=None,
             _body=body,
             _request=req,
-            _listener_format=_select_listener_format(req),
+            _inbound_format=_select_inbound_format(req),
         )
+
+    @property
+    def extras(self) -> _ExtrasAccessor:
+        """Typed glom-pathed accessor over ``self._body``.
+
+        Layer 3 of the three-layer access model. Equivalent to raw
+        ``glom(ctx._body, path)`` calls but typed and discoverable.
+        Existing call sites that use ``glom`` directly remain valid.
+        """
+        return _ExtrasAccessor(self)
 
     # --- LLMRenderInput Protocol properties ---
 
@@ -361,7 +414,7 @@ class Context:
         and the typed-property getters return empty defaults so there's
         nothing to flush.
         """
-        if self._listener_format is ListenerFormat.UNKNOWN:
+        if self._inbound_format is InboundFormat.UNKNOWN:
             return
 
         # If the caller mutated ctx.system, rebuild messages so the first
@@ -377,12 +430,12 @@ class Context:
         from ccproxy.lightllm.adapters.anthropic import AnthropicAdapter
         from ccproxy.lightllm.adapters.openai_chat import OpenAIChatAdapter
 
-        if self._listener_format is ListenerFormat.ANTHROPIC_MESSAGES:
+        if self._inbound_format is InboundFormat.ANTHROPIC_MESSAGES:
             rendered = AnthropicAdapter.render(self)
-        elif self._listener_format is ListenerFormat.OPENAI_CHAT:
+        elif self._inbound_format is InboundFormat.OPENAI_CHAT:
             rendered = OpenAIChatAdapter.render(self)
         else:
-            raise ValueError(f"no outbound renderer for listener_format={self._listener_format}")
+            raise ValueError(f"no outbound renderer for inbound_format={self._inbound_format}")
 
         self._body = json.loads(rendered)
 

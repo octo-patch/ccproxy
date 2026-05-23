@@ -52,17 +52,17 @@ def shape(ctx: Context, params: dict[str, Any]) -> Context:
     if transform is None:
         return ctx
 
-    provider = transform.provider
+    provider_type = transform.provider_type
     config = get_config()
-    profile = config.shaping.providers.get(provider)
+    profile = config.shaping.providers.get(provider_type)
     if profile is None:
-        logger.debug("No shaping profile for provider %s", provider)
+        logger.debug("No shaping profile for provider_type %s", provider_type)
         return ctx
 
     store = get_store()
-    captured = store.pick(provider)
+    captured = store.pick(provider_type)
     if captured is None or captured.request is None:
-        logger.debug("No shape available for provider %s", provider)
+        logger.debug("No shape available for provider_type %s", provider_type)
         return ctx
 
     if _ua_matches(ctx, captured.request):
@@ -80,7 +80,7 @@ def shape(ctx: Context, params: dict[str, Any]) -> Context:
 
     shape_ctx.commit()
     apply_shape(working, ctx, profile.preserve_headers)
-    logger.info("Applied shape from %s for provider %s", captured.id, provider)
+    logger.info("Applied shape from %s for provider_type %s", captured.id, provider_type)
     return ctx
 
 

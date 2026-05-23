@@ -232,7 +232,7 @@ class TestTransformMetadata:
 
         record = ctx.flow.metadata[InspectorMeta.RECORD]
         assert record.transform is not None
-        assert record.transform.provider == "gemini"
+        assert record.transform.provider_type == "gemini"
         assert record.transform.model == "gemini-3.1-pro-preview"
         assert record.transform.is_streaming is False
 

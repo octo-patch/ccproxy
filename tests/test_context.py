@@ -253,7 +253,7 @@ class TestFromRequest:
 
 class TestParseSync:
     def test_parse_sync_populates_typed_fields(self):
-        from ccproxy.lightllm.parsed import ListenerFormat
+        from ccproxy.lightllm.parsed import InboundFormat
 
         flow = _make_flow(
             body={"model": "claude-3", "messages": [{"role": "user", "content": "hi"}]},
@@ -261,7 +261,7 @@ class TestParseSync:
         )
         flow.request.path = "/v1/messages"
         ctx = Context.from_flow(flow)
-        assert ctx._listener_format is ListenerFormat.ANTHROPIC_MESSAGES
+        assert ctx._inbound_format is InboundFormat.ANTHROPIC_MESSAGES
 
         ctx.parse_sync()
         assert ctx.model == "claude-3"
@@ -281,11 +281,49 @@ class TestParseSync:
         second = ctx.messages
         assert first is second
 
-    def test_parse_sync_returns_empty_for_unknown_listener_format(self):
+    def test_parse_sync_returns_empty_for_unknown_inbound_format(self):
         flow = _make_flow(body={"model": "?", "messages": []}, headers={})
         flow.request.path = "/unknown/path"
         ctx = Context.from_flow(flow)
 
         ctx.parse_sync()
-        # UNKNOWN listener format yields empty defaults instead of raising.
+        # UNKNOWN inbound format yields empty defaults instead of raising.
         assert ctx.messages == []
+
+
+class TestContextExtras:
+    """Typed glom-pathed accessor over ``ctx._body``."""
+
+    def test_get_returns_value_for_existing_path(self):
+        flow = _make_flow(body={"model": "m", "messages": [], "metadata": {"user_id": "u123"}})
+        ctx = Context.from_flow(flow)
+        assert ctx.extras.get("metadata.user_id") == "u123"
+
+    def test_get_returns_default_for_missing_path(self):
+        flow = _make_flow(body={"model": "m", "messages": []})
+        ctx = Context.from_flow(flow)
+        assert ctx.extras.get("metadata.user_id", default="fallback") == "fallback"
+        assert ctx.extras.get("does.not.exist") is None
+
+    def test_set_creates_nested_path(self):
+        flow = _make_flow(body={"model": "m", "messages": []})
+        ctx = Context.from_flow(flow)
+        ctx.extras.set("pplx.attachments", ["s3://x", "s3://y"])
+        assert ctx._body["pplx"]["attachments"] == ["s3://x", "s3://y"]
+
+    def test_delete_removes_existing_path_and_noops_missing(self):
+        flow = _make_flow(body={"model": "m", "messages": [], "tool_choice": "auto"})
+        ctx = Context.from_flow(flow)
+        ctx.extras.delete("tool_choice")
+        assert "tool_choice" not in ctx._body
+        # idempotent — second delete is a no-op
+        ctx.extras.delete("tool_choice")
+        assert "tool_choice" not in ctx._body
+
+    def test_has_distinguishes_missing_from_falsy(self):
+        flow = _make_flow(body={"model": "m", "messages": [], "x": 0, "y": None, "z": ""})
+        ctx = Context.from_flow(flow)
+        assert ctx.extras.has("x")  # 0 is a real value
+        assert ctx.extras.has("y")  # None is a real value
+        assert ctx.extras.has("z")  # empty string is a real value
+        assert not ctx.extras.has("missing")

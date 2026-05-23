@@ -26,7 +26,7 @@ from pydantic_ai.messages import (
 )
 
 from ccproxy.lightllm.adapters._envelope import parse_request
-from ccproxy.lightllm.parsed import ListenerFormat, ParsedRequest
+from ccproxy.lightllm.parsed import InboundFormat, ParsedRequest
 
 Parse = Callable[[dict[str, Any]], ParsedRequest]
 
@@ -34,7 +34,7 @@ Parse = Callable[[dict[str, Any]], ParsedRequest]
 @pytest.fixture
 def parse() -> Parse:
     def _parse(body: dict[str, Any]) -> ParsedRequest:
-        return parse_request(body, listener_format=ListenerFormat.ANTHROPIC_MESSAGES)
+        return parse_request(body, inbound_format=InboundFormat.ANTHROPIC_MESSAGES)
 
     return _parse
 

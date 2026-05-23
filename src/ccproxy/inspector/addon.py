@@ -217,7 +217,7 @@ class InspectorAddon:
         All providers route through the pydantic-ai-mediated
         :class:`~ccproxy.lightllm.graph.sse_pipeline.SSEPipeline` (persistent
         asyncio loop in a dedicated daemon thread) when the transform router
-        stamped both ``listener_format`` and ``request_parameters``. Without
+        stamped both ``inbound_format`` and ``request_parameters``. Without
         those, falls back to passthrough.
 
         Gemini family providers go through the same path:
@@ -226,15 +226,15 @@ class InspectorAddon:
         envelope. :class:`~ccproxy.inspector.gemini_addon.GeminiAddon` backs
         off when this transformer is already installed.
         """
-        from ccproxy.lightllm.parsed import ListenerFormat
+        from ccproxy.lightllm.parsed import InboundFormat
 
         response = flow.response
         assert response is not None, "responseheaders guards flow.response before dispatching here"
 
-        listener_format = ListenerFormat(transform.listener_format)
-        if listener_format is ListenerFormat.UNKNOWN or transform.request_parameters is None:
+        inbound_format = InboundFormat(transform.inbound_format)
+        if inbound_format is InboundFormat.UNKNOWN or transform.request_parameters is None:
             logger.warning(
-                "SSEPipeline missing listener_format / request_parameters; falling back to passthrough",
+                "SSEPipeline missing inbound_format / request_parameters; falling back to passthrough",
             )
             response.stream = True
             return
@@ -245,11 +245,11 @@ class InspectorAddon:
 
         try:
             intake = dispatch_intake(
-                upstream_provider=transform.provider,
+                provider_type=transform.provider_type,
                 model=transform.model,
                 request_params=transform.request_parameters,
             )
-            render = dispatch_render(listener_format=listener_format, model=transform.model)
+            render = dispatch_render(inbound_format=inbound_format, model=transform.model)
             pipeline = SSEPipeline(intake=intake, render=render)
             response.stream = pipeline
             flow.metadata["ccproxy.sse_transformer"] = pipeline

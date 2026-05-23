@@ -101,6 +101,9 @@ class Status(BaseModel):
     mcp: bool = False
     """Check if the MCP HTTP server is running."""
 
+    mermaid: bool = False
+    """Emit the hook DAGs (inbound + outbound) as mermaid stateDiagram-v2 markup."""
+
 
 Command = (
     Annotated[Start, tyro.conf.subcommand(name="start")]
@@ -680,6 +683,7 @@ def show_status(
     check_proxy: bool = False,
     check_inspect: bool = False,
     check_mcp: bool = False,
+    mermaid: bool = False,
 ) -> None:
     """Show ccproxy status."""
     # deferred: only needed for TCP probe
@@ -760,6 +764,20 @@ def show_status(
         if check_mcp and not status.mcp.running:
             exit_code |= 4
         sys.exit(exit_code)
+
+    if mermaid:
+        # Emit the inbound + outbound hook DAGs as mermaid stateDiagram-v2
+        # markup. Bypasses the rich panel rendering so output is paste-ready.
+        from ccproxy.pipeline.executor import PipelineExecutor
+        from ccproxy.pipeline.loader import load_hooks
+
+        for stage in ("inbound", "outbound"):
+            specs = load_hooks(status.hooks.get(stage, []))
+            if not specs:
+                continue
+            executor = PipelineExecutor(hooks=specs)
+            builtin_print(executor.dag.render(title=f"{stage}_dag"))
+        return
 
     if json_output:
         builtin_print(json.dumps(dataclasses.asdict(status), indent=2))
@@ -933,6 +951,7 @@ def main(
             check_proxy=cmd.proxy,
             check_inspect=cmd.inspect,
             check_mcp=cmd.mcp,
+            mermaid=cmd.mermaid,
         )
 
     elif isinstance(cmd, FlowsList | FlowsDump | FlowsDiff | FlowsCompare | FlowsShape | FlowsClear):

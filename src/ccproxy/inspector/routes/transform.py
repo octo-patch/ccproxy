@@ -141,7 +141,7 @@ def _resolve_transform_target(
 def _record_transform_meta(
     flow: HTTPFlow,
     *,
-    provider: str,
+    provider_type: str,
     model: str,
     body: dict[str, object],
     is_streaming: bool,
@@ -150,15 +150,15 @@ def _record_transform_meta(
     record = flow.metadata.get(InspectorMeta.RECORD)
     if record is None:
         return
-    listener_format = flow.metadata.get("ccproxy.listener_format", "unknown")
+    inbound_format = flow.metadata.get("ccproxy.inbound_format", "unknown")
     request_parameters = flow.metadata.get("ccproxy.parsed_request_parameters")
     record.transform = TransformMeta(
-        provider=provider,
+        provider_type=provider_type,
         model=model,
         request_data={**body},
         is_streaming=is_streaming,
         mode=mode,
-        listener_format=listener_format,
+        inbound_format=inbound_format,
         request_parameters=request_parameters,
     )
 
@@ -193,7 +193,7 @@ def _handle_redirect(
     host: str
     path: str
     if isinstance(target, Provider):
-        provider_str = target.provider
+        provider_str = target.type
         model = _model_for_routing(body, flow.request.path)
         host = target.host
         path = _apply_path_template(target.path, model=model, action=action)
@@ -207,7 +207,7 @@ def _handle_redirect(
             )
             return
         host = resolved_host
-        provider_str = (bound.provider if bound else target.dest_provider) or ""
+        provider_str = (bound.type if bound else target.dest_provider) or ""
         model = target.dest_model or _model_for_routing(body, flow.request.path)
         if target.dest_path:
             path = _apply_path_template(target.dest_path, model=model, action=action)
@@ -219,7 +219,7 @@ def _handle_redirect(
 
     _record_transform_meta(
         flow,
-        provider=provider_str,
+        provider_type=provider_str,
         model=model,
         body=body,
         is_streaming=is_streaming,
@@ -234,7 +234,7 @@ def _handle_redirect(
     logger.info("redirect: → %s %s%s", provider_str, host, path)
 
 
-def _action_for_transform(provider: str, *, is_streaming: bool) -> str | None:
+def _action_for_transform(provider_type: str, *, is_streaming: bool) -> str | None:
     """Resolve the ``{action}`` URL template substitution for a transform target.
 
     Gemini-family upstreams template the SDK action into their path
@@ -242,7 +242,7 @@ def _action_for_transform(provider: str, *, is_streaming: bool) -> str | None:
     have no ``{action}`` slot so the resolved value is ``None`` (the path
     template's ``_apply_path_template`` no-ops in that case).
     """
-    if provider in _GEMINI_FORMATS:
+    if provider_type in _GEMINI_FORMATS:
         return "streamGenerateContent" if is_streaming else "generateContent"
     return None
 
@@ -252,7 +252,7 @@ def _build_upstream_url_and_headers(
     target: Provider | TransformOverride,
     bound: Provider | None,
     model: str,
-    provider: str,
+    provider_type: str,
     is_streaming: bool,
 ) -> tuple[str, dict[str, str]]:
     """Build the upstream ``(url, headers)`` for a transform-mode dispatch.
@@ -263,7 +263,7 @@ def _build_upstream_url_and_headers(
     the ``forward_oauth`` inbound hook — this builder only adds the
     Anthropic-compat ``anthropic-version`` floor.
     """
-    action = _action_for_transform(provider, is_streaming=is_streaming)
+    action = _action_for_transform(provider_type, is_streaming=is_streaming)
 
     host: str
     path_template: str
@@ -283,7 +283,7 @@ def _build_upstream_url_and_headers(
     url = f"https://{host}{path}"
 
     headers: dict[str, str] = {}
-    if provider in _ANTHROPIC_COMPATIBLE:
+    if provider_type in _ANTHROPIC_COMPATIBLE:
         # Defensive floor for cross-format flows targeting an Anthropic upstream
         # where no Anthropic shape replay runs. forward_oauth has already stamped
         # auth; the shape hook adds the canonical Claude headers when present.
@@ -314,7 +314,7 @@ def _handle_transform(
 
     bound: Provider | None
     if isinstance(target, Provider):
-        provider_str = target.provider
+        provider_str = target.type
         model = _model_for_routing(body, flow.request.path)
         bound = target
     else:
@@ -328,23 +328,23 @@ def _handle_transform(
                 target.dest_provider,
             )
             return
-        provider_str = bound.provider
+        provider_str = bound.type
         model = target.dest_model or _model_for_routing(body, flow.request.path)
 
     ctx = Context.from_flow(flow)
-    flow.metadata.setdefault("ccproxy.listener_format", ctx._listener_format.value)
+    flow.metadata.setdefault("ccproxy.inbound_format", ctx._inbound_format.value)
     ctx.parse_sync()
     if model and model != ctx.model:
         ctx.model = model
     flow.metadata["ccproxy.parsed_request_parameters"] = ctx.request_parameters
-    new_body = dispatch_dump_sync(ctx, provider=provider_str)
+    new_body = dispatch_dump_sync(ctx, provider_type=provider_str)
 
     try:
         url, headers = _build_upstream_url_and_headers(
             target=target,
             bound=bound,
             model=model,
-            provider=provider_str,
+            provider_type=provider_str,
             is_streaming=is_streaming,
         )
     except ValueError as exc:
@@ -353,7 +353,7 @@ def _handle_transform(
 
     _record_transform_meta(
         flow,
-        provider=provider_str,
+        provider_type=provider_str,
         model=model,
         body=body,
         is_streaming=is_streaming,
@@ -425,7 +425,7 @@ def register_transform_routes(router: InspectorRouter) -> None:
             _handle_passthrough(flow)
         elif isinstance(target, Provider):
             incoming = _detect_incoming_format(flow.request.path)
-            if incoming == target.provider:
+            if incoming == target.type:
                 _handle_redirect(flow, target, body)
             else:
                 _handle_transform(flow, target, body)
@@ -470,13 +470,13 @@ def register_transform_routes(router: InspectorRouter) -> None:
             from ccproxy.lightllm.graph.buffered import (
                 transform_buffered_response_sync,
             )
-            from ccproxy.lightllm.parsed import ListenerFormat
+            from ccproxy.lightllm.parsed import InboundFormat
 
-            listener_value = meta.listener_format or "unknown"
+            inbound_value = meta.inbound_format or "unknown"
             try:
-                listener_enum = ListenerFormat(listener_value)
+                inbound_enum = InboundFormat(inbound_value)
             except ValueError:
-                listener_enum = ListenerFormat.OPENAI_CHAT
+                inbound_enum = InboundFormat.OPENAI_CHAT
 
             request_params = meta.request_parameters
             if request_params is None:
@@ -486,8 +486,8 @@ def register_transform_routes(router: InspectorRouter) -> None:
 
             new_body = transform_buffered_response_sync(
                 raw_bytes=flow.response.content or b"",
-                upstream_provider=meta.provider,
-                listener_format=listener_enum,
+                provider_type=meta.provider_type,
+                inbound_format=inbound_enum,
                 model=meta.model,
                 request_params=request_params,
             )
@@ -498,9 +498,9 @@ def register_transform_routes(router: InspectorRouter) -> None:
 
             logger.info(
                 "lightllm response transform: %s %s → %s",
-                meta.provider,
+                meta.provider_type,
                 meta.model,
-                listener_enum.value,
+                inbound_enum.value,
             )
         except Exception:
             logger.warning("Response transform failed, passing through raw response", exc_info=True)

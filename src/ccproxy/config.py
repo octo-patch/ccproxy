@@ -383,8 +383,8 @@ class Provider(BaseModel):
     """Destination path. Supports ``{model}`` and ``{action}`` templating
     substituted from glom-read body fields and URL captures at routing time."""
 
-    provider: str
-    """Provider identifier (``anthropic``, ``gemini``, ``deepseek``,
+    type: str
+    """Wire-dialect identifier (``anthropic``, ``gemini``, ``deepseek``,
     ``openai``, ``perplexity_pro``, …). Drives
     ``lightllm.graph.dispatch_dump_sync`` when the incoming format differs
     from what the destination speaks."""
@@ -396,9 +396,9 @@ class Provider(BaseModel):
     fingerprint matches a real browser. ``None`` keeps mitmproxy's native
     transport (the default for most providers; opt in per-target)."""
 
-    @field_validator("provider", mode="before")
+    @field_validator("type", mode="before")
     @classmethod
-    def _coerce_provider(cls, value: Any) -> Any:
+    def _coerce_type(cls, value: Any) -> Any:
         """Accept either a LlmProviders enum or a bare string. The lightllm
         registry validates it has a resolvable BaseConfig; routing only
         needs the string form for comparisons."""

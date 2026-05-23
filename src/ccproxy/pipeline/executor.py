@@ -73,7 +73,7 @@ class PipelineExecutor:
         flow.metadata["ccproxy.hook_results"] as a list of HookResult.
         """
         ctx = Context.from_flow(flow)
-        flow.metadata["ccproxy.listener_format"] = ctx._listener_format.value
+        flow.metadata["ccproxy.inbound_format"] = ctx._inbound_format.value
 
         # Initialize hook results storage
         if _HOOK_RESULTS_KEY not in flow.metadata:

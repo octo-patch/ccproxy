@@ -32,14 +32,14 @@ def _make_provider(
     header: str | None = None,
     host: str = "api.example.com",
     path: str = "/v1/messages",
-    provider: str = "anthropic",
+    type: str = "anthropic",
 ) -> Provider:
     """Build a Provider with a CommandAuthSource for tests."""
     return Provider(
         auth=CommandAuthSource(command=command, header=header) if command else None,
         host=host,
         path=path,
-        provider=provider,
+        type=type,
     )
 
 
@@ -417,7 +417,7 @@ class TestResolveOAuthToken:
                     auth=FileAuthSource(file=str(f)),
                     host="api.example.com",
                     path="/v1/messages",
-                    provider="anthropic",
+                    type="anthropic",
                 ),
             }
         )

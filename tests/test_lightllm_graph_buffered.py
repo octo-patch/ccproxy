@@ -22,7 +22,7 @@ import pytest
 from pydantic_ai.models import ModelRequestParameters
 
 from ccproxy.lightllm.graph.buffered import transform_buffered_response_sync
-from ccproxy.lightllm.parsed import ListenerFormat
+from ccproxy.lightllm.parsed import InboundFormat
 
 # ── Anthropic buffered → OpenAI ChatCompletion ─────────────────────────────
 
@@ -70,8 +70,8 @@ class TestAnthropicBufferedToOpenAI:
         raw = _make_anthropic_text_body("Hello world")
         out_bytes = transform_buffered_response_sync(
             raw_bytes=raw,
-            upstream_provider="anthropic",
-            listener_format=ListenerFormat.OPENAI_CHAT,
+            provider_type="anthropic",
+            inbound_format=InboundFormat.OPENAI_CHAT,
             model="claude-3-5-haiku-20241022",
             request_params=ModelRequestParameters(),
         )
@@ -85,8 +85,8 @@ class TestAnthropicBufferedToOpenAI:
         raw = _make_anthropic_tool_body()
         out_bytes = transform_buffered_response_sync(
             raw_bytes=raw,
-            upstream_provider="anthropic",
-            listener_format=ListenerFormat.OPENAI_CHAT,
+            provider_type="anthropic",
+            inbound_format=InboundFormat.OPENAI_CHAT,
             model="claude-3-5-haiku-20241022",
             request_params=ModelRequestParameters(),
         )
@@ -109,8 +109,8 @@ class TestAnthropicBufferedToOpenAI:
         for alias in ("deepseek", "zai"):
             out_bytes = transform_buffered_response_sync(
                 raw_bytes=raw,
-                upstream_provider=alias,
-                listener_format=ListenerFormat.OPENAI_CHAT,
+                provider_type=alias,
+                inbound_format=InboundFormat.OPENAI_CHAT,
                 model="deepseek-chat",
                 request_params=ModelRequestParameters(),
             )
@@ -179,8 +179,8 @@ class TestOpenAIBufferedToAnthropic:
         raw = _make_openai_chat_completion("Hi there")
         out_bytes = transform_buffered_response_sync(
             raw_bytes=raw,
-            upstream_provider="openai",
-            listener_format=ListenerFormat.ANTHROPIC_MESSAGES,
+            provider_type="openai",
+            inbound_format=InboundFormat.ANTHROPIC_MESSAGES,
             model="gpt-4o",
             request_params=ModelRequestParameters(),
         )
@@ -198,8 +198,8 @@ class TestOpenAIBufferedToAnthropic:
         raw = _make_openai_tool_completion()
         out_bytes = transform_buffered_response_sync(
             raw_bytes=raw,
-            upstream_provider="openai",
-            listener_format=ListenerFormat.ANTHROPIC_MESSAGES,
+            provider_type="openai",
+            inbound_format=InboundFormat.ANTHROPIC_MESSAGES,
             model="gpt-4o",
             request_params=ModelRequestParameters(),
         )
@@ -249,8 +249,8 @@ class TestGoogleBufferedToOpenAI:
         raw = _make_google_generate_content_response("From Gemini")
         out_bytes = transform_buffered_response_sync(
             raw_bytes=raw,
-            upstream_provider="gemini",
-            listener_format=ListenerFormat.OPENAI_CHAT,
+            provider_type="gemini",
+            inbound_format=InboundFormat.OPENAI_CHAT,
             model="gemini-2.0-flash",
             request_params=ModelRequestParameters(),
         )
@@ -264,8 +264,8 @@ class TestGoogleBufferedToOpenAI:
         raw = _make_google_cloudcode_wrapped("Wrapped reply")
         out_bytes = transform_buffered_response_sync(
             raw_bytes=raw,
-            upstream_provider="gemini",
-            listener_format=ListenerFormat.OPENAI_CHAT,
+            provider_type="gemini",
+            inbound_format=InboundFormat.OPENAI_CHAT,
             model="gemini-2.0-flash",
             request_params=ModelRequestParameters(),
         )
@@ -323,8 +323,8 @@ class TestPerplexityBufferedToOpenAI:
         raw = _make_perplexity_sse("Perplexity answer text")
         out_bytes = transform_buffered_response_sync(
             raw_bytes=raw,
-            upstream_provider="perplexity_pro",
-            listener_format=ListenerFormat.OPENAI_CHAT,
+            provider_type="perplexity_pro",
+            inbound_format=InboundFormat.OPENAI_CHAT,
             model="perplexity/best",
             request_params=ModelRequestParameters(),
         )
@@ -345,8 +345,8 @@ class TestErrorPaths:
         with pytest.raises(UnsupportedUpstreamError, match="no buffered transform"):
             transform_buffered_response_sync(
                 raw_bytes=b"{}",
-                upstream_provider="not-a-real-provider",
-                listener_format=ListenerFormat.OPENAI_CHAT,
+                provider_type="not-a-real-provider",
+                inbound_format=InboundFormat.OPENAI_CHAT,
                 model="x",
                 request_params=ModelRequestParameters(),
             )
@@ -357,8 +357,8 @@ class TestErrorPaths:
         with pytest.raises(UnsupportedListenerError, match="no buffered renderer"):
             transform_buffered_response_sync(
                 raw_bytes=_make_anthropic_text_body("hi"),
-                upstream_provider="anthropic",
-                listener_format=ListenerFormat.UNKNOWN,
+                provider_type="anthropic",
+                inbound_format=InboundFormat.UNKNOWN,
                 model="claude-3",
                 request_params=ModelRequestParameters(),
             )
@@ -366,8 +366,8 @@ class TestErrorPaths:
     def test_unparseable_body_yields_empty_response(self) -> None:
         out_bytes = transform_buffered_response_sync(
             raw_bytes=b"not json at all",
-            upstream_provider="anthropic",
-            listener_format=ListenerFormat.OPENAI_CHAT,
+            provider_type="anthropic",
+            inbound_format=InboundFormat.OPENAI_CHAT,
             model="claude-3",
             request_params=ModelRequestParameters(),
         )

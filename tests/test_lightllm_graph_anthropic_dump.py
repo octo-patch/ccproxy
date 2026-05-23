@@ -14,7 +14,7 @@ from typing import Any
 import pytest
 
 from ccproxy.lightllm.adapters._envelope import parse_request, render_request
-from ccproxy.lightllm.parsed import ListenerFormat, ParsedRequest
+from ccproxy.lightllm.parsed import InboundFormat, ParsedRequest
 
 Parse = Callable[[dict[str, Any]], ParsedRequest]
 Render = Callable[[ParsedRequest], bytes]
@@ -23,7 +23,7 @@ Render = Callable[[ParsedRequest], bytes]
 @pytest.fixture
 def parse() -> Parse:
     def _parse(body: dict[str, Any]) -> ParsedRequest:
-        return parse_request(body, listener_format=ListenerFormat.ANTHROPIC_MESSAGES)
+        return parse_request(body, inbound_format=InboundFormat.ANTHROPIC_MESSAGES)
 
     return _parse
 
@@ -31,7 +31,7 @@ def parse() -> Parse:
 @pytest.fixture
 def render() -> Render:
     def _render(parsed: ParsedRequest) -> bytes:
-        return render_request(parsed, listener_format=ListenerFormat.ANTHROPIC_MESSAGES)
+        return render_request(parsed, inbound_format=InboundFormat.ANTHROPIC_MESSAGES)
 
     return _render
 

@@ -11,7 +11,7 @@
         };
         host = "api.anthropic.com";
         path = "/v1/messages";
-        provider = "anthropic";
+        type = "anthropic";
       };
       gemini = {
         auth = {
@@ -21,7 +21,7 @@
         };
         host = "cloudcode-pa.googleapis.com";
         path = "/v1internal:{action}";
-        provider = "gemini";
+        type = "gemini";
       };
       deepseek = {
         auth = {
@@ -31,7 +31,7 @@
         };
         host = "api.deepseek.com";
         path = "/anthropic/v1/messages";
-        provider = "anthropic";
+        type = "anthropic";
       };
       perplexity_pro = {
         auth = {
@@ -40,7 +40,7 @@
         };
         host = "www.perplexity.ai";
         path = "/rest/sse/perplexity_ask";
-        provider = "perplexity_pro";
+        type = "perplexity_pro";
         fingerprint_profile = "chrome131";
       };
     };

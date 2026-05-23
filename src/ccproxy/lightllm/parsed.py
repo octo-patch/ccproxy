@@ -1,6 +1,6 @@
-"""Listener-format enum and the :class:`ParsedRequest` test-only bundle.
+"""Inbound-format enum and the :class:`ParsedRequest` test-only bundle.
 
-``ListenerFormat`` enumerates the listener-side wire formats ccproxy
+``InboundFormat`` enumerates the listener-side wire formats ccproxy
 accepts. Determined by path/headers in ``Context.from_flow``; selects the
 matching inbound parser and the matching response renderer.
 
@@ -26,7 +26,7 @@ from pydantic_ai.models import ModelRequestParameters
 from pydantic_ai.settings import ModelSettings
 
 
-class ListenerFormat(StrEnum):
+class InboundFormat(StrEnum):
     UNKNOWN = "unknown"
     ANTHROPIC_MESSAGES = "anthropic_messages"
     OPENAI_CHAT = "openai_chat"

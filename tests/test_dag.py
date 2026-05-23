@@ -203,3 +203,43 @@ class TestDependencyQueries:
         dag = HookDAG(hooks)
         assert dag.get_dependents("writer") == {"reader"}
         assert dag.get_dependents("reader") == set()
+
+
+class TestMermaidRender:
+    def test_render_golden_chain(self):
+        """Golden test: A writes k1 -> B reads k1 + writes k2 -> C reads k2."""
+        hooks = [
+            make_spec("c", reads=["k2"], priority=2),
+            make_spec("a", writes=["k1"], priority=0),
+            make_spec("b", reads=["k1"], writes=["k2"], priority=1),
+        ]
+        dag = HookDAG(hooks)
+        rendered = dag.render(title="chain_dag", direction="LR")
+
+        expected = (
+            "---\n"
+            "title: chain_dag\n"
+            "---\n"
+            "stateDiagram-v2\n"
+            "  direction LR\n"
+            '  state "a" as a\n'
+            '  state "b" as b\n'
+            '  state "c" as c\n'
+            "  [*] --> a\n"
+            "  a --> b\n"
+            "  b --> c\n"
+            "  c --> [*]\n"
+        )
+        assert rendered == expected
+
+    def test_render_single_hook_is_source_and_sink(self):
+        dag = HookDAG([make_spec("solo")])
+        rendered = dag.render()
+        assert "[*] --> solo" in rendered
+        assert "solo --> [*]" in rendered
+
+    def test_render_default_title_and_direction(self):
+        dag = HookDAG([make_spec("h1")])
+        rendered = dag.render()
+        assert "title: hook_dag" in rendered
+        assert "direction LR" in rendered

@@ -19,7 +19,7 @@ from ccproxy.lightllm.graph.google_intake import GoogleResponseIntakeFSM
 from ccproxy.lightllm.graph.openai_intake import OpenAIResponseIntakeFSM
 from ccproxy.lightllm.graph.openai_render import OpenAIResponseRenderFSM
 from ccproxy.lightllm.graph.perplexity_intake import PerplexityResponseIntakeFSM
-from ccproxy.lightllm.parsed import ListenerFormat
+from ccproxy.lightllm.parsed import InboundFormat
 
 if TYPE_CHECKING:
     from pydantic_ai.models import ModelRequestParameters
@@ -59,18 +59,18 @@ class UnsupportedListenerError(ValueError):
     """Raised when :func:`dispatch_render` is asked for a listener format it doesn't know."""
 
 
-async def dispatch_dump(req: "LLMRenderInput", *, provider: str) -> bytes:
+async def dispatch_dump(req: "LLMRenderInput", *, provider_type: str) -> bytes:
     """Render ``req`` to the wire bytes the named upstream expects.
 
     All providers route through :func:`dispatch_dump_sync` (kept here for
     test compatibility with code that ``await``s the call).
     """
-    return dispatch_dump_sync(req, provider=provider)
+    return dispatch_dump_sync(req, provider_type=provider_type)
 
 
 def dispatch_intake(
     *,
-    upstream_provider: str,
+    provider_type: str,
     model: str,
     request_params: "ModelRequestParameters",
 ) -> AnyAsyncIntakeFSM:
@@ -83,55 +83,55 @@ def dispatch_intake(
     :class:`UnsupportedUpstreamError` for anything else — there's no fallback,
     because an unknown upstream means we have no idea how to parse its SSE.
     """
-    if upstream_provider in _ANTHROPIC_COMPATIBLE:
+    if provider_type in _ANTHROPIC_COMPATIBLE:
         return AnthropicResponseIntakeFSM(model=model, request_params=request_params)
-    if upstream_provider == "openai":
+    if provider_type == "openai":
         return OpenAIResponseIntakeFSM(model=model, request_params=request_params)
-    if upstream_provider in _GOOGLE_COMPATIBLE:
+    if provider_type in _GOOGLE_COMPATIBLE:
         return GoogleResponseIntakeFSM(model=model, request_params=request_params)
-    if upstream_provider == "perplexity_pro":
+    if provider_type == "perplexity_pro":
         return PerplexityResponseIntakeFSM(model=model, request_params=request_params)
-    raise UnsupportedUpstreamError(f"no response intake for upstream_provider={upstream_provider!r}")
+    raise UnsupportedUpstreamError(f"no response intake for provider_type={provider_type!r}")
 
 
-def dispatch_render(*, listener_format: ListenerFormat, model: str = "unknown") -> AnyAsyncRenderFSM:
-    """Dispatch to the right per-listener response render FSM.
+def dispatch_render(*, inbound_format: InboundFormat, model: str = "unknown") -> AnyAsyncRenderFSM:
+    """Dispatch to the right per-inbound-format response render FSM.
 
     Routes ``ANTHROPIC_MESSAGES`` to the Anthropic render FSM and
     ``OPENAI_CHAT`` to the OpenAI render FSM. Raises
     :class:`UnsupportedListenerError` for ``UNKNOWN`` — there's no fallback,
-    because an unknown listener format means we have no idea what wire
+    because an unknown inbound format means we have no idea what wire
     shape to produce.
     """
-    if listener_format is ListenerFormat.ANTHROPIC_MESSAGES:
+    if inbound_format is InboundFormat.ANTHROPIC_MESSAGES:
         return AnthropicResponseRenderFSM(model=model)
-    if listener_format is ListenerFormat.OPENAI_CHAT:
+    if inbound_format is InboundFormat.OPENAI_CHAT:
         return OpenAIResponseRenderFSM(model=model)
-    raise UnsupportedListenerError(f"no response render for listener_format={listener_format}")
+    raise UnsupportedListenerError(f"no response render for inbound_format={inbound_format}")
 
 
-def dispatch_dump_sync(req: "LLMRenderInput", *, provider: str) -> bytes:
+def dispatch_dump_sync(req: "LLMRenderInput", *, provider_type: str) -> bytes:
     """Synchronous outbound dispatcher.
 
     Routes :class:`LLMRenderInput` to the matching adapter's ``render``
     classmethod. Each adapter renders ``req``'s typed fields (messages,
     settings, raw_extras, request_parameters, model, stream) to wire bytes.
     """
-    if provider in _ANTHROPIC_COMPATIBLE:
+    if provider_type in _ANTHROPIC_COMPATIBLE:
         from ccproxy.lightllm.adapters.anthropic import AnthropicAdapter
 
         return AnthropicAdapter.render(req)
-    if provider == "openai":
+    if provider_type == "openai":
         from ccproxy.lightllm.adapters.openai_chat import OpenAIChatAdapter
 
         return OpenAIChatAdapter.render(req)
-    if provider in _GOOGLE_COMPATIBLE:
+    if provider_type in _GOOGLE_COMPATIBLE:
         from ccproxy.lightllm.adapters.google import GoogleAdapter
 
         return GoogleAdapter.render(req)
-    if provider == "perplexity_pro":
+    if provider_type == "perplexity_pro":
         from ccproxy.lightllm.adapters.perplexity import PerplexityAdapter
 
         return PerplexityAdapter.render(req)
 
-    raise UnsupportedUpstreamError(f"no outbound renderer for provider={provider!r}")
+    raise UnsupportedUpstreamError(f"no outbound renderer for provider_type={provider_type!r}")

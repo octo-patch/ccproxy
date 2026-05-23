@@ -77,14 +77,14 @@ def _make_provider(
     header: str | None = None,
     host: str = "api.anthropic.com",
     path: str = "/v1/messages",
-    provider: str = "anthropic",
+    type: str = "anthropic",
 ) -> Provider:
     """Build a Provider with a CommandAuthSource for tests."""
     return Provider(
         auth=CommandAuthSource(command=command, header=header) if command else None,
         host=host,
         path=path,
-        provider=provider,
+        type=type,
     )
 
 
@@ -226,7 +226,7 @@ class TestSentinelResolvedProvider:
     """Resolve target via flow.metadata['ccproxy.oauth_provider'] when no override matches."""
 
     def test_returns_provider_for_known_sentinel(self) -> None:
-        provider = _make_provider(host="api.anthropic.com", path="/v1/messages", provider="anthropic")
+        provider = _make_provider(host="api.anthropic.com", path="/v1/messages", type="anthropic")
         _make_config_with_providers({"anthropic": provider})
 
         flow = _make_flow(host="proxy.local", path="/v1/chat/completions")
@@ -251,7 +251,7 @@ class TestSentinelResolvedProvider:
         """First-match override beats the sentinel-resolved Provider fallback."""
         from ccproxy.config import CCProxyConfig
 
-        sentinel_provider = _make_provider(host="api.anthropic.com", provider="anthropic")
+        sentinel_provider = _make_provider(host="api.anthropic.com", type="anthropic")
         override = TransformOverride(
             match_host="proxy.local",
             match_path="/v1/chat/completions",
@@ -339,7 +339,7 @@ class TestHandleTransform:
                 ]
             ),
             providers={
-                "anthropic": _make_provider(host="api.anthropic.com", provider="anthropic"),
+                "anthropic": _make_provider(host="api.anthropic.com", type="anthropic"),
             },
         )
         set_config_instance(config)
@@ -382,7 +382,7 @@ class TestHandleTransform:
                 ]
             ),
             providers={
-                "anthropic": _make_provider(host="api.anthropic.com", provider="anthropic"),
+                "anthropic": _make_provider(host="api.anthropic.com", type="anthropic"),
             },
         )
         set_config_instance(config)
@@ -410,7 +410,7 @@ class TestHandleTransform:
         call = mock_render.call_args
         parsed_arg = call.args[0]
         assert parsed_arg.model == "claude-3-5-sonnet-20241022"
-        assert call.kwargs.get("provider") == "anthropic"
+        assert call.kwargs.get("provider_type") == "anthropic"
 
     def test_reverse_proxy_unmatched_returns_501(self) -> None:
         _make_config_with_transforms(
@@ -615,7 +615,7 @@ class TestHandleRedirect:
 
         record = flow.metadata[InspectorMeta.RECORD]
         assert record.transform is not None
-        assert record.transform.provider == "anthropic"
+        assert record.transform.provider_type == "anthropic"
 
     def test_redirect_injects_api_key(self) -> None:
         """Override-driven redirect injects Authorization from the bound Provider."""
@@ -636,7 +636,7 @@ class TestHandleRedirect:
                     command="printf '%s' injected-token",
                     host="api.anthropic.com",
                     path="/v1/messages",
-                    provider="anthropic",
+                    type="anthropic",
                 ),
             },
         )
@@ -676,7 +676,7 @@ class TestGeminiTransform:
                 "gemini": _make_provider(
                     host="cloudcode-pa.googleapis.com",
                     path="/v1internal:{action}",
-                    provider="gemini",
+                    type="gemini",
                 ),
             },
         )
@@ -700,7 +700,7 @@ class TestGeminiTransform:
         # Non-Anthropic upstream: no anthropic-version floor.
         assert "anthropic-version" not in flow.request.headers
         mock_render.assert_called_once()
-        assert mock_render.call_args.kwargs.get("provider") == "gemini"
+        assert mock_render.call_args.kwargs.get("provider_type") == "gemini"
 
     @patch("ccproxy.lightllm.graph.dispatch_dump_sync")
     def test_gemini_non_streaming_action(
@@ -724,7 +724,7 @@ class TestGeminiTransform:
                 "gemini": _make_provider(
                     host="cloudcode-pa.googleapis.com",
                     path="/v1internal:{action}",
-                    provider="gemini",
+                    type="gemini",
                 ),
             },
         )
@@ -762,7 +762,7 @@ class TestResponseTransformExceptionHandling:
         register_transform_routes(router)
 
         meta = TransformMeta(
-            provider="anthropic",
+            provider_type="anthropic",
             model="claude-3",
             request_data={"messages": [{"role": "user", "content": "hi"}], "max_tokens": 100},
             is_streaming=False,
