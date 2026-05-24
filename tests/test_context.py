@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from unittest.mock import MagicMock
 
 from pydantic_ai.messages import (
@@ -366,3 +367,27 @@ class TestContextExtras:
         assert ctx.extras.has("y")  # None is a real value
         assert ctx.extras.has("z")  # empty string is a real value
         assert not ctx.extras.has("missing")
+
+
+def test_raw_ccproxy_flow_metadata_access_stays_private_to_context_facade():
+    root = Path(__file__).resolve().parents[1] / "src" / "ccproxy"
+    allowed = (root / "pipeline" / "context.py").resolve()
+    patterns = (
+        "flow.metadata",
+        "ctx.flow.metadata",
+        "ctx.flow_metadata",
+        'metadata["ccproxy',
+        "metadata['ccproxy",
+        'metadata.get("ccproxy',
+        "metadata.get('ccproxy",
+    )
+
+    offenders: list[str] = []
+    for path in root.rglob("*.py"):
+        if path.resolve() == allowed:
+            continue
+        text = path.read_text()
+        if any(pattern in text for pattern in patterns):
+            offenders.append(str(path.relative_to(root)))
+
+    assert offenders == []

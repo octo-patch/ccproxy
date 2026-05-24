@@ -1,7 +1,7 @@
 """Response-side Gemini orchestration.
 
-Two responsibilities, both gated on
-``flow.metadata["ccproxy.oauth_provider"] == "gemini"``:
+Two responsibilities, both gated on the ccproxy metadata facade resolving
+the flow as Gemini:
 
 - **Capacity fallback** — sticky-retry the original model on
   ``RESOURCE_EXHAUSTED`` (HTTP 429 / 503), then walk a configured fallback
@@ -33,9 +33,9 @@ from mitmproxy import http
 
 from ccproxy import transport
 from ccproxy.config import get_config
-from ccproxy.flows.store import InspectorMeta
 from ccproxy.hooks.gemini_envelope import EnvelopeUnwrapStream, unwrap_buffered
 from ccproxy.inspector.fingerprint import CapturedFingerprint
+from ccproxy.pipeline.context import metadata_from_flow
 
 logger = logging.getLogger(__name__)
 
@@ -111,7 +111,7 @@ class GeminiAddon:
 
     @staticmethod
     def _is_gemini_flow(flow: http.HTTPFlow) -> bool:
-        return flow.metadata.get("ccproxy.oauth_provider") == "gemini"
+        return metadata_from_flow(flow).oauth_provider == "gemini"
 
     @staticmethod
     def _capacity_enabled() -> bool:
@@ -142,7 +142,8 @@ class GeminiAddon:
         if "text/event-stream" not in content_type:
             return
 
-        record = flow.metadata.get(InspectorMeta.RECORD)
+        metadata = metadata_from_flow(flow)
+        record = metadata.record
         transform = getattr(record, "transform", None) if record else None
         if not transform or transform.mode != "redirect" or not transform.is_streaming:
             return
@@ -167,7 +168,7 @@ class GeminiAddon:
 
         unwrap_stream = EnvelopeUnwrapStream()
         flow.response.stream = unwrap_stream
-        flow.metadata["ccproxy.sse_transformer"] = unwrap_stream
+        metadata.sse_transformer = unwrap_stream
 
     async def response(self, flow: http.HTTPFlow) -> None:
         """Run capacity fallback first, then unwrap the envelope on success.
@@ -190,7 +191,7 @@ class GeminiAddon:
         if not response or response.status_code >= 400:
             return
 
-        record = flow.metadata.get(InspectorMeta.RECORD)
+        record = metadata_from_flow(flow).record
         transform = getattr(record, "transform", None) if record else None
         if not transform or transform.is_streaming:
             return
@@ -215,7 +216,8 @@ class GeminiAddon:
             for k, v in flow.request.headers.items()  # type: ignore[no-untyped-call]
             if k.lower() not in {"content-length", "content-encoding", "transfer-encoding"}
         }
-        profile = flow.metadata.get("ccproxy.fingerprint_profile") or transport.DEFAULT_PROFILE
+        metadata = metadata_from_flow(flow)
+        profile = metadata.fingerprint_profile or transport.DEFAULT_PROFILE
         try:
             fingerprint = _resolve_captured_fingerprint(profile)
             if fingerprint is None:
@@ -240,8 +242,8 @@ class GeminiAddon:
                 exc_info=True,
             )
             return None
-        flow.metadata["ccproxy.retry_transport"] = "curl_cffi"
-        flow.metadata["ccproxy.retry_profile"] = profile
+        metadata.retry_transport = "curl_cffi"
+        metadata.retry_profile = profile
         return response
 
     @staticmethod

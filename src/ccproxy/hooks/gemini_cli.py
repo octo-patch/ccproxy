@@ -1,7 +1,6 @@
 """Convert Gemini-bound traffic into the v1internal envelope cloudcode-pa speaks.
 
-Triggered when ``forward_oauth`` resolved the Gemini sentinel key
-(``flow.metadata["ccproxy.oauth_provider"] == "gemini"``). Single hook,
+Triggered when ``forward_oauth`` resolved the Gemini sentinel key. Single hook,
 three responsibilities:
 
     1. Header masquerade  ── user-agent + x-goog-api-client → Gemini CLI fingerprint
@@ -27,7 +26,7 @@ from mitmproxy import http
 from mitmproxy.connection import Server
 
 from ccproxy.config import get_config
-from ccproxy.flows.store import InspectorMeta, TransformMeta
+from ccproxy.flows.store import TransformMeta
 from ccproxy.hooks.gemini_envelope import EnvelopeUnwrapStream
 from ccproxy.pipeline.hook import hook
 
@@ -97,7 +96,7 @@ def reset_cache() -> None:
     _cached_project = None
 
 
-def _build_session_id(flow: http.HTTPFlow, model: str) -> str:
+def _build_session_id(flow: http.HTTPFlow, model: str, conversation_id: str) -> str:
     """Build the cloudcode-pa cache key for the implicit prefix cache.
 
     Returns a deterministic UUID5 derived from (model, project, conversation),
@@ -105,7 +104,7 @@ def _build_session_id(flow: http.HTTPFlow, model: str) -> str:
     cache, including across daemon restarts. Format matches what real
     Gemini CLI traffic emits — a UUID-shaped string in `request.session_id`.
     """
-    conv_id = str(flow.metadata.get("ccproxy.conversation_id") or f"flow:{flow.id}")
+    conv_id = conversation_id or f"flow:{flow.id}"
     project = _cached_project or "default"
     seed = f"ccproxy:{model}:{project}:{conv_id}"
     return str(uuid.uuid5(uuid.NAMESPACE_OID, seed))
@@ -152,7 +151,7 @@ def gemini_cli(ctx: Context, _: dict[str, Any]) -> Context:
         # Path was rewritten by _handle_redirect (e.g. ``/v1internal:{action}``)
         # before this hook saw it. Fall back to the TransformMeta the route
         # handler stamped earlier.
-        existing_transform = getattr(flow.metadata.get(InspectorMeta.RECORD), "transform", None)
+        existing_transform = getattr(ctx.metadata.record, "transform", None)
         if existing_transform:
             model = existing_transform.model
 
@@ -170,7 +169,7 @@ def gemini_cli(ctx: Context, _: dict[str, Any]) -> Context:
         ctx.set_header("user-agent", cli_ua)
         ctx.set_header("x-goog-api-client", f"gl-node/{_NODE_VERSION}")
 
-    session_id = _build_session_id(flow, model)
+    session_id = _build_session_id(flow, model, ctx.metadata.conversation_id)
 
     already_wrapped = "request" in body and "contents" not in body
     if already_wrapped:
@@ -206,7 +205,7 @@ def gemini_cli(ctx: Context, _: dict[str, Any]) -> Context:
     if flow.request.headers.get("x-goog-api-key"):
         del flow.request.headers["x-goog-api-key"]
 
-    record = flow.metadata.get(InspectorMeta.RECORD)
+    record = ctx.metadata.record
     if record is not None and getattr(record, "transform", None) is None:
         record.transform = TransformMeta(
             provider_type="gemini",

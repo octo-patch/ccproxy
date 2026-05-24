@@ -14,12 +14,8 @@ from mitmproxy import command, ctx, http
 
 from ccproxy.config import get_config
 from ccproxy.constants import SENSITIVE_PATTERNS
-from ccproxy.inspector.fingerprint import (
-    CLIENT_FINGERPRINT_METADATA,
-    LEGACY_CLIENT_FINGERPRINT_METADATA,
-    REPLAY_FINGERPRINT_METADATA,
-    CapturedFingerprint,
-)
+from ccproxy.inspector.fingerprint import CapturedFingerprint
+from ccproxy.pipeline.context import metadata_from_flow
 from ccproxy.shaping.store import get_store
 
 logger = logging.getLogger(__name__)
@@ -82,7 +78,7 @@ class ShapeCaptureAddon:
                 fingerprint_missing.append(fid)
             clean = _sanitize_shape_flow(flow)
             if fingerprint is not None:
-                clean.metadata[REPLAY_FINGERPRINT_METADATA] = fingerprint.to_dict()
+                metadata_from_flow(clean).fingerprint.profile = fingerprint.to_dict()
             if mode == "patch":
                 if fingerprint is not None:
                     store.write_fingerprint(provider, fingerprint)
@@ -181,7 +177,8 @@ def _sanitize_shape_flow(flow: http.HTTPFlow) -> http.HTTPFlow:
 
 
 def _fingerprint_from_flow(flow: http.HTTPFlow, provider: str) -> CapturedFingerprint | None:
-    raw = flow.metadata.get(CLIENT_FINGERPRINT_METADATA) or flow.metadata.get(LEGACY_CLIENT_FINGERPRINT_METADATA)
+    metadata = metadata_from_flow(flow)
+    raw = metadata.fingerprint.client or metadata.legacy_client_fingerprint
     if not isinstance(raw, dict):
         return None
     fingerprint = CapturedFingerprint.from_dict(raw)

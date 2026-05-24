@@ -18,7 +18,7 @@ import json
 
 from mitmproxy.contentviews._api import Contentview, Metadata, SyntaxHighlight
 
-from ccproxy.flows.store import InspectorMeta
+from ccproxy.pipeline.context import metadata_from_flow
 
 
 class ClientRequestContentview(Contentview):
@@ -34,7 +34,7 @@ class ClientRequestContentview(Contentview):
         flow = metadata.flow
         if flow is None:
             return "(no flow context)"
-        record = flow.metadata.get(InspectorMeta.RECORD)
+        record = metadata_from_flow(flow).record
         if record is None or record.client_request is None:
             return "(no client request snapshot)"
 
@@ -74,7 +74,7 @@ class ForwardedRequestContentview(Contentview):
         flow = metadata.flow
         if flow is None:
             return "(no flow context)"
-        record = flow.metadata.get(InspectorMeta.RECORD)
+        record = metadata_from_flow(flow).record
         if record is None or record.forwarded_request is None:
             return "(no forwarded-request snapshot — flow not rewritten)"
 
@@ -114,7 +114,7 @@ class ProviderResponseContentview(Contentview):
         flow = metadata.flow
         if flow is None:
             return "(no flow context)"
-        record = flow.metadata.get(InspectorMeta.RECORD)
+        record = metadata_from_flow(flow).record
         if record is None or record.provider_response is None:
             return "(no provider response snapshot)"
 

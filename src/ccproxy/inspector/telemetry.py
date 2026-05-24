@@ -9,7 +9,8 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any
 
-from ccproxy.flows.store import FlowRecord, InspectorMeta, OtelMeta
+from ccproxy.flows.store import FlowRecord, OtelMeta
+from ccproxy.pipeline.context import metadata_from_flow
 
 if TYPE_CHECKING:
     from mitmproxy import http
@@ -87,29 +88,32 @@ class InspectorTracer:
                 span.set_attribute("gen_ai.system", self._provider_map.get(host, host))
                 span.set_attribute("gen_ai.operation.name", "chat")
 
-            record: FlowRecord | None = flow.metadata.get(InspectorMeta.RECORD)
+            metadata = metadata_from_flow(flow)
+            record: FlowRecord | None = metadata.record
             if record:
                 record.otel = OtelMeta(span=span)
             else:
-                flow.metadata["ccproxy.otel_span"] = span
-                flow.metadata["ccproxy.otel_span_ended"] = False
+                metadata.otel_span = span
+                metadata.otel_span_ended = False
 
         except Exception as e:
             logger.debug("Error starting OTel span: %s", e)
 
     def _get_span(self, flow: http.HTTPFlow) -> tuple[Any, bool]:
-        """Retrieve span and ended flag from FlowRecord or flow.metadata fallback."""
-        record: FlowRecord | None = flow.metadata.get(InspectorMeta.RECORD)
+        """Retrieve span and ended flag from FlowRecord or metadata fallback."""
+        metadata = metadata_from_flow(flow)
+        record: FlowRecord | None = metadata.record
         if record and record.otel:
             return record.otel.span, record.otel.ended
-        return flow.metadata.get("ccproxy.otel_span"), flow.metadata.get("ccproxy.otel_span_ended", False)
+        return metadata.otel_span, metadata.otel_span_ended
 
     def _mark_ended(self, flow: http.HTTPFlow) -> None:
-        record: FlowRecord | None = flow.metadata.get(InspectorMeta.RECORD)
+        metadata = metadata_from_flow(flow)
+        record: FlowRecord | None = metadata.record
         if record and record.otel:
             record.otel.ended = True
         else:
-            flow.metadata["ccproxy.otel_span_ended"] = True
+            metadata.otel_span_ended = True
 
     def finish_span(
         self,

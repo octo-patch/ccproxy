@@ -12,7 +12,7 @@ hook implements the three-mode resolution chain:
    server state is detected here.
 
 2. **Organic L1 cache hit** — when no explicit slug is provided but the
-   ``ccproxy.conversation_id`` flow-metadata key matches an entry in the
+   ``ctx.metadata.conversation_id`` key matches an entry in the
    :class:`PerplexityThreadStore` populated by a prior turn's
    :class:`PerplexityAddon`. Hot path; no server round-trip.
 
@@ -195,8 +195,6 @@ def _count_client_user_turns(messages: list[Any]) -> int:
 )
 def pplx_thread_inject(ctx: Context, _: dict[str, Any]) -> Context:
     """Resolve thread continuation state and inject into ``ctx._body["pplx"]``."""
-    assert ctx.flow is not None
-    flow = ctx.flow
     body = ctx._body if isinstance(ctx._body, dict) else {}
 
     slug = glom(body, "metadata.session_id", default=None)
@@ -236,7 +234,7 @@ def pplx_thread_inject(ctx: Context, _: dict[str, Any]) -> Context:
                 )
 
     if resolved is None:
-        conv_id = flow.metadata.get("ccproxy.conversation_id")
+        conv_id = ctx.metadata.conversation_id
         if isinstance(conv_id, str) and conv_id:
             store = get_pplx_thread_store()
             cached = store.get(conv_id)

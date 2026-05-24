@@ -8,7 +8,8 @@ from typing import Any
 
 from mitmproxy import http, tls
 
-from ccproxy.inspector.fingerprint import CLIENT_FINGERPRINT_METADATA, parse_client_hello_bytes
+from ccproxy.inspector.fingerprint import parse_client_hello_bytes
+from ccproxy.pipeline.context import metadata_from_flow
 
 logger = logging.getLogger(__name__)
 
@@ -39,4 +40,4 @@ class FingerprintCaptureAddon:
         fingerprint = self._by_client_id.get(flow.client_conn.id)
         if fingerprint is None:
             return
-        flow.metadata[CLIENT_FINGERPRINT_METADATA] = fingerprint
+        metadata_from_flow(flow).fingerprint.client = fingerprint

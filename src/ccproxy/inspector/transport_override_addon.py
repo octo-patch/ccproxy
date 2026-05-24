@@ -1,7 +1,6 @@
 """Rewrite ``flow.request`` to the in-process sidecar for impersonated outbound.
 
-Selection is keyed on ``flow.metadata["ccproxy.oauth_provider"]`` (set by the
-``forward_oauth`` inbound hook for sentinel-keyed flows). When the resolved
+Selection is keyed on the ccproxy metadata facade. When the resolved
 :class:`~ccproxy.config.Provider` declares a ``fingerprint_profile``, this
 addon stashes the real target in ``X-CCProxy-Target-Url`` and the profile in
 ``X-CCProxy-Impersonate``, then rewrites destination to ``127.0.0.1:<sidecar>``.
@@ -16,7 +15,8 @@ import logging
 from mitmproxy import http
 
 from ccproxy.config import get_config
-from ccproxy.flows.store import HttpSnapshot, InspectorMeta
+from ccproxy.flows.store import HttpSnapshot
+from ccproxy.pipeline.context import metadata_from_flow
 from ccproxy.transport.sidecar import IMPERSONATE_HEADER, TARGET_URL_HEADER
 
 logger = logging.getLogger(__name__)
@@ -29,7 +29,8 @@ class TransportOverrideAddon:
         self._sidecar_port = sidecar_port
 
     async def request(self, flow: http.HTTPFlow) -> None:
-        provider_name = flow.metadata.get("ccproxy.oauth_provider")
+        metadata = metadata_from_flow(flow)
+        provider_name = metadata.oauth_provider
         if not provider_name:
             return
 
@@ -40,7 +41,7 @@ class TransportOverrideAddon:
         profile = provider.fingerprint_profile
         target_url = flow.request.pretty_url
 
-        record = flow.metadata.get(InspectorMeta.RECORD)
+        record = metadata.record
         if record is not None:
             record.forwarded_request = HttpSnapshot(
                 headers=dict(flow.request.headers.items()),  # type: ignore[no-untyped-call]
@@ -57,8 +58,8 @@ class TransportOverrideAddon:
         flow.request.scheme = "http"
         flow.request.headers["host"] = f"127.0.0.1:{self._sidecar_port}"
 
-        flow.metadata["ccproxy.transport_override"] = True
-        flow.metadata["ccproxy.fingerprint_profile"] = profile
+        metadata.transport_override = True
+        metadata.fingerprint_profile = profile
 
         logger.debug(
             "sidecar override: flow=%s provider=%s profile=%s target=%s",

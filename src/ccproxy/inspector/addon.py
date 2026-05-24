@@ -20,11 +20,11 @@ from mitmproxy.proxy.mode_specs import ReverseMode, WireGuardMode
 from ccproxy.flows.store import (
     FLOW_ID_HEADER,
     HttpSnapshot,
-    InspectorMeta,
     TransformMeta,
     create_flow_record,
     get_flow_record,
 )
+from ccproxy.pipeline.context import metadata_from_flow
 from ccproxy.utils import (
     extract_first_user_text,
     extract_first_user_text_gemini,
@@ -89,8 +89,7 @@ class InspectorAddon:
         """Compute ``conversation_id`` and ``system_prompt_sha`` from the JSON body.
 
         Quietly no-ops on non-JSON bodies, parse errors, or missing fields.
-        Stashes the values on both ``flow.metadata`` (for cross-addon access)
-        and the record (for typed Python access).
+        Stashes the values on both the ccproxy metadata facade and the record.
         """
         import hashlib
 
@@ -116,14 +115,14 @@ class InspectorAddon:
             seed = text or f"flow:{flow.id}"
             conv_id = hashlib.sha256(seed.encode()).hexdigest()[:12]
             record.conversation_id = conv_id
-            flow.metadata["ccproxy.conversation_id"] = conv_id
+            metadata_from_flow(flow).conversation_id = conv_id
 
         system = body.get("system")
         if system is not None:
             serialized = json.dumps(system, sort_keys=True, default=str)
             sys_sha = hashlib.sha256(serialized.encode()).hexdigest()[:12]
             record.system_prompt_sha = sys_sha
-            flow.metadata["ccproxy.system_prompt_sha"] = sys_sha
+            metadata_from_flow(flow).system_prompt_sha = sys_sha
 
     async def requestheaders(self, flow: http.HTTPFlow) -> None:
         """Disable request streaming for reverse proxy flows.
@@ -155,8 +154,9 @@ class InspectorAddon:
             )
             self._enrich_record_with_conversation_ids(flow, record)
 
-        flow.metadata[InspectorMeta.DIRECTION] = direction
-        flow.metadata[InspectorMeta.RECORD] = record
+        metadata = metadata_from_flow(flow)
+        metadata.direction = direction
+        metadata.record = record
 
         host = flow.request.pretty_host
 
@@ -196,7 +196,8 @@ class InspectorAddon:
         if "text/event-stream" not in content_type:
             return
 
-        record = flow.metadata.get(InspectorMeta.RECORD)
+        metadata = metadata_from_flow(flow)
+        record = metadata.record
         transform = getattr(record, "transform", None) if record else None
 
         if transform is not None and transform.is_streaming and transform.mode == "transform":
@@ -252,7 +253,7 @@ class InspectorAddon:
             render = dispatch_render(inbound_format=inbound_format, model=transform.model)
             pipeline = SSEPipeline(intake=intake, render=render)
             response.stream = pipeline
-            flow.metadata["ccproxy.sse_transformer"] = pipeline
+            metadata_from_flow(flow).sse_transformer = pipeline
         except Exception:
             logger.warning(
                 "Failed to construct SSEPipeline, falling back to passthrough",
@@ -266,9 +267,11 @@ class InspectorAddon:
             if not response:
                 return
 
-            record = flow.metadata.get(InspectorMeta.RECORD)
+            metadata = metadata_from_flow(flow)
+            record = metadata.record
             if record is not None:
-                transformer = flow.metadata.pop("ccproxy.sse_transformer", None)
+                transformer = metadata.sse_transformer
+                metadata.sse_transformer = None
                 raw_body = getattr(transformer, "raw_body", None) if transformer else None
                 if raw_body is not None:
                     record.provider_response = HttpSnapshot(
@@ -356,7 +359,7 @@ class InspectorAddon:
         """Return the pre-pipeline client request for each flow as JSON."""
         results: list[dict[str, object]] = []
         for f in flows:
-            record = f.metadata.get(InspectorMeta.RECORD)
+            record = metadata_from_flow(f).record
             cr = getattr(record, "client_request", None) if record else None
             if cr is None:
                 results.append({"flow_id": f.id, "error": "no snapshot"})

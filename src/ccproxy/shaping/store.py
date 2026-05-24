@@ -19,7 +19,8 @@ from mitmproxy import http
 from mitmproxy.io import FlowReader, FlowWriter
 
 from ccproxy.config import get_config, get_config_dir
-from ccproxy.inspector.fingerprint import REPLAY_FINGERPRINT_METADATA, CapturedFingerprint
+from ccproxy.inspector.fingerprint import CapturedFingerprint
+from ccproxy.pipeline.context import metadata_from_flow
 from ccproxy.shaping.patches import ShapePatchWriteResult, apply_shape_patch_series, write_shape_patch
 from ccproxy.utils import get_templates_dir
 
@@ -89,7 +90,7 @@ class ShapeStore:
             flow = self._pick_base(provider)
             if flow is None:
                 raise ValueError(f"no base shape available for provider {provider}")
-            flow.metadata[REPLAY_FINGERPRINT_METADATA] = fingerprint.to_dict()
+            metadata_from_flow(flow).fingerprint.profile = fingerprint.to_dict()
             self._write_single(path, flow)
         logger.info("Saved fingerprint profile for provider %s at %s", provider, path)
         return path
@@ -226,7 +227,7 @@ def _metadata_to_state(value: Any) -> Any:
 def _fingerprint_from_metadata(provider: str, flow: http.HTTPFlow | None) -> CapturedFingerprint | None:
     if flow is None:
         return None
-    raw = flow.metadata.get(REPLAY_FINGERPRINT_METADATA)
+    raw = metadata_from_flow(flow).fingerprint.profile
     if not isinstance(raw, dict):
         return None
     try:

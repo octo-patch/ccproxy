@@ -18,7 +18,7 @@ from collections.abc import Callable, Iterator, MutableMapping
 from dataclasses import MISSING, dataclass, field, fields
 from dataclasses import Field as DataclassField
 from dataclasses import replace as _dataclass_replace
-from typing import TYPE_CHECKING, Any, Literal, Self
+from typing import TYPE_CHECKING, Any, Self
 
 from glom import assign as _glom_assign
 from glom import delete as _glom_delete
@@ -30,12 +30,7 @@ from pydantic_ai.models import ModelRequestParameters
 from pydantic_ai.settings import ModelSettings
 from pydantic_ai.tools import ToolDefinition
 
-from ccproxy.inspector.fingerprint import (
-    CLIENT_FINGERPRINT_METADATA,
-    LEGACY_CLIENT_FINGERPRINT_METADATA,
-    REPLAY_FINGERPRINT_METADATA,
-    CapturedFingerprint,
-)
+from ccproxy.inspector.fingerprint import CapturedFingerprint
 from ccproxy.lightllm.parsed import InboundFormat
 
 if TYPE_CHECKING:
@@ -282,10 +277,12 @@ class CcproxyMetadata(MetadataSection):
     """
 
     record: Any | None = metadata_field(default=None)
-    direction: Literal["inbound"] | None = metadata_field(default=None)
+    direction: str = metadata_field(default="")
     conversation_id: str = metadata_field(default="")
     system_prompt_sha: str = metadata_field(default="")
     sse_transformer: Any | None = metadata_field(default=None)
+    otel_span: Any | None = metadata_field(default=None)
+    otel_span_ended: bool = metadata_field(default=False)
     oauth_provider: str = metadata_field(default="")
     oauth_injected: bool = metadata_field(default=False)
     session_id: str = metadata_field(default="")
@@ -296,6 +293,7 @@ class CcproxyMetadata(MetadataSection):
     fingerprint_profile: str = metadata_field(default="")
     retry_transport: str = metadata_field(default="")
     retry_profile: str = metadata_field(default="")
+    legacy_client_fingerprint: dict[str, Any] | None = metadata_field(key="client_fingerprint", default=None)
 
     @property
     def pplx(self) -> PplxMetadata:
@@ -304,6 +302,11 @@ class CcproxyMetadata(MetadataSection):
     @property
     def fingerprint(self) -> FingerprintMetadata:
         return FingerprintMetadata.from_source(self._source, "fingerprint")
+
+
+def metadata_from_flow(flow: Any) -> CcproxyMetadata:
+    """Return the ccproxy metadata facade for a mitmproxy flow."""
+    return CcproxyMetadata.from_source(flow.metadata)
 
 
 def _replace_system_parts(
@@ -615,14 +618,13 @@ class Context:
 
     @property
     def client_fingerprint(self) -> CapturedFingerprint | None:
-        raw = self.flow_metadata.get(CLIENT_FINGERPRINT_METADATA) or self.flow_metadata.get(
-            LEGACY_CLIENT_FINGERPRINT_METADATA
-        )
+        metadata = self.metadata
+        raw = metadata.fingerprint.client or metadata.legacy_client_fingerprint
         return CapturedFingerprint.from_dict(raw) if isinstance(raw, dict) else None
 
     @property
     def replay_fingerprint(self) -> CapturedFingerprint | None:
-        raw = self.flow_metadata.get(REPLAY_FINGERPRINT_METADATA)
+        raw = self.metadata.fingerprint.profile
         return CapturedFingerprint.from_dict(raw) if isinstance(raw, dict) else None
 
     # --- Headers (read/write flow.request.headers directly) ---

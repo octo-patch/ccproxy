@@ -1,8 +1,8 @@
 """Extract session ID from Claude Code's metadata.user_id field.
 
 Parses session_id from either JSON object or legacy compound string
-format and stores it in ``flow.metadata["ccproxy.session_id"]`` for
-downstream hooks to consume without injecting fields into the request body.
+format and stores it in ``ctx.metadata.session_id`` for downstream hooks
+to consume without injecting fields into the request body.
 """
 
 from __future__ import annotations
@@ -31,11 +31,10 @@ def extract_session_id_guard(ctx: Context) -> bool:
     writes=[],
 )
 def extract_session_id(ctx: Context, params: dict[str, Any]) -> Context:
-    """Extract session_id from metadata.user_id into flow metadata.
+    """Extract session_id from body metadata into ccproxy flow metadata.
 
-    Stores session_id on ``flow.metadata`` (mitmproxy per-flow dict), NOT
-    on the body's metadata dict — writing into the body would inject fields
-    that upstream APIs reject.
+    Stores session_id on ``ctx.metadata``, NOT on the body's metadata dict;
+    writing into the body would inject fields that upstream APIs reject.
     """
     user_id = str(glom(ctx._body, "metadata.user_id", default=""))
     if not user_id:

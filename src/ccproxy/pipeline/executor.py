@@ -35,9 +35,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_HOOK_RESULTS_KEY = "ccproxy.hook_results"
-
-
 class PipelineExecutor:
     """Executes hooks in DAG-ordered sequence with override support."""
 
@@ -73,14 +70,14 @@ class PipelineExecutor:
         and trace_id, but do not block execution.
 
         Hook results (success, skip, error) are accumulated in
-        flow.metadata["ccproxy.hook_results"] as a list of HookResult.
+        ``ctx.metadata.hook_results`` as a list of HookResult.
         """
         ctx = Context.from_flow(flow)
-        flow.metadata["ccproxy.inbound_format"] = ctx._inbound_format.value
+        metadata = ctx.metadata
+        metadata.inbound_format = ctx._inbound_format.value
 
-        # Initialize hook results storage
-        if _HOOK_RESULTS_KEY not in flow.metadata:
-            flow.metadata[_HOOK_RESULTS_KEY] = []
+        if "hook_results" not in metadata:
+            metadata.hook_results = []
 
         available = extract_available_keys(ctx)
 
@@ -102,7 +99,9 @@ class PipelineExecutor:
                 )
 
             result = self._execute_hook(ctx, spec, overrides, self.extra_params)
-            flow.metadata[_HOOK_RESULTS_KEY].append(result)
+            hook_results = metadata.hook_results
+            hook_results.append(result)
+            metadata.hook_results = hook_results
 
             # Only update available keys if hook succeeded
             if isinstance(result, _HookSuccess):

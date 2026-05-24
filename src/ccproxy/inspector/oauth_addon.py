@@ -15,6 +15,7 @@ from mitmproxy import http
 from ccproxy import transport
 from ccproxy.config import get_config
 from ccproxy.inspector.fingerprint import CapturedFingerprint
+from ccproxy.pipeline.context import metadata_from_flow
 
 logger = logging.getLogger(__name__)
 
@@ -22,17 +23,16 @@ logger = logging.getLogger(__name__)
 class OAuthAddon:
     """mitmproxy addon: 401-detect → refresh → replay.
 
-    Trigger contract: ``forward_oauth`` stamps
-    ``flow.metadata["ccproxy.oauth_injected"]`` and
-    ``flow.metadata["ccproxy.oauth_provider"]``. ``response()`` reads those and
-    replays the request when it sees a 401 on a flow ccproxy injected.
+    Trigger contract: ``forward_oauth`` stamps the ccproxy metadata facade.
+    ``response()`` reads that state and replays the request when it sees a
+    401 on a flow ccproxy injected.
     """
 
     async def response(self, flow: http.HTTPFlow) -> None:
         response = flow.response
         if not response or response.status_code != 401:
             return
-        if not flow.metadata.get("ccproxy.oauth_injected"):
+        if not metadata_from_flow(flow).oauth_injected:
             return
 
         try:
@@ -41,7 +41,8 @@ class OAuthAddon:
             logger.error("OAuth retry failed", exc_info=True)
 
     async def _retry_with_refreshed_token(self, flow: http.HTTPFlow) -> bool:
-        provider = flow.metadata.get("ccproxy.oauth_provider", "")
+        metadata = metadata_from_flow(flow)
+        provider = metadata.oauth_provider
         if not provider:
             return False
 
@@ -60,7 +61,7 @@ class OAuthAddon:
         headers = dict(flow.request.headers)
         headers.pop("x-ccproxy-oauth-injected", None)
 
-        profile = flow.metadata.get("ccproxy.fingerprint_profile") or transport.DEFAULT_PROFILE
+        profile = metadata.fingerprint_profile or transport.DEFAULT_PROFILE
         fingerprint = _resolve_captured_fingerprint(profile)
         if fingerprint is None:
             client = await transport.get_client(host=flow.request.pretty_host, profile=profile)
@@ -77,8 +78,8 @@ class OAuthAddon:
             content=flow.request.content,
             timeout=config.provider_timeout,
         )
-        flow.metadata["ccproxy.retry_transport"] = "curl_cffi"
-        flow.metadata["ccproxy.retry_profile"] = profile
+        metadata.retry_transport = "curl_cffi"
+        metadata.retry_profile = profile
 
         assert flow.response is not None
         flow.response.status_code = retry_resp.status_code

@@ -10,9 +10,9 @@ headers (``User-Agent``, ``Origin``, ``Referer``, ``x-perplexity-*``,
 migration removed litellm and with it that step — this hook re-implements
 it as an outbound DAG entry.
 
-Runs after :mod:`forward_oauth` (which stamps ``ccproxy.oauth_provider``
-on ``flow.metadata`` and writes the placeholder ``Authorization`` header)
-and before :mod:`pplx_preflight`. The ``Authorization`` header is cleared
+Runs after :mod:`forward_oauth` (which stamps ``ctx.metadata.oauth_provider``
+and writes the placeholder ``Authorization`` header) and before
+:mod:`pplx_preflight`. The ``Authorization`` header is cleared
 once the Cookie equivalent is in place — leaking the OAuth-shape header
 to Perplexity would expose the sentinel-resolution surface and risks
 Cloudflare scrutiny.

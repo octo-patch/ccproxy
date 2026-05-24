@@ -28,6 +28,7 @@ from mcp.server.fastmcp import Context, FastMCP
 from pydantic import AnyHttpUrl
 
 from ccproxy.flows import MitmwebClient, _make_client, _run_jq
+from ccproxy.pipeline.context import CcproxyMetadata
 from ccproxy.shaping.store import get_store
 from ccproxy.specs.model_catalog import build_catalog
 
@@ -254,16 +255,16 @@ def list_shapes() -> list[str]:
 def list_conversations() -> dict[str, list[str]]:
     """Group captured flows by ``conversation_id`` (first 12 hex of sha256(first user message text)).
 
-    Returns ``{conversation_id: [flow_id, ...]}`` for flows whose metadata
-    carries a ``ccproxy.conversation_id`` (set by the inspector addon).
+    Returns ``{conversation_id: [flow_id, ...]}`` for flows whose ccproxy
+    metadata carries a conversation id.
     """
     grouped: dict[str, list[str]] = {}
     with _make_client() as client:
         flows = client.list_flows()
     for flow in flows:
-        metadata = flow.get("metadata", {}) or {}
-        conv_id = metadata.get("ccproxy.conversation_id")
-        if not isinstance(conv_id, str):
+        metadata = CcproxyMetadata.from_source(flow.get("metadata", {}) or {})
+        conv_id = metadata.conversation_id
+        if not conv_id:
             continue
         grouped.setdefault(conv_id, []).append(str(flow.get("id", "")))
     return grouped

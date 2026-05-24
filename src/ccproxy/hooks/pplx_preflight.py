@@ -50,7 +50,7 @@ def pplx_preflight(ctx: Context, _: dict[str, Any]) -> Context:
 
     Failures are warned-and-swallowed: the main ``perplexity_ask`` proceeds
     regardless. The preflight's success state is stamped on
-    ``flow.metadata["ccproxy.pplx.preflight"]`` for observability.
+    ``ctx.metadata.pplx.preflight`` for observability.
     """
     assert ctx.flow is not None
     body = ctx._body if isinstance(ctx._body, dict) else {}

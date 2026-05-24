@@ -3,8 +3,8 @@
 Routing precedence on every inbound request:
 
     1. ``inspector.transforms`` — first regex-matched override wins.
-    2. ``flow.metadata["ccproxy.oauth_provider"]`` — set by ``forward_oauth``
-       when a sentinel key resolved. Looks up :class:`CCProxyConfig.providers`.
+    2. ccproxy metadata ``oauth_provider`` — set by ``forward_oauth`` when a
+       sentinel key resolved. Looks up :class:`CCProxyConfig.providers`.
     3. None — :class:`mitmproxy.proxy.mode_specs.ReverseMode` flows return
        OpenAI-shape 501; WireGuard flows pass through unchanged.
 
@@ -31,8 +31,9 @@ from mitmproxy.connection import Server
 from mitmproxy.proxy.mode_specs import ReverseMode
 
 from ccproxy.config import Provider, TransformOverride, get_config
-from ccproxy.flows.store import InspectorMeta, TransformMeta
+from ccproxy.flows.store import TransformMeta
 from ccproxy.lightllm.graph import _ANTHROPIC_COMPATIBLE
+from ccproxy.pipeline.context import metadata_from_flow
 
 if TYPE_CHECKING:
     from mitmproxy.http import HTTPFlow
@@ -132,7 +133,7 @@ def _resolve_transform_target(
             continue
         return rule
 
-    oauth_provider = flow.metadata.get("ccproxy.oauth_provider")
+    oauth_provider = metadata_from_flow(flow).oauth_provider
     if oauth_provider:
         return config.providers.get(oauth_provider)
 
@@ -148,19 +149,18 @@ def _record_transform_meta(
     is_streaming: bool,
     mode: Literal["redirect", "transform"],
 ) -> None:
-    record = flow.metadata.get(InspectorMeta.RECORD)
+    metadata = metadata_from_flow(flow)
+    record = metadata.record
     if record is None:
         return
-    inbound_format = flow.metadata.get("ccproxy.inbound_format", "unknown")
-    request_parameters = flow.metadata.get("ccproxy.parsed_request_parameters")
     record.transform = TransformMeta(
         provider_type=provider_type,
         model=model,
         request_data={**body},
         is_streaming=is_streaming,
         mode=mode,
-        inbound_format=inbound_format,
-        request_parameters=request_parameters,
+        inbound_format=metadata.inbound_format,
+        request_parameters=metadata.request_parameters,
     )
 
 
@@ -333,11 +333,12 @@ def _handle_transform(
         model = target.dest_model or _model_for_routing(body, flow.request.path)
 
     ctx = Context.from_flow(flow)
-    flow.metadata.setdefault("ccproxy.inbound_format", ctx._inbound_format.value)
+    if "inbound_format" not in ctx.metadata:
+        ctx.metadata.inbound_format = ctx._inbound_format.value
     ctx.parse_sync()
     if model and model != ctx.model:
         ctx.model = model
-    flow.metadata["ccproxy.parsed_request_parameters"] = ctx.request_parameters
+    ctx.metadata.request_parameters = ctx.request_parameters
     new_body = dispatch_dump_sync(ctx, provider_type=provider_str)
 
     try:
@@ -390,7 +391,7 @@ def register_transform_routes(router: InspectorRouter) -> None:
 
     @router.route("/{path}", rtype=RouteType.REQUEST, catch_error=False)  # ty: ignore[invalid-argument-type]
     def handle_transform(flow: HTTPFlow, **_kwargs: object) -> None:  # pyright: ignore[reportUnusedFunction]
-        if flow.metadata.get(InspectorMeta.DIRECTION) != "inbound":
+        if metadata_from_flow(flow).direction != "inbound":
             return
 
         try:
@@ -454,7 +455,7 @@ def register_transform_routes(router: InspectorRouter) -> None:
 
     @router.route("/{path}", rtype=RouteType.RESPONSE, catch_error=False)  # ty: ignore[invalid-argument-type]
     def handle_transform_response(flow: HTTPFlow, **_kwargs: object) -> None:  # pyright: ignore[reportUnusedFunction]
-        record = flow.metadata.get(InspectorMeta.RECORD)
+        record = metadata_from_flow(flow).record
         if record is None or getattr(record, "transform", None) is None:
             return
 

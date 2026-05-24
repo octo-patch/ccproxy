@@ -1,13 +1,13 @@
 """Response-side Perplexity orchestration.
 
-One responsibility, gated on
-``flow.metadata["ccproxy.oauth_provider"] == "perplexity_pro"``:
+One responsibility, gated on the ccproxy metadata facade resolving the flow
+as Perplexity Pro:
 
 **L1 cache capture** — parse the upstream Perplexity SSE response after it
 completes and persist the captured ``backend_uuid`` /
 ``read_write_token`` / ``context_uuid`` / ``thread_url_slug`` into the
 :class:`~ccproxy.lightllm.pplx_threads.PerplexityThreadStore` keyed by
-``flow.metadata["ccproxy.conversation_id"]`` (the SHA12 stamped by
+``ctx.metadata.conversation_id`` (the SHA12 stamped by
 :class:`~ccproxy.inspector.addon.InspectorAddon`).
 
 The next-turn ``pplx_thread_inject`` hook reads this cache as Mode 2
@@ -37,6 +37,7 @@ from ccproxy.lightllm.pplx import (
     _parse_sse_line,
 )
 from ccproxy.lightllm.pplx_threads import get_pplx_thread_store
+from ccproxy.pipeline.context import metadata_from_flow
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +47,7 @@ class PerplexityAddon:
 
     @staticmethod
     def _is_pplx_flow(flow: http.HTTPFlow) -> bool:
-        return flow.metadata.get("ccproxy.oauth_provider") == PERPLEXITY_PROVIDER_NAME
+        return metadata_from_flow(flow).oauth_provider == PERPLEXITY_PROVIDER_NAME
 
     async def response(self, flow: http.HTTPFlow) -> None:
         """Parse the upstream Perplexity SSE body and save IDs to the L1 cache.
@@ -63,7 +64,8 @@ class PerplexityAddon:
         if not raw_body:
             return
 
-        conv_id = flow.metadata.get("ccproxy.conversation_id")
+        metadata = metadata_from_flow(flow)
+        conv_id = metadata.conversation_id
         if not isinstance(conv_id, str) or not conv_id:
             return
 
@@ -84,7 +86,7 @@ class PerplexityAddon:
             context_uuid=context_uuid,
             thread_url_slug=ids.get("thread_url_slug"),
         )
-        flow.metadata["ccproxy.pplx.captured_ids"] = dict(ids)
+        metadata.pplx.captured_ids = dict(ids)
         logger.debug(
             "pplx L1 cache populated: conv_id=%s backend_uuid=%s slug=%s",
             conv_id[:8],
@@ -99,9 +101,8 @@ class PerplexityAddon:
         # flow.response.content with the OpenAI-format JSON. This is the
         # only access path for non-streaming flows since by the time we run
         # the response.content has already been transformed.
-        from ccproxy.flows.store import InspectorMeta
-
-        record = flow.metadata.get(InspectorMeta.RECORD)
+        metadata = metadata_from_flow(flow)
+        record = metadata.record
         provider_resp = getattr(record, "provider_response", None) if record else None
         if provider_resp is not None:
             body = getattr(provider_resp, "body", None)
@@ -109,7 +110,7 @@ class PerplexityAddon:
                 return body
         # Streaming flows that never went through the route's transform_response:
         # the SSETransformer keeps the raw_body tee.
-        transformer = flow.metadata.get("ccproxy.sse_transformer")
+        transformer = metadata.sse_transformer
         if transformer is not None and hasattr(transformer, "raw_body"):
             raw = transformer.raw_body
             if isinstance(raw, bytes) and raw:

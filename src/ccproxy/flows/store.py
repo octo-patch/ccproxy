@@ -154,9 +154,9 @@ class FlowRecord:
     hook_results: list[HookResult] = field(default_factory=list)
     """Results from each hook execution in the pipeline.
 
-    Populated from flow.metadata["ccproxy.hook_results"] during pipeline
-    execution. Each entry is a discriminated union indicating success,
-    skip, or error for a single hook invocation.
+    Populated from ``ctx.metadata.hook_results`` during pipeline execution.
+    Each entry is a discriminated union indicating success, skip, or error
+    for a single hook invocation.
     """
 
     _parsed_request_body: dict[str, Any] | None = field(default=None, init=False, repr=False)

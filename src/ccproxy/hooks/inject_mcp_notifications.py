@@ -23,9 +23,9 @@ Integration flow::
 
        Pairs are inserted immediately before the final user message.
 
-    3. Session linkage: ``ccproxy.session_id`` in ``flow.metadata`` (set by
-       the ``extract_session_id`` inbound hook) must match the ``session_id``
-       from the notification POST.
+    3. Session linkage: ``ctx.metadata.session_id`` (set by the
+       ``extract_session_id`` inbound hook) must match the ``session_id`` from
+       the notification POST.
 
 See also: ``ccproxy.mcp.buffer``, ``ccproxy.mcp.routes``.
 """

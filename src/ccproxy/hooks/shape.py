@@ -17,7 +17,6 @@ from mitmproxy import http
 from mitmproxy.proxy.mode_specs import ReverseMode
 
 from ccproxy.config import ProviderShapingConfig, get_config
-from ccproxy.flows.store import InspectorMeta
 from ccproxy.pipeline.context import Context
 from ccproxy.pipeline.hook import hook
 from ccproxy.shaping.executor import execute_shape_hooks
@@ -36,7 +35,7 @@ def shape_guard(ctx: Context) -> bool:
     if not (is_reverse or is_oauth):
         return False
 
-    record = ctx.flow.metadata.get(InspectorMeta.RECORD)
+    record = ctx.metadata.record
     return record is not None and getattr(record, "transform", None) is not None
 
 
@@ -47,7 +46,7 @@ def shape_guard(ctx: Context) -> bool:
 def shape(ctx: Context, params: dict[str, Any]) -> Context:
     """Pick a shape, inject content from the incoming request, apply to the outbound flow."""
     assert ctx.flow is not None
-    record = ctx.flow.metadata.get(InspectorMeta.RECORD)
+    record = ctx.metadata.record
     transform = getattr(record, "transform", None)
     if transform is None:
         return ctx

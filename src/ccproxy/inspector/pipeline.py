@@ -12,8 +12,8 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 
-from ccproxy.flows.store import InspectorMeta
 from ccproxy.lightllm import LightLLMError
+from ccproxy.pipeline.context import metadata_from_flow
 from ccproxy.pipeline.executor import PipelineExecutor
 from ccproxy.pipeline.loader import load_hooks
 
@@ -55,7 +55,7 @@ def register_pipeline_routes(
     @router.route("/", rtype=RouteType.REQUEST)
     @router.route("/{path}", rtype=RouteType.REQUEST)
     def handle_pipeline(flow: HTTPFlow, **kwargs: object) -> None:  # pyright: ignore[reportUnusedFunction]
-        if flow.metadata.get(InspectorMeta.DIRECTION) != "inbound":
+        if metadata_from_flow(flow).direction != "inbound":
             return
 
         try:

@@ -22,7 +22,7 @@ from typing import cast
 from mitmproxy import command, ctx, http
 from mitmproxy.addons.savehar import SaveHar
 
-from ccproxy.flows.store import InspectorMeta
+from ccproxy.pipeline.context import metadata_from_flow
 
 logger = logging.getLogger(__name__)
 
@@ -106,7 +106,7 @@ class MultiHARSaver:
         """
         clone = cast("http.HTTPFlow", flow.copy())  # type: ignore[no-untyped-call]
 
-        record = flow.metadata.get(InspectorMeta.RECORD)
+        record = metadata_from_flow(flow).record
         if record is not None and record.forwarded_request is not None:
             fr = record.forwarded_request
             synthetic_req = http.Request.make(
@@ -146,7 +146,7 @@ class MultiHARSaver:
         """
         clone = cast("http.HTTPFlow", flow.copy())  # type: ignore[no-untyped-call]
 
-        record = flow.metadata.get(InspectorMeta.RECORD)
+        record = metadata_from_flow(flow).record
         snapshot = record.client_request if record is not None else None
         if snapshot is None:
             logger.debug("Flow %s has no client request snapshot; falling back", flow.id)
