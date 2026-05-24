@@ -34,7 +34,7 @@ class MultiHARSaver:
         self._savehar = SaveHar()  # standalone — we only use make_har()
 
     @command.command("ccproxy.dump")  # type: ignore[untyped-decorator]
-    def ccproxy_dump(self, flow_ids: str) -> str:
+    def dump_flows(self, flow_ids: str) -> str:
         """Return a JSON-serialized multi-page HAR for one or more flows.
 
         ``flow_ids`` is a comma-separated list of mitmproxy flow ids.

@@ -234,12 +234,12 @@ def clear_flows(jq_filter: str | None = None) -> int:
 
 @mcp.tool()
 async def capture_shape(flow_id: str, provider: str, ctx: Context) -> dict[str, Any]:
-    """Save a captured flow as a shape template under ``provider``."""
+    """Generate a shape patch for ``provider`` from a captured flow."""
     await ctx.info(f"capturing shape {provider!r} from flow {flow_id!r}")
 
     def _do() -> dict[str, Any]:
         with _make_client() as client:
-            return client.save_shape([flow_id], provider)
+            return client.save_shape([flow_id], provider, mode="patch")
 
     return await asyncio.to_thread(_do)
 

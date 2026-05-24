@@ -56,7 +56,7 @@ class TestCCProxyConfig:
         assert config.port == 4000
         assert config.ccproxy_config_path == Path("./ccproxy.yaml")
 
-    def test_from_yaml_no_ccproxy_section(self) -> None:
+    def test_from_yaml_no_project_section(self) -> None:
         """Test loading ccproxy.yaml without ccproxy section."""
         yaml_content = """
 # Empty YAML or missing ccproxy section
@@ -234,7 +234,7 @@ class TestConfigSingleton:
         finally:
             clear_config_instance()
 
-    def test_get_config_uses_ccproxy_yaml(self) -> None:
+    def test_get_config_uses_config_yaml(self) -> None:
         """Test that get_config reads settings from ccproxy.yaml."""
         clear_config_instance()
 

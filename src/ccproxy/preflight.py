@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 _CCPROXY_PATTERNS: list[tuple[str, str]] = []
 
 
-def _is_ccproxy_process(cmdline: str) -> bool:
+def _is_managed_process(cmdline: str) -> bool:
     """Check if a command line string matches a ccproxy-managed process."""
     return any(binary in cmdline and marker in cmdline for binary, marker in _CCPROXY_PATTERNS)
 
@@ -163,7 +163,7 @@ def get_port_pid(port: int, host: str = "127.0.0.1") -> tuple[int | None, str | 
     return -1, "unknown"
 
 
-def find_ccproxy_processes(exclude_pid: int | None = None) -> list[tuple[int, str]]:
+def find_managed_processes(exclude_pid: int | None = None) -> list[tuple[int, str]]:
     """Scan /proc for orphaned ccproxy-managed processes."""
     exclude = {exclude_pid, os.getppid()} if exclude_pid else {os.getppid()}
     results: list[tuple[int, str]] = []
@@ -176,7 +176,7 @@ def find_ccproxy_processes(exclude_pid: int | None = None) -> list[tuple[int, st
             if pid in exclude:
                 continue
             cmdline = _read_proc_cmdline(pid)
-            if cmdline and _is_ccproxy_process(cmdline):
+            if cmdline and _is_managed_process(cmdline):
                 results.append((pid, cmdline))
     except OSError as e:
         logger.warning("Error scanning /proc: %s", e)
@@ -253,7 +253,7 @@ def run_preflight_checks(
 
         # Check if the port holder is a stale ccproxy process we missed
         cmdline = _read_proc_cmdline(pid)
-        if cmdline and _is_ccproxy_process(cmdline):
+        if cmdline and _is_managed_process(cmdline):
             logger.warning("Port %d held by stale ccproxy process (PID %d)", port, pid)
             kill_stale_processes([(pid, cmdline)])
             time.sleep(0.3)

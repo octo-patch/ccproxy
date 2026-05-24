@@ -182,4 +182,4 @@ ccproxy:
         - transfer-encoding
         - connection
         - accept-encoding
-    shapes_dir: ~/.config/ccproxy/shaping/shapes
+    shapes_dir: ~/.config/ccproxy/shapes

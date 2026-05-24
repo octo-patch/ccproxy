@@ -1,13 +1,14 @@
 """ShapeStore — per-provider on-disk store of request shapes.
 
-One writable ``.mflow`` file per provider under ``shapes_dir``. Optional
-package defaults are read from a fallback directory. Files are native
-mitmproxy tnetstring dumps, openable in ``mitmweb --rfile``.
+One writable ``.mflow`` override per provider may live under ``shapes_dir``.
+Provider patch queues live next to those overrides as ``{provider}/series``.
+Optional package defaults are read from a fallback directory.
 """
 
 from __future__ import annotations
 
 import logging
+import shutil
 import threading
 from pathlib import Path
 
@@ -15,7 +16,7 @@ from mitmproxy import http
 from mitmproxy.io import FlowReader, FlowWriter
 
 from ccproxy.config import get_config, get_config_dir
-from ccproxy.shaping.patches import apply_shape_patch_series
+from ccproxy.shaping.patches import ShapePatchWriteResult, apply_shape_patch_series, write_shape_patch
 from ccproxy.utils import get_templates_dir
 
 logger = logging.getLogger(__name__)
@@ -28,13 +29,9 @@ class ShapeStore:
         self,
         shapes_dir: Path,
         fallback_dir: Path | None = None,
-        patches_dir: Path | None = None,
-        fallback_patches_dir: Path | None = None,
     ) -> None:
         self._dir = shapes_dir
         self._fallback_dir = fallback_dir
-        self._patches_dir = patches_dir
-        self._fallback_patches_dir = fallback_patches_dir
         self._dir.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
 
@@ -48,27 +45,49 @@ class ShapeStore:
     def pick(self, provider: str) -> http.HTTPFlow | None:
         """Return the most recent user shape, then the bundled default."""
         with self._lock:
-            user_flow = self._pick_from(self._path(provider))
-            if user_flow is not None:
-                self._apply_patch_dirs(user_flow, provider, [self._patches_dir])
-                return user_flow
+            flow = self._pick_base(provider)
+            if flow is None:
+                return None
+            apply_shape_patch_series(flow, provider, self._dir)
+            return flow
 
-            fallback_flow = self._pick_from(self._fallback_path(provider))
-            if fallback_flow is not None:
-                self._apply_patch_dirs(fallback_flow, provider, [self._fallback_patches_dir, self._patches_dir])
-                return fallback_flow
+    def pick_base(self, provider: str) -> http.HTTPFlow | None:
+        """Return the most recent user shape or bundled default without patches."""
+        with self._lock:
+            return self._pick_base(provider)
 
-            return None
+    def write_patch(
+        self,
+        provider: str,
+        target_flow: http.HTTPFlow,
+        *,
+        patch_name: str = "0001-local-shape.patch",
+    ) -> ShapePatchWriteResult:
+        """Write a patch queue entry from the provider base to ``target_flow``."""
+        with self._lock:
+            base_flow = self._pick_base(provider)
+            if base_flow is None or base_flow.request is None:
+                raise ValueError(f"no base shape available for provider {provider}")
+            if target_flow.request is None:
+                raise ValueError("target flow has no request")
+            return write_shape_patch(
+                base_flow.request,
+                target_flow.request,
+                self._patch_dir(provider),
+                patch_name=patch_name,
+            )
 
     def clear(self, provider: str) -> None:
-        """Delete the provider's shape file, if any."""
+        """Delete the provider's user override and patch queue, if any."""
         with self._lock:
             self._path(provider).unlink(missing_ok=True)
+            shutil.rmtree(self._patch_dir(provider), ignore_errors=True)
 
     def list_providers(self) -> list[str]:
         """Return sorted list of providers with at least one shape file."""
         with self._lock:
             providers = {p.stem for p in self._dir.glob("*.mflow")}
+            providers.update(p.name for p in self._dir.iterdir() if p.is_dir() and (p / "series").exists())
             if self._fallback_dir is not None and self._fallback_dir.exists():
                 providers.update(p.stem for p in self._fallback_dir.glob("*.mflow"))
             return sorted(providers)
@@ -80,6 +99,15 @@ class ShapeStore:
         if self._fallback_dir is None:
             return None
         return self._fallback_dir / f"{provider}.mflow"
+
+    def _patch_dir(self, provider: str) -> Path:
+        return self._dir / provider
+
+    def _pick_base(self, provider: str) -> http.HTTPFlow | None:
+        user_flow = self._pick_from(self._path(provider))
+        if user_flow is not None:
+            return user_flow
+        return self._pick_from(self._fallback_path(provider))
 
     @staticmethod
     def _pick_from(path: Path | None) -> http.HTTPFlow | None:
@@ -95,11 +123,6 @@ class ShapeStore:
             logger.warning("Failed to read shape file %s: %s", path, exc)
             return None
         return flows[-1] if flows else None
-
-    @staticmethod
-    def _apply_patch_dirs(flow: http.HTTPFlow, provider: str, patch_dirs: list[Path | None]) -> None:
-        for patch_dir in patch_dirs:
-            apply_shape_patch_series(flow, provider, patch_dir)
 
 
 # --- Singleton ---
@@ -121,13 +144,9 @@ def _create_store() -> ShapeStore:
     config = get_config()
     config_dir = get_config_dir()
 
-    if config.shaping.shapes_dir:
-        shapes_dir = Path(config.shaping.shapes_dir).expanduser()
-    else:
-        shapes_dir = config_dir / "shaping" / "shapes"
+    shapes_dir = Path(config.shaping.shapes_dir).expanduser() if config.shaping.shapes_dir else config_dir / "shapes"
 
     fallback_dir: Path | None = None
-    fallback_patches_dir: Path | None = None
     try:
         templates_dir = get_templates_dir()
     except RuntimeError:
@@ -136,20 +155,10 @@ def _create_store() -> ShapeStore:
         candidate = templates_dir / "shapes"
         if candidate.exists():
             fallback_dir = candidate
-        patches_candidate = templates_dir / "shapes" / "patches"
-        if patches_candidate.exists():
-            fallback_patches_dir = patches_candidate
-
-    if config.shaping.patches_dir:
-        patches_dir = Path(config.shaping.patches_dir).expanduser()
-    else:
-        patches_dir = config_dir / "shaping" / "patches"
 
     return ShapeStore(
         shapes_dir=shapes_dir,
         fallback_dir=fallback_dir,
-        patches_dir=patches_dir,
-        fallback_patches_dir=fallback_patches_dir,
     )
 
 

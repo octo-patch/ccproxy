@@ -75,16 +75,16 @@ def test_applies_series_in_order(tmp_path: Path) -> None:
         first_text,
         lambda doc: doc["headers"].update({"x-seed": "patched"}),
     )
-    patches_dir = tmp_path / "patches"
+    shapes_dir = tmp_path / "shapes"
     _write_series(
-        patches_dir / "anthropic",
+        shapes_dir / "anthropic",
         {
             "0001-body.patch": first_patch,
             "0002-headers.patch": second_patch,
         },
     )
 
-    assert apply_shape_patch_series(flow, "anthropic", patches_dir) is True
+    assert apply_shape_patch_series(flow, "anthropic", shapes_dir) is True
 
     body = json.loads(flow.request.content or b"{}")
     assert body["seed"] == "patched"
@@ -99,10 +99,10 @@ def test_series_supports_p0_patch_paths(tmp_path: Path) -> None:
         fromfile="shape.json",
         tofile="shape.json",
     )
-    patches_dir = tmp_path / "patches"
-    _write_series(patches_dir / "anthropic", {"0001-url.patch": patch}, series="0001-url.patch -p0\n")
+    shapes_dir = tmp_path / "shapes"
+    _write_series(shapes_dir / "anthropic", {"0001-url.patch": patch}, series="0001-url.patch -p0\n")
 
-    assert apply_shape_patch_series(flow, "anthropic", patches_dir) is True
+    assert apply_shape_patch_series(flow, "anthropic", shapes_dir) is True
 
     assert flow.request.pretty_host == "patched.example"
     assert flow.request.query["beta"] == "true"
@@ -117,9 +117,9 @@ def test_missing_series_is_noop(tmp_path: Path) -> None:
 
 
 def test_bad_patch_context_raises(tmp_path: Path) -> None:
-    patches_dir = tmp_path / "patches"
+    shapes_dir = tmp_path / "shapes"
     _write_series(
-        patches_dir / "anthropic",
+        shapes_dir / "anthropic",
         {
             "0001-bad.patch": "\n".join(
                 [
@@ -135,7 +135,7 @@ def test_bad_patch_context_raises(tmp_path: Path) -> None:
     )
 
     with pytest.raises(ShapePatchError, match="hunk context"):
-        apply_shape_patch_series(_flow(), "anthropic", patches_dir)
+        apply_shape_patch_series(_flow(), "anthropic", shapes_dir)
 
 
 def test_store_applies_user_patch_to_fallback_shape(tmp_path: Path) -> None:
@@ -147,10 +147,10 @@ def test_store_applies_user_patch_to_fallback_shape(tmp_path: Path) -> None:
         _request_to_patch_text(fallback_flow.request),
         lambda doc: doc["body"].update({"seed": "user-patched"}),
     )
-    patches_dir = tmp_path / "patches"
-    _write_series(patches_dir / "anthropic", {"0001-user.patch": patch})
+    user_dir = tmp_path / "user"
+    _write_series(user_dir / "anthropic", {"0001-user.patch": patch})
 
-    store = ShapeStore(tmp_path / "user", fallback_dir=fallback_dir, patches_dir=patches_dir)
+    store = ShapeStore(user_dir, fallback_dir=fallback_dir)
     picked = store.pick("anthropic")
 
     assert picked is not None
@@ -158,12 +158,11 @@ def test_store_applies_user_patch_to_fallback_shape(tmp_path: Path) -> None:
     assert json.loads(picked.request.content or b"{}")["seed"] == "user-patched"
 
 
-def test_get_store_uses_configured_patch_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_get_store_uses_configured_shape_dir_for_patch_queue(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from ccproxy.config import CCProxyConfig, set_config_instance
 
     config_dir = tmp_path / "config"
     shapes_dir = tmp_path / "shapes"
-    patches_dir = tmp_path / "patches"
     flow = _flow(body={"seed": "configured"})
     ShapeStore(shapes_dir).add("anthropic", flow)
 
@@ -171,11 +170,11 @@ def test_get_store_uses_configured_patch_dir(tmp_path: Path, monkeypatch: pytest
         _request_to_patch_text(flow.request),
         lambda doc: doc["body"].update({"seed": "patched-by-config"}),
     )
-    _write_series(patches_dir / "anthropic", {"0001-config.patch": patch})
+    _write_series(shapes_dir / "anthropic", {"0001-config.patch": patch})
 
     monkeypatch.setenv("CCPROXY_CONFIG_DIR", str(config_dir))
     set_config_instance(
-        CCProxyConfig(shaping={"shapes_dir": str(shapes_dir), "patches_dir": str(patches_dir)}),
+        CCProxyConfig(shaping={"shapes_dir": str(shapes_dir)}),
     )
     clear_store_instance()
 

@@ -163,10 +163,10 @@ class TestHeaderMethods:
 
 
 class TestMetadataConvenienceProperties:
-    def test_ccproxy_oauth_provider_getter(self):
+    def test_oauth_provider_getter(self):
         flow = _make_flow(body={"model": "m", "messages": [], "metadata": {"ccproxy_oauth_provider": "anthropic"}})
         ctx = Context.from_flow(flow)
-        assert ctx.ccproxy_oauth_provider == "anthropic"
+        assert ctx.oauth_provider == "anthropic"
 
 
 class TestCommit:

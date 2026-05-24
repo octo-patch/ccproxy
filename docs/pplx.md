@@ -491,7 +491,7 @@ ccproxy port 4000 / 4001 (mitmweb reverse listener)
                              stamps flow.metadata["ccproxy.flow_id"]
                              starts OTel span
    MultiHARSaver             HAR capture (passive)
-   ShapeCapturer             shape capture (skipped for perplexity — no shaping)
+   ShapeCaptureAddon         shape capture (skipped for perplexity — no shaping)
    InspectorRouter (inbound) runs the inbound DAG:
      1. forward_oauth          resolves sentinel → session cookie
                                stamps flow.metadata["ccproxy.oauth_provider"] = "perplexity_pro"

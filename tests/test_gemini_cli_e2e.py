@@ -44,7 +44,7 @@ _RED_32X32_PNG_B64 = (
 RED_32X32_PNG = base64.b64decode(_RED_32X32_PNG_B64)
 
 
-def _ccproxy_reachable() -> bool:
+def _proxy_reachable() -> bool:
     try:
         httpx.head(CCPROXY_BASE, timeout=2)
     except httpx.HTTPError:
@@ -55,7 +55,7 @@ def _ccproxy_reachable() -> bool:
 pytestmark = [
     pytest.mark.e2e,
     pytest.mark.skipif(not GEMINI_CREDS.exists(), reason=f"{GEMINI_CREDS} not found"),
-    pytest.mark.skipif(not _ccproxy_reachable(), reason=f"ccproxy not reachable at {CCPROXY_BASE}"),
+    pytest.mark.skipif(not _proxy_reachable(), reason=f"ccproxy not reachable at {CCPROXY_BASE}"),
 ]
 
 

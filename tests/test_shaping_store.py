@@ -82,9 +82,13 @@ class TestShapeStore:
     def test_clear_removes_seed_file(self, seeds_dir: Path) -> None:
         store = ShapeStore(seeds_dir)
         store.add("anthropic", _flow())
+        patch_dir = seeds_dir / "anthropic"
+        patch_dir.mkdir()
+        (patch_dir / "series").write_text("0001-local.patch\n")
         assert (seeds_dir / "anthropic.mflow").exists()
         store.clear("anthropic")
         assert not (seeds_dir / "anthropic.mflow").exists()
+        assert not patch_dir.exists()
 
     def test_clear_reveals_fallback_shape(self, tmp_path: Path) -> None:
         user_dir = tmp_path / "user"
@@ -164,7 +168,7 @@ class TestGetStoreSingleton:
 
         store = get_store()
         store.add("anthropic", _flow())
-        assert (tmp_path / "shaping" / "shapes" / "anthropic.mflow").exists()
+        assert (tmp_path / "shapes" / "anthropic.mflow").exists()
         clear_store_instance()
 
     def test_get_store_is_a_singleton(self, tmp_path: Path, monkeypatch: Any) -> None:

@@ -400,11 +400,11 @@ class Context:
     # --- Metadata convenience properties ---
 
     @property
-    def ccproxy_oauth_provider(self) -> str:
+    def oauth_provider(self) -> str:
         return str(self.metadata.get("ccproxy_oauth_provider", ""))
 
-    @ccproxy_oauth_provider.setter
-    def ccproxy_oauth_provider(self, value: str) -> None:
+    @oauth_provider.setter
+    def oauth_provider(self, value: str) -> None:
         self.metadata["ccproxy_oauth_provider"] = value
 
     # --- Commit ---

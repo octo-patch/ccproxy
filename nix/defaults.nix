@@ -7,11 +7,12 @@
       anthropic = {
         auth = {
           type = "command";
-          command = "jq -r '.claudeAiOauth.accessToken' ~/.claude/.credentials.json";
+          command = "printenv CLAUDE_CODE_OAUTH_TOKEN";
         };
         host = "api.anthropic.com";
         path = "/v1/messages";
         type = "anthropic";
+        fingerprint_profile = "chrome131";
       };
       gemini = {
         auth = {
@@ -139,8 +140,7 @@
     };
     shaping = {
       enabled = true;
-      shapes_dir = "~/.config/ccproxy/shaping/shapes";
-      patches_dir = "~/.config/ccproxy/shaping/patches";
+      shapes_dir = "~/.config/ccproxy/shapes";
       providers = {
         anthropic = {
           content_fields = [

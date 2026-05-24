@@ -135,7 +135,7 @@ def _build_addons(
     wg_cli_port: int,
     sidecar_port: int,
 ) -> list[Any]:
-    """Final addon chain: ``InspectorAddon → MultiHARSaver → ShapeCapturer →
+    """Final addon chain: ``InspectorAddon → MultiHARSaver → ShapeCaptureAddon →
     inbound pipeline → transform (lightllm) → outbound pipeline → OAuthAddon →
     GeminiAddon``.
 
@@ -158,7 +158,7 @@ def _build_addons(
     from ccproxy.inspector.multi_har_saver import MultiHARSaver
     from ccproxy.inspector.oauth_addon import OAuthAddon
     from ccproxy.inspector.pplx_addon import PerplexityAddon
-    from ccproxy.inspector.shape_capturer import ShapeCapturer
+    from ccproxy.inspector.shape_capturer import ShapeCaptureAddon
     from ccproxy.inspector.transport_override_addon import TransportOverrideAddon
 
     contentviews.add(ClientRequestContentview())
@@ -205,7 +205,7 @@ def _build_addons(
     inbound_hooks = hooks_cfg.get("inbound", []) if isinstance(hooks_cfg, dict) else hooks_cfg
     outbound_hooks = hooks_cfg.get("outbound", []) if isinstance(hooks_cfg, dict) else []
 
-    addons: list[Any] = [addon, MultiHARSaver(), ShapeCapturer()]
+    addons: list[Any] = [addon, MultiHARSaver(), ShapeCaptureAddon()]
 
     if inbound_hooks:
         addons.append(_make_pipeline_router("ccproxy_inbound", inbound_hooks))

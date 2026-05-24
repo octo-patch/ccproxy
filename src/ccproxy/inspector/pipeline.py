@@ -30,7 +30,7 @@ def _upstream_headers(response: httpx.Response) -> dict[str, str]:
     return {"Content-Type": content_type}
 
 
-def _ccproxy_error(message: str, *, error_type: str, code: int) -> bytes:
+def _json_error_response(message: str, *, error_type: str, code: int) -> bytes:
     import json
 
     return json.dumps({"error": {"message": message, "type": error_type, "code": code}}).encode()
@@ -70,6 +70,6 @@ def register_pipeline_routes(
 
             flow.response = Response.make(
                 exc.status_code,
-                _ccproxy_error(exc.message, error_type=exc.__class__.__name__, code=exc.status_code),
+                _json_error_response(exc.message, error_type=exc.__class__.__name__, code=exc.status_code),
                 {"Content-Type": "application/json"},
             )

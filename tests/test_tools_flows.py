@@ -14,12 +14,14 @@ from ccproxy.flows import (
     FlowsDump,
     FlowsList,
     FlowsRepl,
+    FlowsShape,
     MitmwebClient,
     _do_compare,
     _do_diff,
     _do_dump,
     _do_list,
     _do_repl,
+    _do_shape,
     _format_body,
     _git_diff,
     _header_value,
@@ -532,13 +534,13 @@ class TestFlowReplSession:
 
     def test_shape_saves_selected_flows(self) -> None:
         client = MagicMock()
-        client.save_shape.return_value = {"provider": "anthropic", "flows_saved": 1}
+        client.save_shape.return_value = {"provider": "anthropic", "status": "ok", "patch": "shape.patch"}
         session = FlowReplSession(client, [self._flow("abc123")])
 
         result = session.shape("anthropic", 0)
 
         assert result["provider"] == "anthropic"
-        client.save_shape.assert_called_once_with(["abc123"], "anthropic")
+        client.save_shape.assert_called_once_with(["abc123"], "anthropic", mode="patch")
 
     def test_clear_deletes_selected_flows_and_refreshes(self) -> None:
         client = MagicMock()
@@ -640,6 +642,37 @@ class TestDoDump:
 
         with pytest.raises(SystemExit):
             _do_dump(client, [])
+
+
+class TestDoShape:
+    def test_patch_mode_requires_single_flow(self) -> None:
+        console = MagicMock()
+        client = MagicMock()
+
+        with pytest.raises(SystemExit):
+            _do_shape(console, client, [{"id": "a"}, {"id": "b"}], provider="anthropic", mflow=False)
+
+        client.save_shape.assert_not_called()
+
+    def test_patch_mode_calls_client(self) -> None:
+        console = MagicMock()
+        client = MagicMock()
+        client.save_shape.return_value = {"provider": "anthropic", "status": "ok", "patch": "shape.patch"}
+
+        _do_shape(console, client, [{"id": "a"}], provider="anthropic", mflow=False)
+
+        client.save_shape.assert_called_once_with(["a"], "anthropic", mode="patch")
+        assert "Saved shape patch" in str(console.print.call_args)
+
+    def test_mflow_mode_accepts_multiple_flows(self) -> None:
+        console = MagicMock()
+        client = MagicMock()
+        client.save_shape.return_value = {"provider": "anthropic", "flows_saved": 2, "missing": []}
+
+        _do_shape(console, client, [{"id": "a"}, {"id": "b"}], provider="anthropic", mflow=True)
+
+        client.save_shape.assert_called_once_with(["a", "b"], "anthropic", mode="mflow")
+        assert "Saved .mflow shape" in str(console.print.call_args)
 
 
 class TestDoDiff:
@@ -939,6 +972,29 @@ class TestHandleFlows:
 
         mock_repl.assert_called_once()
         assert mock_repl.call_args.args[1] == flow_set
+
+    @patch("ccproxy.config.get_config")
+    @patch("ccproxy.flows._make_client")
+    @patch("ccproxy.flows._resolve_flow_set")
+    @patch("ccproxy.flows._do_shape")
+    def test_shape_subcommand(
+        self,
+        mock_shape: MagicMock,
+        mock_resolve: MagicMock,
+        mock_client: MagicMock,
+        mock_config: MagicMock,
+    ) -> None:
+        mock_ctx = MagicMock()
+        mock_client.return_value.__enter__ = MagicMock(return_value=mock_ctx)
+        mock_client.return_value.__exit__ = MagicMock(return_value=False)
+        flow_set = [{"id": "a"}]
+        mock_resolve.return_value = flow_set
+
+        handle_flows(FlowsShape(provider="anthropic"), Path("/tmp"))  # noqa: S108
+
+        mock_shape.assert_called_once()
+        assert mock_shape.call_args.kwargs["provider"] == "anthropic"
+        assert mock_shape.call_args.kwargs["mflow"] is False
 
     @patch("ccproxy.config.get_config")
     @patch("ccproxy.flows._make_client")

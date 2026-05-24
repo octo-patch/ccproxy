@@ -199,7 +199,7 @@ async def test_capture_shape_passes_to_client(mock_client: Any) -> None:
     ctx = _mock_ctx()
     with _patch_make_client(mock_client):
         result = await _registered_tool_fn("capture_shape")(flow_id="flow-a", provider="anthropic", ctx=ctx)
-    mock_client.save_shape.assert_called_once_with(["flow-a"], "anthropic")
+    mock_client.save_shape.assert_called_once_with(["flow-a"], "anthropic", mode="patch")
     assert result == {"saved": 1, "provider": "anthropic"}
     ctx.info.assert_awaited_once()
 
@@ -292,5 +292,3 @@ def test_stateless_http_set_on_singleton() -> None:
     is ``False``; we want the streamable-HTTP transport to skip the GET-SSE
     long-poll route and the per-session manager bookkeeping."""
     assert server.mcp.settings.stateless_http is True
-
-

@@ -20,19 +20,21 @@ When ccproxy's lightllm transform converts a request, the outbound payload is AP
 - **System prompt structure**: Claude Code's compliance preamble as the first system block
 - **Metadata identity**: Nested JSON in `metadata.user_id` with `device_id`, `account_uuid`, `session_id`
 
-A **shape** is a captured, known-good request carrying this complete compliance envelope — a full `mitmproxy.http.HTTPFlow` persisted in native tnetstring format.
+A **shape** is a captured, known-good request carrying this complete compliance envelope. Packaged defaults and explicit full overrides are stored as request-only `.mflow` files. Normal user customization is stored as a quilt-style patch queue against a deterministic `shape.json` projection of that request.
 
-ccproxy ships sanitized default shapes for built-in shaping providers. These bundled shapes are read-only package assets and are used automatically when the user has not captured an override. User-captured shapes remain the public customization and refresh API.
+ccproxy ships sanitized default shapes for built-in shaping providers. These bundled shapes are read-only package assets and are used automatically when the user has not captured an override. User customizations normally live as small `.patch` files under `$CCPROXY_CONFIG_DIR/shapes/{provider}/`.
 
-Resolution order is:
+Base resolution order is:
 
-1. User override: `{shapes_dir}/{provider}.mflow`
+1. User full override: `{shapes_dir}/{provider}.mflow`
 2. Bundled default: `ccproxy/templates/shapes/{provider}.mflow`
 3. No shape: the shape hook no-ops and logs the missing provider shape
 
+After the base is loaded, ccproxy applies the user patch queue from `{shapes_dir}/{provider}/series` if present.
+
 ### Shape Capture Workflow
 
-Manual capture is only needed when a user wants to override the bundled default or refresh it after the target SDK changes its compliance envelope.
+Manual capture is only needed when a user wants to customize the bundled default or refresh it after the target SDK changes its compliance envelope.
 
 ```bash
 # 1. Start ccproxy and run real traffic through the inspector
@@ -45,24 +47,35 @@ ccproxy flows list
 # 3. Verify the flow has all expected compliance headers
 ccproxy flows compare
 
-# 4. Capture a user override shape
-ccproxy flows shape --provider anthropic
+# 4. Generate/update the provider patch queue
+ccproxy flows shape anthropic
+
+# Optional escape hatch: write a sanitized request-only full override
+ccproxy flows shape anthropic --mflow
 ```
 
 A good shape has a successful (2xx) response, originates from the authentic target SDK, contains the full set of compliance headers, and has a representative system prompt structure.
 
 ### Under the Hood
 
-`ccproxy flows shape` invokes `MitmwebClient.save_shape()` → `POST /commands/ccproxy.shape` → `ShapeCapturer.ccproxy_shape()` (`inspector/shape_capturer.py`). The capturer validates the flow (POST method, JSON content-type, `capture.path_pattern` regex), deep-copies it, strips all `ccproxy.*` runtime metadata, and appends the clean flow to the provider's shape file via `FlowWriter`.
+`ccproxy flows shape` invokes `MitmwebClient.save_shape()` → `POST /commands/ccproxy.shape` → `ShapeCaptureAddon.save_shape_artifact()` (`inspector/shape_capturer.py`). The addon validates the flow (POST method, JSON content-type, `capture.path_pattern` regex), sanitizes it, and then:
+
+- Default mode: canonicalizes the selected request and provider base into `shape.json`, writes a standard unified diff as `{shapes_dir}/{provider}/0001-local-shape.patch`, and lists it in `{shapes_dir}/{provider}/series`.
+- `--mflow` mode: writes a sanitized request-only `{shapes_dir}/{provider}.mflow` override via `FlowWriter`.
 
 ### Shape Storage
 
-`ShapeStore` (`shaping/store.py`) maintains one writable user `.mflow` file per provider and reads packaged defaults as a fallback:
+`ShapeStore` (`shaping/store.py`) maintains one shape root containing optional full overrides and patch queues:
 
 ```
-~/.config/ccproxy/shaping/shapes/
+~/.config/ccproxy/shapes/
 ├── anthropic.mflow
-├── gemini.mflow
+├── anthropic/
+│   ├── series
+│   └── 0001-local-shape.patch
+├── gemini/
+│   ├── series
+│   └── 0001-local-shape.patch
 └── ...
 
 <package>/ccproxy/templates/shapes/
@@ -73,15 +86,26 @@ A good shape has a successful (2xx) response, originates from the authentic targ
 
 - **Append-only**: Each `add()` appends; previous shapes are preserved
 - **User overrides win**: `pick()` returns the latest user shape first, then the bundled default
+- **Patch queues apply last**: `{provider}/series` patches apply to either the user override or bundled default
 - **Native format**: Inspectable via `mitmweb --rfile`
 - **Thread-safe**: All operations under a threading lock
-- **Clear means revert**: Clearing a user shape deletes only the override; the bundled default remains available
+- **Clear means revert**: Clearing a user shape deletes the override and patch queue; the bundled default remains available
 
 ```yaml
 shaping:
   enabled: true
-  shapes_dir: ~/.config/ccproxy/shaping/shapes
+  shapes_dir: ~/.config/ccproxy/shapes
 ```
+
+The `series` file is a quilt-style ordered patch manifest:
+
+```text
+# applied top to bottom
+0001-local-shape.patch
+0002-another-change.patch -p1
+```
+
+Each patch is a standard unified diff against virtual `shape.json`. Git-style paths (`a/shape.json`, `b/shape.json`) use the default `-p1` strip level.
 
 ---
 
@@ -142,9 +166,9 @@ WireGuard passthrough flows (already authentic) and flows without a transform ar
 
 When it fires:
 
-1. Gets the provider from `record.transform.provider`
+1. Gets the provider from `record.transform.provider_type`
 2. Looks up `ProviderShapingConfig` from `config.shaping.providers[provider]`
-3. `store.pick(provider)` — fetches the most recent user shape, falling back to the bundled default
+3. `store.pick(provider)` — fetches the most recent user shape, falling back to the bundled default, then applies the provider patch queue
 4. `http.Request.from_state(captured.request.get_state())` — deep-copies as a working `Shape`
 5. `strip_headers(shape_ctx, profile.strip_headers)` — removes configured headers
 6. `_inject_content(shape_ctx, incoming_ctx, profile)` — content injection per merge strategy
@@ -312,7 +336,7 @@ hooks:
 
 shaping:
   enabled: true
-  shapes_dir: ~/.config/ccproxy/shaping/shapes
+  shapes_dir: ~/.config/ccproxy/shapes
   providers:
     anthropic:
       content_fields:
@@ -445,13 +469,13 @@ ccproxy flows compare
 # The diff shows the forwarded request carrying shape compliance headers
 # alongside your actual message content
 
-# Optional override / maintenance
-# Capture when the target SDK updates beta headers or system prompt structure:
+# Optional customization / maintenance
+# Generate a patch when the target SDK updates beta headers or system prompt structure:
 ccproxy run --inspect -- claude -p "shape refresh"
-ccproxy flows shape --provider anthropic
+ccproxy flows shape anthropic
 
-# Remove the user override and return to the bundled default:
-rm ~/.config/ccproxy/shaping/shapes/anthropic.mflow
+# Remove user customizations and return to the bundled default:
+rm -rf ~/.config/ccproxy/shapes/anthropic ~/.config/ccproxy/shapes/anthropic.mflow
 ```
 
 ---
@@ -460,10 +484,10 @@ rm ~/.config/ccproxy/shaping/shapes/anthropic.mflow
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| "No shape available for provider X" in logs | No user override and no bundled default for that provider | Capture a user shape with `ccproxy flows shape --provider X` |
+| "No shape available for provider X" in logs | No user override and no bundled default for that provider | Add a bundled default or write an explicit `.mflow` override with `ccproxy flows shape X --mflow` |
 | "No shaping profile for provider X" in logs | Missing provider config | Add `shaping.providers.X` to ccproxy.yaml |
 | Shape hook not firing (no "Applied shape" log) | Guard condition not met: flow lacks transform, or entered via WireGuard passthrough | Verify transform/redirect rule exists; check flow entered via reverse proxy or OAuth |
 | System prompt missing shape's preamble | `merge_strategies` misconfigured | Ensure `system: prepend_shape` is set in the provider's `merge_strategies` config |
 | 400 "too many cache_control breakpoints" | Shape system blocks carry `cache_control` that survives `prepend_shape` merge | Add the `strip` and `insert` caching hooks to `shape_hooks` (see Cache Breakpoint Hooks) |
-| 400/403 from provider after shaping | Stale shape (SDK updated headers) | Re-capture: `ccproxy run --inspect -- claude -p "refresh"` then `ccproxy flows shape --provider X` |
+| 400/403 from provider after shaping | Stale shape (SDK updated headers) | Re-capture: `ccproxy run --inspect -- claude -p "refresh"` then `ccproxy flows shape X` |
 | Auth headers leaking from shape | `strip_headers` misconfigured | Ensure `authorization` and `x-api-key` are in the provider's `strip_headers` list |

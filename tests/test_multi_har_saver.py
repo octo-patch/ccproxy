@@ -38,7 +38,7 @@ def _make_flow_with_snapshot(
 
 
 def _run_dump(flow: http.HTTPFlow | None, flow_id: str) -> str:
-    """Invoke MultiHARSaver.ccproxy_dump with a patched view returning `flow`."""
+    """Invoke MultiHARSaver.dump_flows with a patched view returning `flow`."""
     saver = MultiHARSaver()
     view = MagicMock()
     view.get_by_id.return_value = flow
@@ -46,11 +46,11 @@ def _run_dump(flow: http.HTTPFlow | None, flow_id: str) -> str:
     master.addons.get.return_value = view
     with patch("ccproxy.inspector.multi_har_saver.ctx") as mock_ctx:
         mock_ctx.master = master
-        return saver.ccproxy_dump(flow_id)
+        return saver.dump_flows(flow_id)
 
 
 def _run_dump_multi(flows_by_id: dict[str, http.HTTPFlow | None], flow_ids_csv: str) -> str:
-    """Invoke ccproxy_dump with multiple flows identified by comma-separated ids."""
+    """Invoke dump_flows with multiple flows identified by comma-separated ids."""
     saver = MultiHARSaver()
     view = MagicMock()
     view.get_by_id.side_effect = lambda fid: flows_by_id.get(fid)
@@ -58,7 +58,7 @@ def _run_dump_multi(flows_by_id: dict[str, http.HTTPFlow | None], flow_ids_csv: 
     master.addons.get.return_value = view
     with patch("ccproxy.inspector.multi_har_saver.ctx") as mock_ctx:
         mock_ctx.master = master
-        return saver.ccproxy_dump(flow_ids_csv)
+        return saver.dump_flows(flow_ids_csv)
 
 
 class TestFlowLookup:
@@ -93,7 +93,7 @@ class TestHarShape:
         har = json.loads(_run_dump(flow, flow.id))
         assert har["log"]["version"] == "1.2"
 
-    def test_creator_rebranded_to_ccproxy(self) -> None:
+    def test_creator_uses_project_name(self) -> None:
         flow = _make_flow_with_snapshot()
         har = json.loads(_run_dump(flow, flow.id))
         assert har["log"]["creator"]["name"] == "ccproxy"

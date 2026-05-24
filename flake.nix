@@ -142,11 +142,21 @@
             };
           };
         };
-        inspectDeps = pkgs.lib.makeBinPath [
-          pkgs.slirp4netns
-          pkgs.wireguard-tools
-          pkgs.iproute2
-          pkgs.iptables
+        inspectorRuntimeDeps = with pkgs; [
+          slirp4netns
+          wireguard-tools
+          iproute2
+          iptables
+        ];
+        inspectorPacketDeps = with pkgs; [
+          tcpdump
+          wireshark-cli
+        ];
+        inspectDeps = pkgs.lib.makeBinPath inspectorRuntimeDeps;
+        devInspectorDeps = inspectorRuntimeDeps ++ inspectorPacketDeps;
+        releaseTestDeps = with pkgs; [
+          qemu_kvm
+          cloud-utils
         ];
       in {
         packages = {
@@ -168,13 +178,9 @@
               git
               just
               process-compose
-              slirp4netns
-              wireguard-tools
-              iproute2
-              iptables
-              qemu_kvm
-              cloud-utils
-            ];
+            ]
+            ++ devInspectorDeps
+            ++ releaseTestDeps;
 
             shellHook = ''
               ${devConfig.shellHook}

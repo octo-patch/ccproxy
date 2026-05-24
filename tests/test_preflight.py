@@ -10,41 +10,41 @@ import pytest
 from ccproxy.preflight import (
     _cleanup_stale_wireguard_confs,
     _find_inode_pids,
-    _is_ccproxy_process,
+    _is_managed_process,
     _is_udp_port_in_use,
     _read_proc_cmdline,
-    find_ccproxy_processes,
+    find_managed_processes,
     get_port_pid,
     kill_stale_processes,
     run_preflight_checks,
 )
 
 # ---------------------------------------------------------------------------
-# _is_ccproxy_process
+# _is_managed_process
 # ---------------------------------------------------------------------------
 
 
-class TestIsCcproxyProcess:
+class TestIsManagedProcess:
     def test_litellm_with_config(self):
         """_CCPROXY_PATTERNS is empty — no cmdline matches."""
         cmdline = "/usr/bin/python /usr/bin/litellm --config /home/user/.ccproxy/config.yaml --port 4000"
-        assert _is_ccproxy_process(cmdline) is False
+        assert _is_managed_process(cmdline) is False
 
     def test_mitmweb_not_detected(self):
         """mitmweb is an in-process addon, not a detectable subprocess."""
         cmdline = "/usr/bin/mitmweb --listen-port 4000 -s /home/user/ccproxy/inspector/script.py"
-        assert _is_ccproxy_process(cmdline) is False
+        assert _is_managed_process(cmdline) is False
 
     def test_unrelated_litellm(self):
         cmdline = "/usr/bin/python /usr/bin/litellm --config /etc/litellm/config.yaml"
-        assert _is_ccproxy_process(cmdline) is False
+        assert _is_managed_process(cmdline) is False
 
     def test_unrelated_process(self):
         cmdline = "/usr/bin/nginx -g daemon off;"
-        assert _is_ccproxy_process(cmdline) is False
+        assert _is_managed_process(cmdline) is False
 
     def test_empty(self):
-        assert _is_ccproxy_process("") is False
+        assert _is_managed_process("") is False
 
 
 # ---------------------------------------------------------------------------
@@ -81,11 +81,11 @@ class TestGetPortPid:
 
 
 # ---------------------------------------------------------------------------
-# find_ccproxy_processes
+# find_managed_processes
 # ---------------------------------------------------------------------------
 
 
-class TestFindCcproxyProcesses:
+class TestFindManagedProcesses:
     @patch("ccproxy.preflight._read_proc_cmdline")
     @patch("pathlib.Path.iterdir")
     def test_finds_litellm(self, mock_iterdir, mock_cmdline):
@@ -96,7 +96,7 @@ class TestFindCcproxyProcesses:
         mock_iterdir.return_value = [proc_dir]
         mock_cmdline.return_value = "/usr/bin/python /usr/bin/litellm --config /home/user/.ccproxy/config.yaml"
 
-        results = find_ccproxy_processes(exclude_pid=os.getpid())
+        results = find_managed_processes(exclude_pid=os.getpid())
         assert results == []
 
     @patch("ccproxy.preflight._read_proc_cmdline")
@@ -108,19 +108,19 @@ class TestFindCcproxyProcesses:
         mock_iterdir.return_value = [own]
         mock_cmdline.return_value = "/usr/bin/litellm --config /home/user/.ccproxy/config.yaml"
 
-        results = find_ccproxy_processes(exclude_pid=os.getpid())
+        results = find_managed_processes(exclude_pid=os.getpid())
         assert results == []
 
     @patch("ccproxy.preflight._read_proc_cmdline")
     @patch("pathlib.Path.iterdir")
-    def test_skips_non_ccproxy(self, mock_iterdir, mock_cmdline):
+    def test_skips_unmanaged_process(self, mock_iterdir, mock_cmdline):
         proc_dir = MagicMock()
         proc_dir.name = "5555"
         proc_dir.is_dir.return_value = True
         mock_iterdir.return_value = [proc_dir]
         mock_cmdline.return_value = "/usr/bin/nginx"
 
-        results = find_ccproxy_processes(exclude_pid=os.getpid())
+        results = find_managed_processes(exclude_pid=os.getpid())
         assert results == []
 
 
@@ -211,11 +211,11 @@ class TestRunPreflightChecks:
 
         with (
             patch("ccproxy.preflight.get_port_pid", return_value=(None, None)),
-            patch("ccproxy.preflight.find_ccproxy_processes", return_value=[(999, other_cmdline)]) as mock_find,
+            patch("ccproxy.preflight.find_managed_processes", return_value=[(999, other_cmdline)]) as mock_find,
             patch("ccproxy.preflight.kill_stale_processes") as mock_kill,
         ):
             run_preflight_checks(ports=[4000])
-            # find_ccproxy_processes should NOT be called during preflight
+            # find_managed_processes should NOT be called during preflight
             mock_find.assert_not_called()
             mock_kill.assert_not_called()
 
@@ -352,11 +352,11 @@ class TestGetPortPidExtra:
             assert pid == -1
 
 
-class TestFindCcproxyProcessesExtra:
+class TestFindManagedProcessesExtra:
     def test_oserror_on_proc_scan(self):
         """OSError during /proc scan is handled gracefully."""
         with patch("pathlib.Path.iterdir", side_effect=OSError("no /proc")):
-            result = find_ccproxy_processes()
+            result = find_managed_processes()
             assert result == []
 
     def test_skips_non_digit_entries(self):
@@ -364,7 +364,7 @@ class TestFindCcproxyProcessesExtra:
         non_digit = MagicMock()
         non_digit.name = "net"
         with patch("pathlib.Path.iterdir", return_value=[non_digit]):
-            result = find_ccproxy_processes()
+            result = find_managed_processes()
             assert result == []
 
 

@@ -589,7 +589,7 @@ Request shaping stamps captured compliance envelopes onto proxied requests. See 
 ccproxy:
   shaping:
     enabled: true
-    shapes_dir: ~/.config/ccproxy/shaping/shapes
+    shapes_dir: ~/.config/ccproxy/shapes
     providers:
       anthropic:
         billing:
@@ -662,7 +662,7 @@ The salt is a static reverse-engineered constant (it does not rotate per release
 | Field | Type | Description |
 |---|---|---|
 | `enabled` | bool | Enable/disable shaping globally (default `true`) |
-| `shapes_dir` | string | Directory for `.mflow` shape files |
+| `shapes_dir` | string | Directory for `.mflow` overrides and provider patch queues |
 | `providers` | map | Per-provider shaping profiles (see [shaping.md](shaping.md)) |
 
 ## Flows Configuration

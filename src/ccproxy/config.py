@@ -187,15 +187,8 @@ class ShapingConfig(BaseModel):
     shapes_dir: str | None = None
     """Directory holding per-provider ``{provider}.mflow`` shape files.
 
-    Defaults to ``{config_dir}/shaping/shapes`` when unset.
-    """
-
-    patches_dir: str | None = None
-    """Directory holding per-provider shape patch series.
-
-    Defaults to ``{config_dir}/shaping/patches`` when unset. Each provider
-    directory may contain a quilt-style ``series`` file listing unified
-    diffs against the virtual ``shape.json`` file.
+    Defaults to ``{config_dir}/shapes`` when unset. Provider patch queues
+    live under this same directory as ``{provider}/series`` plus patch files.
     """
 
     providers: dict[str, ProviderShapingConfig] = Field(default_factory=dict)

@@ -67,7 +67,7 @@ value is passed to `_build_addons()` as `wg_cli_port` so the addon chain can ref
   │    ReadySignal                                                  │
   │    → InspectorAddon (OTel spans, flow records, SSE streaming)   │
   │    → MultiHARSaver (ccproxy.dump command)                       │
-  │    → ShapeCapturer (ccproxy.shape command)                      │
+  │    → ShapeCaptureAddon (ccproxy.shape command)                      │
   │    → ccproxy_inbound  (DAG: OAuth, session extraction)          │
   │    → ccproxy_transform (lightllm dispatch)                      │
   │    → ccproxy_outbound (DAG: shape replay, MCP injection, beta)  │
@@ -101,7 +101,7 @@ The addon chain is built by `_build_addons()` in `src/ccproxy/inspector/process.
 on the `WebMaster` instance. Addons receive mitmproxy lifecycle events in list order.
 
 ```
-ReadySignal → InspectorAddon → MultiHARSaver → ShapeCapturer
+ReadySignal → InspectorAddon → MultiHARSaver → ShapeCaptureAddon
             → ccproxy_inbound → ccproxy_transform → ccproxy_outbound
             → OAuthAddon → GeminiAddon
 ```
@@ -111,7 +111,7 @@ ReadySignal → InspectorAddon → MultiHARSaver → ShapeCapturer
 | `ReadySignal` | Built-in class | Fires `asyncio.Event` when all listeners are bound (after mitmproxy's `RunningHook`). Lets `run_inspector()` block until ports are ready. |
 | `InspectorAddon` | `InspectorAddon` | Direction detection, `FlowRecord` creation, pre-pipeline `client_request` snapshot, OTel span lifecycle, SSE streaming setup for transform-mode flows. Must be first so spans open and snapshots capture before any route handler mutates headers. |
 | `MultiHARSaver` | `MultiHARSaver` | Implements the `ccproxy.dump` mitmproxy command — builds a multi-page HAR 1.2 (`entries[2i]` = forwarded request + provider response, `entries[2i+1]` = client request + client response). |
-| `ShapeCapturer` | `ShapeCapturer` | Implements the `ccproxy.shape` mitmproxy command — validates a flow against the provider's `capture.path_pattern`, strips `ccproxy.*` runtime metadata, appends to the provider's `.mflow` file. |
+| `ShapeCaptureAddon` | `ShapeCaptureAddon` | Implements the `ccproxy.shape` mitmproxy command — validates a flow against the provider's `capture.path_pattern`, then writes either a provider patch queue or an explicit sanitized `.mflow` override. |
 | `ccproxy_inbound` | `InspectorRouter` (pipeline) | DAG executor for `hooks.inbound` entries — OAuth sentinel substitution (`forward_oauth`), session ID extraction (`extract_session_id`). Skipped if no inbound hooks configured. |
 | `ccproxy_transform` | `InspectorRouter` (transform) | lightllm dispatch — matches `inspector.transforms` rules and falls back to sentinel-driven `Provider` routing. Rewrites destination (always) and body (cross-format). Handles non-streaming response transform back to OpenAI shape. |
 | `ccproxy_outbound` | `InspectorRouter` (pipeline) | DAG executor for `hooks.outbound` entries — `gemini_cli` (cloudcode-pa envelope wrap), `inject_mcp_notifications`, `verbose_mode` (strip `redact-thinking-*`), `shape` (replay captured compliance envelope), `commitbee_compat`. Skipped if no outbound hooks configured. |
@@ -619,5 +619,5 @@ on port 16686.
 | `src/ccproxy/inspector/namespace.py` | `create_namespace()`, `run_in_namespace()`, `cleanup_namespace()`, `PortForwarder`, `check_namespace_capabilities()` |
 | `src/ccproxy/inspector/telemetry.py` | `InspectorTracer` — three-mode OTel span emission |
 | `src/ccproxy/inspector/wg_keylog.py` | WireGuard keylog export for Wireshark |
-| `src/ccproxy/inspector/shape_capturer.py` | `ShapeCapturer` — `ccproxy.shape` command for shape capture |
+| `src/ccproxy/inspector/shape_capturer.py` | `ShapeCaptureAddon` — `ccproxy.shape` command for shape capture |
 | `src/ccproxy/hooks/gemini_envelope.py` | `EnvelopeUnwrapStream`, `unwrap_buffered` — cloudcode-pa envelope-unwrap primitives |

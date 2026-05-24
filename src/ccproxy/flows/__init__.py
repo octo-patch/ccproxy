@@ -10,7 +10,7 @@ CLI subcommands:
     ccproxy flows dump              [--jq FILTER]...
     ccproxy flows diff              [--jq FILTER]...
     ccproxy flows compare           [--jq FILTER]...
-    ccproxy flows shape   [--all]  [--jq FILTER]...
+    ccproxy flows shape PROVIDER [--mflow] [--jq FILTER]...
     ccproxy flows clear    [--all]  [--jq FILTER]...
 
 HAR output from ``dump`` is built server-side by the ``ccproxy.dump`` mitmproxy
@@ -118,13 +118,13 @@ class MitmwebClient:
         resp.raise_for_status()
         return resp
 
-    def save_shape(self, flow_ids: list[str], provider: str) -> dict[str, Any]:
+    def save_shape(self, flow_ids: list[str], provider: str, *, mode: str = "patch") -> dict[str, Any]:
         """Invoke ``ccproxy.shape`` with flow ids and provider; returns summary dict."""
         if not flow_ids:
             raise ValueError("save_shape: flow_ids must be non-empty")
         resp = self._post(
             "/commands/ccproxy.shape",
-            json_body={"arguments": [",".join(flow_ids), provider]},
+            json_body={"arguments": [",".join(flow_ids), provider, mode]},
         )
         payload = resp.json()
         if "error" in payload:
@@ -199,18 +199,21 @@ class FlowsCompare(_FlowsBase):
 
 
 class FlowsShape(_FlowsBase):
-    """Save flows from the resolved set as a provider shape.
+    """Generate a provider shape patch from the resolved flow set.
 
-    Extracts shaping features from the selected flows' pre-pipeline
-    client request snapshots. Stable features (identical across all
-    selected flows) become the shape. Persists to the shape store.
+    By default, writes a quilt-style patch queue under
+    ``$CCPROXY_CONFIG_DIR/shapes/{provider}/``. Use ``--mflow`` to write
+    an explicit request-only ``{provider}.mflow`` override.
 
-        ccproxy flows shape --provider anthropic
-        ccproxy flows shape --provider anthropic --jq 'map(select(.request.pretty_host | endswith("anthropic.com")))'
+        ccproxy flows shape anthropic
+        ccproxy flows shape anthropic --mflow
     """
 
-    provider: str
+    provider: Annotated[str, tyro.conf.Positional, tyro.conf.arg(metavar="PROVIDER")]
     """Target provider name (e.g., 'anthropic', 'gemini')."""
+
+    mflow: bool = False
+    """Write a sanitized request-only .mflow override instead of a patch."""
 
 
 class FlowsRepl(_FlowsBase):
@@ -443,10 +446,11 @@ class FlowReplSession:
         output_path.write_text(har)
         return output_path
 
-    def shape(self, provider: str, *refs: FlowRef) -> dict[str, Any]:
+    def shape(self, provider: str, *refs: FlowRef, mflow: bool = False) -> dict[str, Any]:
         """Save selected flows as a provider shape and return the mitmproxy command summary."""
         flow_ids = [str(flow["id"]) for flow in self._selected(refs)]
-        return self.client.save_shape(flow_ids, provider)
+        mode = "mflow" if mflow else "patch"
+        return self.client.save_shape(flow_ids, provider, mode=mode)
 
     def clear(self, *refs: FlowRef) -> int:
         """Delete selected flows from mitmweb and refresh the current set."""
@@ -641,15 +645,28 @@ def _do_shape(
     flow_set: list[dict[str, Any]],
     *,
     provider: str,
+    mflow: bool,
 ) -> None:
-    """Save a shape from the flow set."""
+    """Save a shape artifact from the flow set."""
     if not flow_set:
         console.print("[red]No flows in set.[/red]")
         sys.exit(1)
+    if not mflow and len(flow_set) != 1:
+        console.print("[red]Patch shape generation requires exactly one flow in the set.[/red]")
+        sys.exit(1)
     flow_ids = [f["id"] for f in flow_set]
-    result = client.save_shape(flow_ids, provider)
+    mode = "mflow" if mflow else "patch"
+    result = client.save_shape(flow_ids, provider, mode=mode)
+    if mode == "patch":
+        status = str(result.get("status", "ok"))
+        patch = result.get("patch")
+        if status == "unchanged":
+            console.print(f"Shape patch for [bold]{result['provider']}[/bold] is unchanged.")
+            return
+        console.print(f"Saved shape patch for [bold]{result['provider']}[/bold]: {patch}")
+        return
     console.print(
-        f"Saved shape for [bold]{result['provider']}[/bold]: "
+        f"Saved .mflow shape for [bold]{result['provider']}[/bold]: "
         f"{result['flows_saved']} flow(s) saved"
         + (f", {len(result.get('missing', []))} missing" if result.get("missing") else "")
     )
@@ -784,7 +801,7 @@ def handle_flows(
             elif isinstance(cmd, FlowsCompare):
                 _do_compare(client, flow_set)
             elif isinstance(cmd, FlowsShape):
-                _do_shape(err, client, flow_set, provider=cmd.provider)
+                _do_shape(err, client, flow_set, provider=cmd.provider, mflow=cmd.mflow)
             elif isinstance(cmd, FlowsRepl):
                 _do_repl(client, flow_set, flows_cfg=config.flows, jq_filter=cmd.jq_filter)
             elif isinstance(cmd, FlowsClear):

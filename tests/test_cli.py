@@ -808,7 +808,7 @@ class TestDeriveJournalIdentifier:
         result = _derive_journal_identifier(tmp_path, override="ccproxy-myproj")
         assert result == "ccproxy-myproj"
 
-    def test_dot_ccproxy_uses_parent_name(self, tmp_path: Path) -> None:
+    def test_dot_config_dir_uses_parent_name(self, tmp_path: Path) -> None:
         """``.ccproxy/`` directory derives ``ccproxy-{parent}``."""
         from ccproxy.cli import _derive_journal_identifier
 
@@ -820,7 +820,7 @@ class TestDeriveJournalIdentifier:
         result = _derive_journal_identifier(config_dir, override=None)
         assert result == "ccproxy-myproject"
 
-    def test_xdg_ccproxy_uses_bare_name(self, tmp_path: Path) -> None:
+    def test_xdg_config_dir_uses_bare_name(self, tmp_path: Path) -> None:
         """``ccproxy/`` directory derives just ``ccproxy``."""
         from ccproxy.cli import _derive_journal_identifier
 

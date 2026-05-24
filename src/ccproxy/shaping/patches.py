@@ -3,7 +3,7 @@
 Shape patches use a quilt-style provider directory:
 
 ```
-{patches_dir}/{provider}/
+{shapes_dir}/{provider}/
 ├── series
 └── 0001-example.patch
 ```
@@ -20,6 +20,7 @@ import logging
 import re
 import shlex
 from dataclasses import dataclass
+from difflib import unified_diff
 from pathlib import Path
 from typing import Any
 
@@ -45,21 +46,29 @@ class ShapePatch:
 
 
 @dataclass(frozen=True)
+class ShapePatchWriteResult:
+    """Result of generating a provider patch against ``shape.json``."""
+
+    path: Path
+    changed: bool
+
+
+@dataclass(frozen=True)
 class _Hunk:
     old_start: int
     lines: list[str]
 
 
-def apply_shape_patch_series(flow: http.HTTPFlow, provider: str, patches_dir: Path | None) -> bool:
+def apply_shape_patch_series(flow: http.HTTPFlow, provider: str, shapes_dir: Path | None) -> bool:
     """Apply the provider's patch series to ``flow.request``.
 
     Returns ``True`` when at least one patch was applied. Missing patch
     directories or missing ``series`` files are a no-op.
     """
-    if patches_dir is None or flow.request is None:
+    if shapes_dir is None or flow.request is None:
         return False
 
-    provider_dir = patches_dir / provider
+    provider_dir = shapes_dir / provider
     series_path = provider_dir / "series"
     if not series_path.exists():
         return False
@@ -79,6 +88,50 @@ def apply_shape_patch_series(flow: http.HTTPFlow, provider: str, patches_dir: Pa
     _patch_text_to_request(flow.request, text)
     logger.info("Applied %d shape patch(es) for provider %s from %s", len(patches), provider, provider_dir)
     return bool(patches)
+
+
+def write_shape_patch(
+    base_request: http.Request,
+    target_request: http.Request,
+    provider_dir: Path,
+    *,
+    patch_name: str = "0001-local-shape.patch",
+) -> ShapePatchWriteResult:
+    """Write a standard unified diff from ``base_request`` to ``target_request``."""
+    before = _request_to_patch_text(base_request)
+    after = _request_to_patch_text(target_request)
+    patch_path = provider_dir / patch_name
+
+    if before == after:
+        return ShapePatchWriteResult(path=patch_path, changed=False)
+
+    provider_dir.mkdir(parents=True, exist_ok=True)
+    patch = "\n".join(
+        unified_diff(
+            before.splitlines(),
+            after.splitlines(),
+            fromfile=f"a/{PATCH_TARGET}",
+            tofile=f"b/{PATCH_TARGET}",
+            lineterm="",
+        )
+    )
+    patch_path.write_text(patch + "\n")
+    _ensure_series_entry(provider_dir / "series", patch_name)
+    return ShapePatchWriteResult(path=patch_path, changed=True)
+
+
+def _ensure_series_entry(series_path: Path, patch_name: str) -> None:
+    if not series_path.exists():
+        series_path.write_text(f"{patch_name}\n")
+        return
+
+    lines = series_path.read_text().splitlines()
+    for raw_line in lines:
+        tokens = shlex.split(raw_line, comments=True)
+        if patch_name in tokens:
+            return
+    suffix = "" if not lines or lines[-1] == "" else "\n"
+    series_path.write_text("\n".join(lines) + f"{suffix}{patch_name}\n")
 
 
 def _read_series(series_path: Path) -> list[ShapePatch]:

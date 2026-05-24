@@ -138,7 +138,7 @@ class TestRegisterPipelineRoutes:
         assert flow.response.content == b'{"error":"teapot"}'
         assert flow.response.headers["Content-Type"] == "application/problem+json"
 
-    def test_lightllm_exception_sets_ccproxy_json_error(self) -> None:
+    def test_lightllm_exception_sets_proxy_json_error(self) -> None:
         mock_executor = MagicMock()
         mock_executor.execute.side_effect = LightLLMError(status_code=409, message="local invariant failed")
         handler = self._capture_handler(mock_executor)
