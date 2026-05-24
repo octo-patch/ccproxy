@@ -68,8 +68,8 @@ class Logs(BaseModel):
     follow: Annotated[bool, tyro.conf.arg(aliases=["-f"])] = False
     """Follow log output (like tail -f)."""
 
-    lines: Annotated[int, tyro.conf.arg(aliases=["-n"])] = 100
-    """Number of lines to show (default: 100)."""
+    lines: Annotated[int | None, tyro.conf.arg(aliases=["-n"])] = None
+    """Number of lines to show. Defaults to the whole log."""
 
 
 class Status(BaseModel):
@@ -650,7 +650,7 @@ def start_server(
     sys.exit(exit_code)
 
 
-def view_logs(follow: bool = False, lines: int = 100, config_dir: Path | None = None) -> None:
+def view_logs(follow: bool = False, lines: int | None = None, config_dir: Path | None = None) -> None:
     """Tail the per-project log file at ``cfg.resolved_log_file``.
 
     The file is written unconditionally by the daemon, so this is the
@@ -666,7 +666,7 @@ def view_logs(follow: bool = False, lines: int = 100, config_dir: Path | None = 
         builtin_print(f"No log file at {log_path}", file=sys.stderr)
         sys.exit(1)
 
-    tail_cmd: list[str] = ["tail", "-n", str(lines)]
+    tail_cmd: list[str] = ["tail", "-n", str(lines) if lines is not None else "+1"]
     if follow:
         tail_cmd.append("-f")
     tail_cmd.append(str(log_path))

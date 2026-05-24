@@ -35,8 +35,13 @@ __all__ = [
     "BillingConfig",
     "CCProxyConfig",
     "GeminiCapacityFallbackConfig",
+    "McpBufferConfig",
     "McpConfig",
     "McpHttpConfig",
+    "OAuthRuntimeConfig",
+    "PplxConfig",
+    "PplxSearchConfig",
+    "PplxUploadConfig",
     "Provider",
     "ProviderShapingConfig",
     "ShapingConfig",
@@ -238,7 +243,7 @@ class GeminiCapacityFallbackConfig(BaseModel):
 
     model_config = ConfigDict(extra="ignore")
 
-    enabled: bool = False
+    enabled: bool = True
     """Master switch. When False, errors pass through unchanged."""
 
     retry_status_codes: list[int] = Field(default=[429, 503, 500])
@@ -260,6 +265,39 @@ class GeminiCapacityFallbackConfig(BaseModel):
 
     total_retry_budget_seconds: float = Field(default=120.0, gt=0)
     """Wall-clock budget for the entire retry chain across all candidates."""
+
+
+class OAuthRuntimeConfig(BaseModel):
+    """Runtime knobs for credential command execution and OAuth refreshes."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    command_timeout_seconds: float = Field(default=5.0, gt=0)
+    """Timeout for command-based credential sources."""
+
+    refresh_timeout_seconds: float = Field(default=15.0, gt=0)
+    """HTTP timeout for OAuth token refresh requests."""
+
+    refresh_headroom_seconds: float = Field(default=60.0, ge=0)
+    """Refresh cached access tokens when they expire within this many seconds."""
+
+
+class PplxSearchConfig(BaseModel):
+    """Perplexity query-shaping defaults and preflight behavior."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    language: str = "en-US"
+    timezone: str = "America/Los_Angeles"
+    search_focus: Literal["internet", "writing"] = "internet"
+    sources: list[Literal["web", "scholar", "social", "edgar"]] = Field(default_factory=lambda: ["web"])
+    search_recency_filter: Literal["DAY", "WEEK", "MONTH", "YEAR"] | None = None
+    is_incognito: bool = False
+    skip_search_enabled: bool = True
+    is_nav_suggestions_disabled: bool = True
+    always_search_override: bool = False
+    override_no_search: bool = False
+    preflight_timeout_seconds: float = Field(default=5.0, gt=0)
 
 
 class PplxThreadConfig(BaseModel):
@@ -290,6 +328,25 @@ class PplxThreadConfig(BaseModel):
     organic-continuation-only; explicit resume via
     ``metadata.session_id`` bypasses TTL and hits the server."""
 
+    fetch_page_size: int = Field(default=100, ge=1)
+    """Per-request thread-detail page size; pagination continues until
+    Perplexity reports no more pages."""
+
+    fetch_timeout_seconds: float = Field(default=10.0, gt=0)
+    """HTTP timeout for each Perplexity thread-detail page fetch."""
+
+
+class PplxUploadConfig(BaseModel):
+    """Perplexity multimodal attachment extraction/upload limits."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    max_files: int = Field(default=30, ge=1)
+    max_file_size_bytes: int = Field(default=50 * 1024 * 1024, ge=1)
+    fetch_timeout_seconds: float = Field(default=10.0, gt=0)
+    upload_timeout_seconds: float = Field(default=60.0, gt=0)
+    subscribe_timeout_seconds: float = Field(default=120.0, gt=0)
+
 
 class PplxConfig(BaseModel):
     """Perplexity-specific runtime configuration.
@@ -303,7 +360,9 @@ class PplxConfig(BaseModel):
 
     model_config = ConfigDict(extra="ignore")
 
+    search: PplxSearchConfig = Field(default_factory=PplxSearchConfig)
     thread: PplxThreadConfig = Field(default_factory=PplxThreadConfig)
+    upload: PplxUploadConfig = Field(default_factory=PplxUploadConfig)
 
 
 class MitmproxyOptions(BaseModel):
@@ -566,10 +625,20 @@ class McpHttpConfig(BaseModel):
         return parse_auth_source(v)
 
 
+class McpBufferConfig(BaseModel):
+    """Configuration for buffered MCP notification injection."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    max_events_per_task: int = Field(default=64 * 1024, ge=1)
+    ttl_seconds: int = Field(default=600, ge=1)
+
+
 class McpConfig(BaseModel):
     """Top-level MCP namespace. Currently exposes only the HTTP server."""
 
     http: McpHttpConfig = Field(default_factory=McpHttpConfig)
+    buffer: McpBufferConfig = Field(default_factory=McpBufferConfig)
 
 
 class CCProxyConfig(BaseSettings):
@@ -635,6 +704,8 @@ class CCProxyConfig(BaseSettings):
     readiness_probe_timeout_seconds: float = 5.0
     """Total timeout budget for the startup readiness probe. Short by
     design — the probe is trivial and slow responses indicate a problem."""
+
+    oauth: OAuthRuntimeConfig = Field(default_factory=OAuthRuntimeConfig)
 
     inspector: InspectorConfig = Field(default_factory=InspectorConfig)
 
@@ -779,6 +850,14 @@ class CCProxyConfig(BaseSettings):
                 gemini_capacity_data = ccproxy_data.get("gemini_capacity")
                 if gemini_capacity_data:
                     instance.gemini_capacity = GeminiCapacityFallbackConfig(**gemini_capacity_data)
+
+                pplx_data = ccproxy_data.get("pplx")
+                if pplx_data:
+                    instance.pplx = PplxConfig(**cast(dict[str, Any], pplx_data))
+
+                oauth_data = ccproxy_data.get("oauth")
+                if oauth_data:
+                    instance.oauth = OAuthRuntimeConfig(**cast(dict[str, Any], oauth_data))
 
                 mcp_data = ccproxy_data.get("mcp")
                 if mcp_data:

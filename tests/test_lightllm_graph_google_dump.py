@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import base64
 import json
+from collections.abc import Callable
 
+import pytest
 from pydantic_ai.messages import (
     BinaryContent,
     ModelMessage,
@@ -24,10 +26,6 @@ from pydantic_ai.messages import (
 from pydantic_ai.models import ModelRequestParameters
 from pydantic_ai.settings import ModelSettings
 from pydantic_ai.tools import ToolDefinition
-
-from collections.abc import Callable
-
-import pytest
 
 from ccproxy.lightllm.adapters.google import GoogleAdapter
 from ccproxy.lightllm.parsed import ParsedRequest
@@ -160,9 +158,7 @@ class TestToolCallHistory:
         # Assistant turn becomes role='model' with a functionCall part.
         model_turn = body["contents"][1]
         assert model_turn["role"] == "model"
-        function_call_part = next(
-            p for p in model_turn["parts"] if "functionCall" in p
-        )
+        function_call_part = next(p for p in model_turn["parts"] if "functionCall" in p)
         assert function_call_part["functionCall"] == {
             "name": "calc",
             "args": {"expr": "2+2"},
@@ -254,6 +250,4 @@ class TestImageContent:
         assert text_part["text"] == "Describe this:"
         # bytes get base64-encoded in the wire body; camelCased keys.
         assert inline_part["inlineData"]["mimeType"] == "image/png"
-        assert inline_part["inlineData"]["data"] == base64.b64encode(raw_bytes).decode(
-            "ascii"
-        )
+        assert inline_part["inlineData"]["data"] == base64.b64encode(raw_bytes).decode("ascii")

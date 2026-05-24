@@ -34,21 +34,49 @@ ccproxy:
     transforms: []
   log_level: INFO
   mcp:
+    buffer:
+      max_events_per_task: 65536
+      ttl_seconds: 600
     http:
       auth: null
       enabled: true
       host: 127.0.0.1
       port: 4030
+  oauth:
+    command_timeout_seconds: 5
+    refresh_headroom_seconds: 60
+    refresh_timeout_seconds: 15
   otel:
     enabled: false
     endpoint: http://localhost:4317
     service_name: ccproxy
   port: 4000
   pplx:
+    search:
+      always_search_override: false
+      is_incognito: false
+      is_nav_suggestions_disabled: true
+      language: en-US
+      override_no_search: false
+      preflight_timeout_seconds: 5
+      search_focus: internet
+      search_recency_filter: null
+      skip_search_enabled: true
+      sources:
+      - web
+      timezone: America/Los_Angeles
     thread:
       citation_mode: markdown
       consistency_mode: warn
+      fetch_page_size: 100
+      fetch_timeout_seconds: 10
       ttl_seconds: 1800
+    upload:
+      fetch_timeout_seconds: 10
+      max_file_size_bytes: 52428800
+      max_files: 30
+      subscribe_timeout_seconds: 120
+      upload_timeout_seconds: 60
   providers:
     anthropic:
       auth:

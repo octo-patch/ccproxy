@@ -136,6 +136,10 @@
                 port = 4031;
               };
             };
+            otel = {
+              enabled = false;
+              endpoint = "http://localhost:4317";
+            };
           };
         };
         inspectDeps = pkgs.lib.makeBinPath [

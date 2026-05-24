@@ -12,14 +12,10 @@ import json
 import logging
 from typing import TYPE_CHECKING
 
-from ccproxy.lightllm.pplx import (
-    PERPLEXITY_BLOCK_USE_CASES,
-    PERPLEXITY_BROWSER_UA,
-    PERPLEXITY_PROVIDER_NAME,
-    PERPLEXITY_SESSION_COOKIE,
-    PERPLEXITY_URL_BASE,
-    _thread_to_openai_messages,
-)
+import httpx
+
+from ccproxy.hooks.pplx_thread_inject import _fetch_thread
+from ccproxy.lightllm.pplx import PERPLEXITY_PROVIDER_NAME, _thread_to_openai_messages
 
 if TYPE_CHECKING:
     from mitmproxy.http import HTTPFlow
@@ -27,6 +23,11 @@ if TYPE_CHECKING:
     from ccproxy.inspector.router import InspectorRouter
 
 logger = logging.getLogger(__name__)
+
+
+def _upstream_headers(response: httpx.Response) -> dict[str, str]:
+    content_type = response.headers.get("content-type", "application/json")
+    return {"Content-Type": content_type}
 
 
 def register_pplx_routes(router: InspectorRouter) -> None:
@@ -100,39 +101,12 @@ def register_pplx_routes(router: InspectorRouter) -> None:
             )
             return
 
-        # Fetch thread from Perplexity
-        import httpx
-
-        params: list[tuple[str, str | int | float | None]] = [
-            ("version", "2.18"),
-            ("source", "default"),
-            ("limit", "100"),
-            ("offset", "0"),
-            ("from_first", "true"),
-            ("with_parent_info", "true"),
-            ("with_schematized_response", "true"),
-        ]
-        params.extend(("supported_block_use_cases", uc) for uc in PERPLEXITY_BLOCK_USE_CASES)
-
-        headers = {
-            "Cookie": f"{PERPLEXITY_SESSION_COOKIE}={token}",
-            "User-Agent": PERPLEXITY_BROWSER_UA,
-            "Origin": PERPLEXITY_URL_BASE,
-            "Referer": f"{PERPLEXITY_URL_BASE}/",
-            "Accept": "application/json",
-            "x-app-apiclient": "default",
-            "x-app-apiversion": "2.18",
-            "x-perplexity-request-reason": "perplexity-query-state-provider",
-            "x-perplexity-request-endpoint": f"{PERPLEXITY_URL_BASE}/rest/thread/{session_id}",
-        }
-
         try:
-            resp = httpx.get(
-                f"{PERPLEXITY_URL_BASE}/rest/thread/{session_id}",
-                params=params,
-                headers=headers,
-                timeout=15.0,
-            )
+            thread = _fetch_thread(session_id, token)
+        except httpx.HTTPStatusError as exc:
+            upstream = exc.response
+            flow.response = Response.make(upstream.status_code, upstream.content, _upstream_headers(upstream))
+            return
         except httpx.HTTPError as exc:
             logger.warning("pplx messages: fetch failed for %s: %s", session_id, exc)
             flow.response = Response.make(
@@ -149,46 +123,6 @@ def register_pplx_routes(router: InspectorRouter) -> None:
                 {"Content-Type": "application/json"},
             )
             return
-
-        if resp.status_code == 404:
-            flow.response = Response.make(
-                404,
-                json.dumps(
-                    {
-                        "error": {
-                            "message": (
-                                f"Perplexity thread {session_id!r} not found or no longer accessible. "
-                                f"Verify the slug or remove metadata.session_id to start a new thread."
-                            ),
-                            "type": "pplx_thread_not_found",
-                            "code": 404,
-                        }
-                    }
-                ).encode(),
-                {"Content-Type": "application/json"},
-            )
-            return
-
-        try:
-            resp.raise_for_status()
-        except httpx.HTTPStatusError as exc:
-            logger.warning("pplx messages: upstream error for %s: %s", session_id, exc)
-            flow.response = Response.make(
-                502,
-                json.dumps(
-                    {
-                        "error": {
-                            "message": f"Perplexity returned {exc.response.status_code}",
-                            "type": "pplx_upstream_error",
-                            "code": 502,
-                        }
-                    }
-                ).encode(),
-                {"Content-Type": "application/json"},
-            )
-            return
-
-        thread = resp.json()
 
         # Convert
         citation_mode = flow.request.query.get("citation_mode") or session_cfg.pplx.thread.citation_mode

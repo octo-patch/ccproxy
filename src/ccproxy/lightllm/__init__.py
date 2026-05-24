@@ -16,15 +16,15 @@ from ccproxy.lightllm.graph import (
 )
 from ccproxy.lightllm.parsed import InboundFormat
 from ccproxy.lightllm.pplx import (
-    LightllmException,
-    PerplexityException,
+    LightLLMError,
+    PerplexityError,
 )
 
 __all__ = [
     "InboundFormat",
     "LLMRenderInput",
-    "LightllmException",
-    "PerplexityException",
+    "LightLLMError",
+    "PerplexityError",
     "UnsupportedUpstreamError",
     "dispatch_dump",
     "dispatch_dump_sync",

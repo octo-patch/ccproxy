@@ -5,10 +5,12 @@ from __future__ import annotations
 import logging
 from unittest.mock import MagicMock
 
+import httpx
 import pytest
 
 from ccproxy.flows.store import InspectorMeta
 from ccproxy.inspector.pipeline import build_executor, register_pipeline_routes
+from ccproxy.lightllm import LightLLMError
 from ccproxy.pipeline.executor import PipelineExecutor
 
 
@@ -114,3 +116,38 @@ class TestRegisterPipelineRoutes:
         handler(flow=flow)
 
         mock_executor.execute.assert_not_called()
+
+    def test_upstream_http_status_error_sets_original_response(self) -> None:
+        mock_executor = MagicMock()
+        request = httpx.Request("GET", "https://www.perplexity.ai/rest/thread/missing")
+        upstream = httpx.Response(
+            418,
+            content=b'{"error":"teapot"}',
+            headers={"content-type": "application/problem+json"},
+            request=request,
+        )
+        mock_executor.execute.side_effect = httpx.HTTPStatusError("upstream error", request=request, response=upstream)
+        handler = self._capture_handler(mock_executor)
+
+        flow = MagicMock()
+        flow.metadata = {InspectorMeta.DIRECTION: "inbound"}
+
+        handler(flow=flow)
+
+        assert flow.response.status_code == 418
+        assert flow.response.content == b'{"error":"teapot"}'
+        assert flow.response.headers["Content-Type"] == "application/problem+json"
+
+    def test_lightllm_exception_sets_ccproxy_json_error(self) -> None:
+        mock_executor = MagicMock()
+        mock_executor.execute.side_effect = LightLLMError(status_code=409, message="local invariant failed")
+        handler = self._capture_handler(mock_executor)
+
+        flow = MagicMock()
+        flow.metadata = {InspectorMeta.DIRECTION: "inbound"}
+
+        handler(flow=flow)
+
+        assert flow.response.status_code == 409
+        assert b"local invariant failed" in flow.response.content
+        assert flow.response.headers["Content-Type"] == "application/json"

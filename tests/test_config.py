@@ -489,9 +489,9 @@ class TestResolveOAuthTokenConcurrency:
 class TestGeminiCapacityConfig:
     """Tests for the gemini_capacity config block."""
 
-    def test_default_is_disabled_with_empty_chain(self) -> None:
+    def test_default_is_enabled_with_empty_chain(self) -> None:
         config = CCProxyConfig()
-        assert config.gemini_capacity.enabled is False
+        assert config.gemini_capacity.enabled is True
         assert config.gemini_capacity.fallback_models == []
         assert config.gemini_capacity.sticky_retry_attempts == 3
         assert config.gemini_capacity.sticky_retry_max_delay_seconds == 60.0

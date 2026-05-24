@@ -10,7 +10,10 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any
 
+import httpx
+
 from ccproxy.flows.store import InspectorMeta
+from ccproxy.lightllm import LightLLMError
 from ccproxy.pipeline.executor import PipelineExecutor
 from ccproxy.pipeline.loader import load_hooks
 
@@ -20,6 +23,17 @@ if TYPE_CHECKING:
     from ccproxy.inspector.router import InspectorRouter
 
 logger = logging.getLogger(__name__)
+
+
+def _upstream_headers(response: httpx.Response) -> dict[str, str]:
+    content_type = response.headers.get("content-type", "application/json")
+    return {"Content-Type": content_type}
+
+
+def _ccproxy_error(message: str, *, error_type: str, code: int) -> bytes:
+    import json
+
+    return json.dumps({"error": {"message": message, "type": error_type, "code": code}}).encode()
 
 
 def build_executor(hook_entries: list[str | dict[str, Any]]) -> PipelineExecutor:
@@ -44,4 +58,18 @@ def register_pipeline_routes(
         if flow.metadata.get(InspectorMeta.DIRECTION) != "inbound":
             return
 
-        executor.execute(flow)
+        try:
+            executor.execute(flow)
+        except httpx.HTTPStatusError as exc:
+            from mitmproxy.http import Response
+
+            upstream = exc.response
+            flow.response = Response.make(upstream.status_code, upstream.content, _upstream_headers(upstream))
+        except LightLLMError as exc:
+            from mitmproxy.http import Response
+
+            flow.response = Response.make(
+                exc.status_code,
+                _ccproxy_error(exc.message, error_type=exc.__class__.__name__, code=exc.status_code),
+                {"Content-Type": "application/json"},
+            )

@@ -48,7 +48,6 @@ from pathlib import Path
 
 import httpx
 
-
 PERPLEXITY_BASE = "https://www.perplexity.ai"
 SESSION_COOKIE = "__Secure-next-auth.session-token"
 CHROME_UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
@@ -78,15 +77,16 @@ def _load_gmail_config(path: Path) -> dict[str, object]:
 def _atomic_write(path: Path, value: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    tmp_path = Path(tmp)
     try:
         with os.fdopen(fd, "w") as f:
             f.write(value)
             f.flush()
             os.fsync(f.fileno())
-        os.chmod(tmp, stat.S_IRUSR | stat.S_IWUSR)
-        os.replace(tmp, path)
+        tmp_path.chmod(stat.S_IRUSR | stat.S_IWUSR)
+        tmp_path.replace(path)
     except Exception:
-        Path(tmp).unlink(missing_ok=True)
+        tmp_path.unlink(missing_ok=True)
         raise
 
 

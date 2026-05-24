@@ -25,7 +25,6 @@ from pydantic_graph import GraphBuilder, Step, StepContext
 
 import ccproxy.lightllm.graph._subgraph_patch  # noqa: F401  — installs add_subgraph
 
-
 # ---------------------------------------------------------------------------
 # Shared state for the composition tests
 # ---------------------------------------------------------------------------
@@ -121,9 +120,7 @@ async def test_subgraph_shared_state_mutation_visible_to_parent() -> None:
 
     @parent.step
     async def parent_after(ctx: StepContext[_State, None, _SubgraphResult]) -> _SubgraphResult:
-        ctx.state.outer_log.append(
-            f"parent saw inner_log_len={len(ctx.state.inner_log)} echo={ctx.inputs.echo}"
-        )
+        ctx.state.outer_log.append(f"parent saw inner_log_len={len(ctx.state.inner_log)} echo={ctx.inputs.echo}")
         return ctx.inputs
 
     parent.add(parent.edge_from(parent.start_node).to(sub_step))

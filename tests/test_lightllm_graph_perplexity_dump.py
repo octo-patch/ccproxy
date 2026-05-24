@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from typing import Any
 
 import pytest
@@ -17,8 +18,6 @@ from pydantic_ai.messages import (
     UserPromptPart,
 )
 from pydantic_ai.models import ModelRequestParameters
-
-from collections.abc import Callable
 
 from ccproxy.lightllm.adapters.perplexity import PerplexityAdapter
 from ccproxy.lightllm.parsed import ParsedRequest

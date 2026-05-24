@@ -3,7 +3,6 @@
 import inspect
 import json
 import re
-import secrets
 import socket
 from pathlib import Path
 from typing import Any, cast
@@ -151,21 +150,11 @@ def get_template_file(filename: str) -> Path:
     return template_path
 
 
-def find_available_port(start: int = 49152, end: int = 65535) -> int:
-    """Find a random available port in the ephemeral range.
-
-    Raises:
-        RuntimeError: If no available port found after 100 attempts
-    """
-    for _ in range(100):
-        port = secrets.randbelow(end - start + 1) + start
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            try:
-                s.bind(("127.0.0.1", port))
-                return port
-            except OSError:
-                continue
-    raise RuntimeError(f"Could not find available port in range {start}-{end}")
+def find_available_port(host: str = "127.0.0.1") -> int:
+    """Ask the kernel for an available TCP port on ``host``."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind((host, 0))
+        return int(s.getsockname()[1])
 
 
 def calculate_duration_ms(start_time: Any, end_time: Any) -> float:
@@ -330,20 +319,20 @@ def dv(*args: Any, **kwargs: Any) -> None:
     table = Table(title="[cyan]Debug Variables[/cyan]", box=box.SIMPLE, show_edge=False, padding=(0, 1))
 
     table.add_column("Name", style="yellow", no_wrap=True)
-    table.add_column("Value", max_width=50)
+    table.add_column("Value")
     table.add_column("Type", style="dim cyan")
 
     for name, value in zip(var_names, args, strict=False):
-        table.add_row(name, _format_value(value, 50), type(value).__name__)
+        table.add_row(name, _format_value(value), type(value).__name__)
 
     if kwargs:
         for name, value in kwargs.items():
-            table.add_row(name, _format_value(value, 50), type(value).__name__)
+            table.add_row(name, _format_value(value), type(value).__name__)
 
     console.print(table)
 
 
-def d(obj: Any, w: int = 60) -> None:
+def d(obj: Any, w: int | None = None) -> None:
     """Ultra-compact debug print."""
     debug_table(obj, max_width=w, compact=True)
 

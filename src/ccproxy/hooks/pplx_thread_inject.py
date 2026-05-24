@@ -7,9 +7,9 @@ hook implements the three-mode resolution chain:
 1. **Body metadata** — ``body.metadata.session_id = "<slug-or-uuid>"``
    wins; we ``GET /rest/thread/{value}`` to fetch the latest
    ``backend_uuid`` + ``read_write_token`` + ``context_uuid`` from the
-   thread's most recent entry. 404 → structured ``pplx_thread_not_found``
-   error. Divergence between OpenAI history and server state is detected
-   here.
+   thread's most recent entry. Upstream errors are returned with
+   Perplexity's status/body intact. Divergence between OpenAI history and
+   server state is detected here.
 
 2. **Organic L1 cache hit** — when no explicit slug is provided but the
    ``ccproxy.conversation_id`` flow-metadata key matches an entry in the
@@ -39,7 +39,7 @@ from ccproxy.lightllm.pplx import (
     PERPLEXITY_PROVIDER_NAME,
     PERPLEXITY_SESSION_COOKIE,
     PERPLEXITY_URL_BASE,
-    PerplexityThreadNotFoundError,
+    PerplexityError,
 )
 from ccproxy.lightllm.pplx_threads import get_pplx_thread_store
 from ccproxy.pipeline.hook import hook
@@ -51,8 +51,6 @@ logger = logging.getLogger(__name__)
 
 __all__ = ["pplx_thread_inject", "pplx_thread_inject_guard"]
 
-_THREAD_FETCH_TIMEOUT = 10.0
-
 
 def pplx_thread_inject_guard(ctx: Context) -> bool:
     """Run only when forward_oauth resolved the Perplexity sentinel."""
@@ -60,25 +58,24 @@ def pplx_thread_inject_guard(ctx: Context) -> bool:
     return ctx.flow.metadata.get("ccproxy.oauth_provider") == PERPLEXITY_PROVIDER_NAME
 
 
-def _fetch_thread(slug: str, token: str) -> dict[str, Any] | None:
-    """``GET /rest/thread/{slug}`` for the latest entry's identifiers.
-
-    Returns the parsed thread dict on 200, ``None`` on 404, raises on
-    other status codes. Repeated ``supported_block_use_cases`` query
-    params per ``threads-history.md:159-178``.
-    """
-    url = f"{PERPLEXITY_URL_BASE}/rest/thread/{slug}"
+def _thread_fetch_params(*, limit: int, cursor: str | None) -> list[tuple[str, str]]:
     params: list[tuple[str, str]] = [
         ("version", "2.18"),
         ("source", "default"),
-        ("limit", "100"),
-        ("offset", "0"),
+        ("limit", str(limit)),
         ("from_first", "true"),
         ("with_parent_info", "true"),
         ("with_schematized_response", "true"),
     ]
+    if cursor is not None:
+        params.append(("cursor", cursor))
     params.extend(("supported_block_use_cases", uc) for uc in PERPLEXITY_BLOCK_USE_CASES)
+    return params
 
+
+def _fetch_thread_page(slug: str, token: str, *, limit: int, cursor: str | None, timeout: float) -> dict[str, Any]:
+    """Fetch one ``GET /rest/thread/{slug}`` page."""
+    url = f"{PERPLEXITY_URL_BASE}/rest/thread/{slug}"
     headers = {
         "Cookie": f"{PERPLEXITY_SESSION_COOKIE}={token}",
         "User-Agent": PERPLEXITY_BROWSER_UA,
@@ -91,12 +88,69 @@ def _fetch_thread(slug: str, token: str) -> dict[str, Any] | None:
         "x-perplexity-request-endpoint": url,
     }
 
-    resp = httpx.get(url, params=tuple(params), headers=headers, timeout=_THREAD_FETCH_TIMEOUT)
-    if resp.status_code == 404:
-        return None
+    resp = httpx.get(
+        url,
+        params=tuple(_thread_fetch_params(limit=limit, cursor=cursor)),
+        headers=headers,
+        timeout=timeout,
+    )
     resp.raise_for_status()
     parsed: dict[str, Any] = resp.json()
     return parsed
+
+
+def _merge_thread_page(base: dict[str, Any], page: dict[str, Any]) -> None:
+    entries = base.get("entries")
+    page_entries = page.get("entries")
+    if isinstance(entries, list) and isinstance(page_entries, list):
+        entries.extend(page_entries)
+
+
+def _fetch_thread(slug: str, token: str) -> dict[str, Any]:
+    """``GET /rest/thread/{slug}`` for all available entries.
+
+    Returns the parsed thread dict on success. Upstream non-2xx responses
+    raise ``httpx.HTTPStatusError`` with Perplexity's response attached.
+    """
+    fetch_config = get_config().pplx.thread
+    page_size = fetch_config.fetch_page_size
+    timeout = fetch_config.fetch_timeout_seconds
+    merged: dict[str, Any] | None = None
+    cursor: str | None = None
+    seen_cursors: set[str] = set()
+    pages_fetched = 0
+
+    while True:
+        page = _fetch_thread_page(slug, token, limit=page_size, cursor=cursor, timeout=timeout)
+        if merged is None:
+            merged = page
+        else:
+            _merge_thread_page(merged, page)
+
+        pages_fetched += 1
+        has_next = bool(page.get("has_next") or page.get("has_next_page"))
+        if not has_next:
+            break
+        next_cursor = page.get("end_cursor") or page.get("next_cursor")
+        if not isinstance(next_cursor, str) or not next_cursor:
+            raise PerplexityError(
+                status_code=502,
+                message=f"Perplexity thread {slug!r} reported additional entries without a pagination cursor.",
+            )
+        if next_cursor in seen_cursors:
+            raise PerplexityError(
+                status_code=502,
+                message=f"Perplexity thread {slug!r} repeated pagination cursor {next_cursor!r}.",
+            )
+        seen_cursors.add(next_cursor)
+        cursor = next_cursor
+
+    assert merged is not None
+    merged["has_next"] = False
+    merged["has_next_page"] = False
+    merged["ccproxy_pages_fetched"] = pages_fetched
+
+    return merged
 
 
 def _extract_latest_identifiers(thread: dict[str, Any]) -> dict[str, str | None] | None:
@@ -155,28 +209,20 @@ def pplx_thread_inject(ctx: Context, _: dict[str, Any]) -> Context:
         config = get_config()
         token = config.resolve_oauth_token(PERPLEXITY_PROVIDER_NAME)
         if not token:
-            logger.warning(
-                "pplx_thread_inject: metadata.session_id set but no session token; treating as Mode 3"
+            raise PerplexityError(
+                status_code=503,
+                message=f"Perplexity thread {slug!r} cannot be resolved because no session token is configured.",
             )
         else:
             try:
                 thread = _fetch_thread(slug, token)
+            except httpx.HTTPStatusError:
+                raise
             except httpx.HTTPError as e:
-                logger.warning(
-                    "pplx_thread_inject: GET /rest/thread/%s failed: %s; falling through",
-                    slug,
-                    e,
-                )
-                thread = None
-            if thread is None:
-                raise PerplexityThreadNotFoundError(
-                    status_code=404,
-                    message=(
-                        f"Perplexity thread {slug!r} not found or no longer accessible. "
-                        f"Verify the slug or remove metadata.session_id to start a "
-                        f"new thread."
-                    ),
-                )
+                raise PerplexityError(
+                    status_code=502,
+                    message=f"Perplexity thread fetch failed for {slug!r}: {e}",
+                ) from e
             ids = _extract_latest_identifiers(thread)
             if ids is not None:
                 resolved = ids
@@ -184,6 +230,11 @@ def pplx_thread_inject(ctx: Context, _: dict[str, Any]) -> Context:
                 entries = thread.get("entries")
                 if isinstance(entries, list):
                     thread_entry_count = len(entries)
+            else:
+                raise PerplexityError(
+                    status_code=502,
+                    message=f"Perplexity thread {slug!r} returned no usable continuation identifiers.",
+                )
 
     if resolved is None:
         conv_id = flow.metadata.get("ccproxy.conversation_id")
@@ -207,7 +258,7 @@ def pplx_thread_inject(ctx: Context, _: dict[str, Any]) -> Context:
             mode = get_config().pplx.thread.consistency_mode
             divergence = f"turn_count_mismatch: client={client_user_turns} server={thread_entry_count}"
             if mode == "strict":
-                raise PerplexityThreadNotFoundError(
+                raise PerplexityError(
                     status_code=409,
                     message=(
                         f"Perplexity thread {slug!r} diverged from incoming history "

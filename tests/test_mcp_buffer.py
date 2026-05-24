@@ -40,7 +40,25 @@ def test_overflow_drops_oldest_events():
     result = buf.drain_session("session-a")
     events = result["task-1"]
     assert len(events) == 3
-    assert [e["seq"] for e in events] == [2, 3, 4]
+    assert events[0]["type"] == "ccproxy_buffer_overflow"
+    assert events[0]["dropped_events"] == 3
+    assert [e["seq"] for e in events[1:]] == [3, 4]
+
+
+def test_zero_max_events_keeps_no_events():
+    buf = NotificationBuffer(max_events=0)
+    buf.append("task-1", "session-a", {"seq": 0})
+    assert buf.drain_session("session-a") == {}
+    assert buf.is_empty() is True
+
+
+def test_negative_max_events_rejected():
+    try:
+        NotificationBuffer(max_events=-1)
+    except ValueError as exc:
+        assert "max_events" in str(exc)
+    else:
+        raise AssertionError("negative max_events should fail")
 
 
 def test_ttl_expiry_removes_stale_entries():

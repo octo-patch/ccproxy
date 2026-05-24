@@ -158,34 +158,25 @@ class TestFindAvailablePort:
     def test_returns_a_port_in_range(self) -> None:
         from ccproxy.utils import find_available_port
 
-        port = find_available_port(49200, 49300)
-        assert 49200 <= port <= 49300
+        port = find_available_port()
+        assert 1 <= port <= 65535
 
     def test_returned_port_is_bindable(self) -> None:
         import socket
 
         from ccproxy.utils import find_available_port
 
-        port = find_available_port(49200, 49300)
+        port = find_available_port()
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             s.bind(("127.0.0.1", port))
 
-    def test_raises_when_all_ports_occupied(self) -> None:
-        import socket
-
+    def test_bind_failure_propagates(self) -> None:
         from ccproxy.utils import find_available_port
 
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.bind(("127.0.0.1", 0))
-            port = s.getsockname()[1]
-
-            with (
-                patch("socket.socket") as mock_sock_cls,
-                pytest.raises(RuntimeError, match="Could not find available port"),
-            ):
-                mock_sock = mock_sock_cls.return_value.__enter__.return_value
-                mock_sock.bind.side_effect = OSError("in use")
-                find_available_port(port, port)
+        with patch("socket.socket") as mock_sock_cls, pytest.raises(OSError, match="bind failed"):
+            mock_sock = mock_sock_cls.return_value.__enter__.return_value
+            mock_sock.bind.side_effect = OSError("bind failed")
+            find_available_port()
 
 
 class TestFormatValue:

@@ -93,7 +93,20 @@ def test_render_read_results_includes_url_sample() -> None:
     result = render_step(step)
     assert "Read 4 results" in result.reasoning_text
     assert "http://x/1" in result.reasoning_text
-    assert "…" in result.reasoning_text
+    assert "http://x/4" in result.reasoning_text
+    assert "…" not in result.reasoning_text
+
+
+def test_render_read_results_ignores_non_list_urls() -> None:
+    step = {
+        "step_type": "READ_RESULTS",
+        "uuid": "u",
+        "read_results_content": {"urls": "https://example.com"},
+    }
+    result = render_step(step)
+    assert "Read 0 results" in result.reasoning_text
+    assert result.structured is not None
+    assert result.structured["urls"] == []
 
 
 def test_render_mcp_tool_input_full_structured_and_text() -> None:

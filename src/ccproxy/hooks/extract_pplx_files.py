@@ -38,7 +38,7 @@ from ccproxy.lightllm.pplx import (
     PERPLEXITY_PROVIDER_NAME,
     PERPLEXITY_SESSION_COOKIE,
     PERPLEXITY_URL_BASE,
-    LightllmException,
+    LightLLMError,
 )
 from ccproxy.pipeline.hook import hook
 
@@ -50,18 +50,13 @@ logger = logging.getLogger(__name__)
 __all__ = ["extract_pplx_files", "extract_pplx_files_guard"]
 
 
-_MAX_FILES = 30
-_MAX_FILE_SIZE = 50 * 1024 * 1024  # 50 MB per file-uploads.md
-_FETCH_TIMEOUT = 10.0
-_UPLOAD_TIMEOUT = 60.0
-_SUBSCRIBE_TIMEOUT = 120.0
 _DEFAULT_MIMETYPE = "application/octet-stream"
 
 _BATCH_UPLOAD_URL = f"{PERPLEXITY_URL_BASE}/rest/uploads/batch_create_upload_urls?version=2.18&source=default"
 _PROCESSING_SUBSCRIBE_URL = f"{PERPLEXITY_URL_BASE}/rest/sse/attachment_processing/subscribe"
 
 
-class PerplexityFileError(LightllmException):
+class PerplexityFileError(LightLLMError):
     """Surfaced as a 4xx structured error to the OpenAI client."""
 
 
@@ -124,7 +119,7 @@ def _fetch_part(part: dict[str, Any]) -> FileInfo | None:
     if url.startswith(("http://", "https://")):
         return _fetch_url(url)
 
-    logger.warning("extract_pplx_files: unsupported url scheme: %s", url[:30])
+    logger.warning("extract_pplx_files: unsupported url scheme: %s", url)
     return None
 
 
@@ -161,7 +156,7 @@ def _decode_data_uri(url: str) -> FileInfo | None:
 def _fetch_url(url: str) -> FileInfo | None:
     """``http(s)://...`` URL → ``FileInfo``. Uses stock httpx; no impersonation."""
     try:
-        resp = httpx.get(url, timeout=_FETCH_TIMEOUT, follow_redirects=True)
+        resp = httpx.get(url, timeout=get_config().pplx.upload.fetch_timeout_seconds, follow_redirects=True)
         resp.raise_for_status()
     except httpx.HTTPError as e:
         raise PerplexityFileError(
@@ -186,10 +181,11 @@ def _fetch_url(url: str) -> FileInfo | None:
 
 def _validate(files: list[FileInfo]) -> None:
     """Per file-uploads.md:323-329: ≤30 files, ≤50MB each, non-empty."""
-    if len(files) > _MAX_FILES:
+    upload_config = get_config().pplx.upload
+    if len(files) > upload_config.max_files:
         raise PerplexityFileError(
             status_code=400,
-            message=f"Too many attachments: {len(files)}. Maximum allowed is {_MAX_FILES}.",
+            message=f"Too many attachments: {len(files)}. Maximum allowed is {upload_config.max_files}.",
         )
     for f in files:
         size = len(f.data)
@@ -198,10 +194,14 @@ def _validate(files: list[FileInfo]) -> None:
                 status_code=400,
                 message=f"Attachment {f.filename!r} is empty.",
             )
-        if size > _MAX_FILE_SIZE:
+        if size > upload_config.max_file_size_bytes:
             raise PerplexityFileError(
                 status_code=400,
-                message=(f"Attachment {f.filename!r} exceeds 50 MB limit: {size / (1024 * 1024):.1f} MB"),
+                message=(
+                    f"Attachment {f.filename!r} exceeds "
+                    f"{upload_config.max_file_size_bytes / (1024 * 1024):.1f} MB limit: "
+                    f"{size / (1024 * 1024):.1f} MB"
+                ),
             )
 
 
@@ -226,7 +226,7 @@ def _batch_create_upload_urls(files: list[FileInfo], token: str) -> dict[str, di
             _BATCH_UPLOAD_URL,
             headers=headers,
             json={"files": payload_files},
-            timeout=_UPLOAD_TIMEOUT,
+            timeout=get_config().pplx.upload.upload_timeout_seconds,
         )
         resp.raise_for_status()
     except httpx.HTTPError as e:
@@ -281,7 +281,7 @@ def _s3_upload(file_info: FileInfo, result: dict[str, Any]) -> str:
             data=file_info.data,
         )
         with CurlSession() as session:
-            resp = session.post(bucket_url, multipart=mime, timeout=_UPLOAD_TIMEOUT)
+            resp = session.post(bucket_url, multipart=mime, timeout=get_config().pplx.upload.upload_timeout_seconds)
         if resp.status_code not in (200, 201, 204):
             raise PerplexityFileError(
                 status_code=502,
@@ -311,7 +311,7 @@ def _await_processing(file_uuids: list[str], token: str) -> None:
             _PROCESSING_SUBSCRIBE_URL,
             headers=headers,
             json={"file_uuids": file_uuids},
-            timeout=_SUBSCRIBE_TIMEOUT,
+            timeout=get_config().pplx.upload.subscribe_timeout_seconds,
         ) as resp:
             resp.raise_for_status()
             for _ in resp.iter_bytes():

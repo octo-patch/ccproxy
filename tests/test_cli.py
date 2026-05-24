@@ -310,6 +310,8 @@ class TestViewLogs:
         assert exc_info.value.code == 0
         cmd = mock_run.call_args[0][0]
         assert cmd[0] == "tail"
+        n_idx = cmd.index("-n")
+        assert cmd[n_idx + 1] == "+1"
         assert cmd[-1] == str(log_file)
 
     @patch("subprocess.run")

@@ -78,10 +78,32 @@
       ];
     };
     pplx = {
+      search = {
+        language = "en-US";
+        timezone = "America/Los_Angeles";
+        search_focus = "internet";
+        sources = [ "web" ];
+        search_recency_filter = null;
+        is_incognito = false;
+        skip_search_enabled = true;
+        is_nav_suggestions_disabled = true;
+        always_search_override = false;
+        override_no_search = false;
+        preflight_timeout_seconds = 5;
+      };
       thread = {
         consistency_mode = "warn";
         citation_mode = "markdown";
         ttl_seconds = 1800;
+        fetch_page_size = 100;
+        fetch_timeout_seconds = 10;
+      };
+      upload = {
+        max_files = 30;
+        max_file_size_bytes = 52428800;
+        fetch_timeout_seconds = 10;
+        upload_timeout_seconds = 60;
+        subscribe_timeout_seconds = 120;
       };
     };
     gemini_capacity = {
@@ -105,6 +127,15 @@
         port = 4030;
         auth = null;
       };
+      buffer = {
+        max_events_per_task = 65536;
+        ttl_seconds = 600;
+      };
+    };
+    oauth = {
+      command_timeout_seconds = 5;
+      refresh_timeout_seconds = 15;
+      refresh_headroom_seconds = 60;
     };
     shaping = {
       enabled = true;

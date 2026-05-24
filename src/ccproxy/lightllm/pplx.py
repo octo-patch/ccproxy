@@ -37,10 +37,11 @@ from dataclasses import dataclass, field
 from importlib.resources import files
 from typing import Any
 
+from ccproxy.config import get_config
 from ccproxy.lightllm.pplx_steps import _KNOWN_INTENDED_USAGES, render_step
 
 
-class LightllmException(Exception):  # noqa: N818  # project-specific naming convention
+class LightLLMError(Exception):
     """ccproxy-internal exception base.
 
     Carries ``status_code`` so downstream error handlers can map to HTTP
@@ -52,6 +53,7 @@ class LightllmException(Exception):  # noqa: N818  # project-specific naming con
         self.message = message
         super().__init__(message)
 
+
 logger = logging.getLogger(__name__)
 
 
@@ -59,7 +61,9 @@ PERPLEXITY_URL_BASE = "https://www.perplexity.ai"
 PERPLEXITY_URL = f"{PERPLEXITY_URL_BASE}/rest/sse/perplexity_ask"
 PERPLEXITY_PREFLIGHT_URL = f"{PERPLEXITY_URL_BASE}/search/new"
 PERPLEXITY_API_VERSION = "2.18"
-PERPLEXITY_BROWSER_UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"  # noqa: E501  # browser UA is the value we send
+PERPLEXITY_BROWSER_UA = (
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+)
 PERPLEXITY_SESSION_COOKIE = "__Secure-next-auth.session-token"
 PERPLEXITY_PROVIDER_NAME = "perplexity_pro"
 
@@ -87,26 +91,24 @@ def load_pplx_models() -> dict[str, dict[str, str]]:
 PERPLEXITY_MODELS: dict[str, dict[str, str]] = load_pplx_models()
 
 
-_SOURCE_MAP: dict[str, str] = {
-    "web": "web",
-    "academic": "scholar",
-    "social": "social",
-    "finance": "edgar",
-    "all": "web",
-}
+def _string_extra(extras: dict[str, Any], key: str, default: str) -> str:
+    value = extras.get(key, default)
+    if isinstance(value, str) and value:
+        return value
+    return default
 
-_SEARCH_MAP: dict[str, str] = {
-    "web": "internet",
-    "writing": "writing",
-}
 
-_TIME_MAP: dict[str, str] = {
-    "all": "",
-    "day": "DAY",
-    "week": "WEEK",
-    "month": "MONTH",
-    "year": "YEAR",
-}
+def _bool_extra(extras: dict[str, Any], key: str, default: bool) -> bool:
+    value = extras.get(key)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+    return default
 
 
 def _flatten_messages(messages: list[Any]) -> str:
@@ -114,11 +116,7 @@ def _flatten_messages(messages: list[Any]) -> str:
     parts: list[str] = []
     for msg in messages:
         role = msg.get("role") if isinstance(msg, dict) else getattr(msg, "role", None)
-        content = (
-            msg.get("content")
-            if isinstance(msg, dict)
-            else getattr(msg, "content", None)
-        )
+        content = msg.get("content") if isinstance(msg, dict) else getattr(msg, "content", None)
 
         text = ""
         if isinstance(content, str):
@@ -153,11 +151,7 @@ def _flatten_last_user_turn(messages: list[Any]) -> str:
         role = msg.get("role") if isinstance(msg, dict) else getattr(msg, "role", None)
         if role != "user":
             continue
-        content = (
-            msg.get("content")
-            if isinstance(msg, dict)
-            else getattr(msg, "content", None)
-        )
+        content = msg.get("content") if isinstance(msg, dict) else getattr(msg, "content", None)
         if isinstance(content, str):
             return content
         if isinstance(content, list):
@@ -187,14 +181,13 @@ def _build_pplx_payload(
     meta = PERPLEXITY_MODELS.get(model_id)
     if meta is None:
         available = ", ".join(sorted(PERPLEXITY_MODELS))
-        raise ValueError(
-            f"Unknown Perplexity model {model_id!r}. Available: {available}"
-        )
+        raise ValueError(f"Unknown Perplexity model {model_id!r}. Available: {available}")
 
-    raw_sources = extras.get("source_focus", "web")
+    search_config = get_config().pplx.search
+    raw_sources = extras.get("sources", search_config.sources)
     if not isinstance(raw_sources, list):
         raw_sources = [raw_sources]
-    sources = [_SOURCE_MAP.get(s, "web") for s in raw_sources]
+    sources = [str(s) for s in raw_sources if s] or ["web"]
 
     coordinates = extras.get("coordinates")
     client_coords: dict[str, Any] | None = None
@@ -205,7 +198,10 @@ def _build_pplx_payload(
             "name": "",
         }
 
-    save_to_library = bool(extras.get("save_to_library", True))
+    search_focus = _string_extra(extras, "search_focus", search_config.search_focus)
+    raw_recency = extras.get("search_recency_filter", search_config.search_recency_filter)
+    search_recency_filter = raw_recency if isinstance(raw_recency, str) and raw_recency else None
+    is_incognito = _bool_extra(extras, "is_incognito", search_config.is_incognito)
 
     last_backend_uuid = extras.get("last_backend_uuid") or extras.get("thread_uuid")
     is_followup = last_backend_uuid is not None
@@ -213,21 +209,19 @@ def _build_pplx_payload(
     frontend_uuid = str(uuid.uuid4())
     frontend_context_uuid = extras.get("frontend_context_uuid") or str(uuid.uuid4())
 
-    # TODO: determine field requirements/usage, then properly parameterize.
     params: dict[str, Any] = {
         "version": PERPLEXITY_API_VERSION,
-        "source": "default",
-        "language": extras.get("language", "en-US"),
-        "timezone": extras.get("timezone", "America/Los_Angeles"),
-        "search_focus": _SEARCH_MAP.get(extras.get("search_focus", "web"), "internet"),
+        "source": _string_extra(extras, "source", "default"),
+        "language": _string_extra(extras, "language", search_config.language),
+        "timezone": _string_extra(extras, "timezone", search_config.timezone),
+        "search_focus": search_focus,
         "sources": sources,
-        "search_recency_filter": _TIME_MAP.get(extras.get("time_range", "all"), "")
-        or None,
+        "search_recency_filter": search_recency_filter,
         "mode": meta["mode"],
         "model_preference": meta["identifier"],
         "frontend_uuid": frontend_uuid,
         "frontend_context_uuid": frontend_context_uuid,
-        "is_incognito": not save_to_library,
+        "is_incognito": is_incognito,
         "use_schematized_api": True,
         "send_back_text_in_streaming_api": False,
         "prompt_source": "user",
@@ -239,10 +233,14 @@ def _build_pplx_payload(
         "client_coordinates": client_coords,
         "mentions": extras.get("mentions", []),
         "attachments": extras.get("attachments", []),
-        "skip_search_enabled": True,
-        "is_nav_suggestions_disabled": True,
-        "always_search_override": False,
-        "override_no_search": False,
+        "skip_search_enabled": _bool_extra(extras, "skip_search_enabled", search_config.skip_search_enabled),
+        "is_nav_suggestions_disabled": _bool_extra(
+            extras,
+            "is_nav_suggestions_disabled",
+            search_config.is_nav_suggestions_disabled,
+        ),
+        "always_search_override": _bool_extra(extras, "always_search_override", search_config.always_search_override),
+        "override_no_search": _bool_extra(extras, "override_no_search", search_config.override_no_search),
         "should_ask_for_mcp_tool_confirmation": True,
         "browser_agent_allow_once_from_toggle": False,
         "force_enable_browser_agent": False,
@@ -362,9 +360,7 @@ def _consume_step(step: dict[str, Any], state: StreamState) -> str:
     return result.reasoning_text
 
 
-def _extract_deltas(
-    event: dict[str, Any], state: StreamState
-) -> tuple[str | None, str | None]:
+def _extract_deltas(event: dict[str, Any], state: StreamState) -> tuple[str | None, str | None]:
     """Apply one SSE event to ``state``; return new (answer_delta, reasoning_delta).
 
     Walks ``event["blocks"][*]``:
@@ -408,9 +404,7 @@ def _extract_deltas(
     # event has no ``plan_block`` blocks — otherwise we'd double-emit
     # whatever the structured channel will also emit below.
     text = event.get("text")
-    has_plan_block_this_event = any(
-        isinstance(b, dict) and isinstance(b.get("plan_block"), dict) for b in blocks
-    )
+    has_plan_block_this_event = any(isinstance(b, dict) and isinstance(b.get("plan_block"), dict) for b in blocks)
     if isinstance(text, str):
         try:
             parsed = json.loads(text)
@@ -422,9 +416,7 @@ def _extract_deltas(
                     continue
                 st = step.get("step_type")
                 if st == "RESEARCH_CLARIFYING_QUESTIONS":
-                    raise PerplexityClarifyingQuestionsError(
-                        _extract_clarifying_questions(step)
-                    )
+                    raise PerplexityClarifyingQuestionsError(_extract_clarifying_questions(step))
                 if has_plan_block_this_event:
                     continue
                 rendered = _consume_step(step, state)
@@ -460,7 +452,7 @@ def _extract_deltas(
             # Walk plan_block.steps[] for the full step inventory: MCP tool
             # calls, web searches, browser-agent actions, image generation, etc.
             # See pplx_steps.py for renderer dispatch.
-            for step in (plan_block.get("steps") or []):
+            for step in plan_block.get("steps") or []:
                 if not isinstance(step, dict):
                     continue
                 rendered = _consume_step(step, state)
@@ -488,11 +480,7 @@ def _extract_deltas(
         mb = block.get("markdown_block")
         if isinstance(mb, dict) and not block.get("diff_block") and intended_usage != "ask_text":
             answer_str = mb.get("answer")
-            if (
-                isinstance(answer_str, str)
-                and answer_str
-                and answer_str.startswith(state.answer_seen)
-            ):
+            if isinstance(answer_str, str) and answer_str and answer_str.startswith(state.answer_seen):
                 bare_delta = answer_str[len(state.answer_seen) :]
                 if bare_delta:
                     answer_delta = (answer_delta or "") + bare_delta
@@ -567,11 +555,7 @@ def _extract_deltas(
                         answer_delta = (answer_delta or "") + new_text
                         state.answer_seen += new_text
                 answer_str = value.get("answer")
-                if (
-                    isinstance(answer_str, str)
-                    and answer_str
-                    and answer_str.startswith(state.answer_seen)
-                ):
+                if isinstance(answer_str, str) and answer_str and answer_str.startswith(state.answer_seen):
                     delta = answer_str[len(state.answer_seen) :]
                     if delta:
                         answer_delta = (answer_delta or "") + delta
@@ -685,9 +669,7 @@ def _extract_answer_from_entry(
 
     usages = entry.get("structured_answer_block_usages")
     answer_iu = (
-        usages[0]
-        if isinstance(usages, list) and usages and isinstance(usages[0], str)
-        else "ask_text_0_markdown"
+        usages[0] if isinstance(usages, list) and usages and isinstance(usages[0], str) else "ask_text_0_markdown"
     )
 
     raw_answer = ""
@@ -765,31 +747,20 @@ def _thread_to_openai_messages(
                         if isinstance(d, str) and d:
                             reasoning_lines.append(d)
             if reasoning_lines:
-                answer_text = (
-                    f"{answer_text}\n\n---\n**Reasoning:**\n\n- "
-                    + "\n- ".join(reasoning_lines)
-                )
+                answer_text = f"{answer_text}\n\n---\n**Reasoning:**\n\n- " + "\n- ".join(reasoning_lines)
 
         out.append({"role": "assistant", "content": answer_text})
     return out
 
 
-class PerplexityException(LightllmException):
+class PerplexityError(LightLLMError):
     pass
 
 
-class PerplexityThreadNotFoundError(PerplexityException):
-    pass
-
-
-class PerplexityClarifyingQuestionsError(PerplexityException):
+class PerplexityClarifyingQuestionsError(PerplexityError):
     """Deep Research returned clarifying questions instead of an answer."""
 
     def __init__(self, questions: list[str]) -> None:
-        message = "Perplexity Deep Research requires clarification: " + "; ".join(
-            questions
-        )
+        message = "Perplexity Deep Research requires clarification: " + "; ".join(questions)
         super().__init__(status_code=400, message=message)
         self.questions = questions
-
-

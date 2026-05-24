@@ -67,7 +67,7 @@ def test_build_payload_followup_injects_identifiers() -> None:
     assert params["query_source"] == "followup"
     assert params["followup_source"] == "link"
     assert params["last_backend_uuid"] == "backend-1"
-    assert params["read_write_token"] == "rw-1"
+    assert params["read_write_token"] == "rw-1"  # noqa: S105
     assert params["frontend_context_uuid"] == "ctx-stable"
     assert params["time_from_first_type"] == 8758
 
@@ -81,13 +81,41 @@ def test_build_payload_space_uuid_forces_collection_query_source() -> None:
     payload = _build_pplx_payload(
         query="ask",
         model_id="perplexity/best",
-        extras={"space_uuid": "space-1", "save_to_library": False},
+        extras={"space_uuid": "space-1", "is_incognito": True},
     )
     params = payload["params"]
     assert params["query_source"] == "collection"
     assert params["target_collection_uuid"] == "space-1"
     assert params["target_thread_access_level"] == 1
     assert params["is_incognito"] is False
+
+
+def test_build_payload_honors_perplexity_wire_field_overrides() -> None:
+    payload = _build_pplx_payload(
+        query="ask",
+        model_id="perplexity/best",
+        extras={
+            "source": "sidebar",
+            "sources": ["scholar", "edgar"],
+            "search_focus": "writing",
+            "search_recency_filter": "DAY",
+            "is_incognito": "true",
+            "skip_search_enabled": False,
+            "is_nav_suggestions_disabled": False,
+            "always_search_override": True,
+            "override_no_search": True,
+        },
+    )
+    params = payload["params"]
+    assert params["source"] == "sidebar"
+    assert params["sources"] == ["scholar", "edgar"]
+    assert params["search_focus"] == "writing"
+    assert params["search_recency_filter"] == "DAY"
+    assert params["is_incognito"] is True
+    assert params["skip_search_enabled"] is False
+    assert params["is_nav_suggestions_disabled"] is False
+    assert params["always_search_override"] is True
+    assert params["override_no_search"] is True
 
 
 def test_flatten_messages_drops_image_url_parts() -> None:
@@ -146,12 +174,7 @@ def test_flatten_last_user_turn_extracts_only_new_turn() -> None:
     )
 
     assert _flatten_last_user_turn([]) == ""
-    assert (
-        _flatten_last_user_turn(
-            [{"role": "system", "content": "s"}, {"role": "assistant", "content": "a"}]
-        )
-        == ""
-    )
+    assert _flatten_last_user_turn([{"role": "system", "content": "s"}, {"role": "assistant", "content": "a"}]) == ""
 
 
 def test_parse_sse_line_basic() -> None:
@@ -211,7 +234,7 @@ def test_extract_deltas_prefix_diffs_answer_and_reasoning() -> None:
     assert reason is None
     assert state.final is True
     assert state.ids["thread_url_slug"] == "slug-1"
-    assert state.ids["read_write_token"] == "rw-1"
+    assert state.ids["read_write_token"] == "rw-1"  # noqa: S105
 
 
 def test_extract_deltas_raises_on_clarifying_questions() -> None:
@@ -341,9 +364,7 @@ def test_thread_to_openai_messages_real_fixture_news_claude() -> None:
     """
     from pathlib import Path
 
-    fixture_dir = (
-        Path(__file__).parent / "fixtures" / "pplx_threads"
-    )
+    fixture_dir = Path(__file__).parent / "fixtures" / "pplx_threads"
     fixture = fixture_dir / "upstream-news-claude.json"
     if not fixture.exists():
         pytest.skip(f"missing fixture {fixture}")
@@ -365,7 +386,7 @@ def test_thread_store_save_get_lifecycle() -> None:
     store.save(
         conversation_id="conv-1",
         backend_uuid="B-1",
-        read_write_token="RW-1",
+        read_write_token="RW-1",  # noqa: S106
         context_uuid="C-1",
         thread_url_slug="slug-1",
     )
@@ -381,7 +402,7 @@ def test_thread_store_ttl_eviction() -> None:
     store.save(
         conversation_id="conv-1",
         backend_uuid="B-1",
-        read_write_token="RW-1",
+        read_write_token="RW-1",  # noqa: S106
         context_uuid="C-1",
         thread_url_slug="slug-1",
     )
@@ -390,7 +411,7 @@ def test_thread_store_ttl_eviction() -> None:
     store.save(
         conversation_id="conv-2",
         backend_uuid="B-2",
-        read_write_token="RW-2",
+        read_write_token="RW-2",  # noqa: S106
         context_uuid="C-2",
         thread_url_slug="slug-2",
     )
@@ -403,6 +424,7 @@ def test_pplx_thread_config_defaults() -> None:
     assert cfg.thread.consistency_mode == "warn"
     assert cfg.thread.citation_mode == "markdown"
     assert cfg.thread.ttl_seconds == 1800.0
+    assert cfg.thread.fetch_page_size == 100
 
 
 def test_pplx_thread_config_rejects_invalid_literal() -> None:
@@ -620,7 +642,7 @@ def test_text_field_steps_skipped_when_plan_block_present() -> None:
                         }
                     ],
                     "goals": [],
-                }
+                },
             }
         ],
     }
@@ -644,5 +666,3 @@ def test_text_field_steps_processed_when_no_plan_block() -> None:
     assert reasoning is not None
     assert "[C] z" in reasoning
     assert len(state.mcp_steps) == 1
-
-

@@ -7,7 +7,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
-DEFAULT_MAX_EVENTS = 50
+DEFAULT_MAX_EVENTS = 64 * 1024
 DEFAULT_TTL_SECONDS = 600
 
 
@@ -32,6 +32,8 @@ class NotificationBuffer:
     """Thread-safe buffer for MCP notification events, keyed by task_id."""
 
     def __init__(self, max_events: int = DEFAULT_MAX_EVENTS) -> None:
+        if max_events < 0:
+            raise ValueError("max_events must be non-negative")
         self._buffers: dict[str, TaskBuffer] = {}
         self._lock = threading.Lock()
         self._max_events = max_events
@@ -42,12 +44,29 @@ class NotificationBuffer:
             buf = self._buffers.get(task_id)
             if buf is None:
                 buf = TaskBuffer(task_id=task_id, session_id=session_id)
-                self._buffers[task_id] = buf
+            self._buffers[task_id] = buf
             buf.events.append(event)
             buf.last_seen = time.time()
-            # Cap at max_events, drop oldest
             if len(buf.events) > self._max_events:
-                buf.events = buf.events[-self._max_events :]
+                if self._max_events > 0:
+                    old_dropped = 0
+                    actual_events = buf.events
+                    first = actual_events[0] if actual_events else None
+                    if isinstance(first, dict) and first.get("type") == "ccproxy_buffer_overflow":
+                        old_dropped = int(first.get("dropped_events") or 0)
+                        actual_events = actual_events[1:]
+                    tail_count = self._max_events - 1
+                    tail = actual_events[-tail_count:] if tail_count > 0 else []
+                    marker = {
+                        "type": "ccproxy_buffer_overflow",
+                        "dropped_events": old_dropped + len(actual_events) - len(tail),
+                        "max_events": self._max_events,
+                    }
+                    buf.events = [marker, *tail]
+                else:
+                    buf.events = []
+            if not buf.events:
+                del self._buffers[task_id]
 
     def drain_session(self, session_id: str) -> dict[str, list[dict[str, Any]]]:
         """Atomically drain all events for a session. Returns {task_id: events}."""
@@ -94,7 +113,13 @@ def get_buffer() -> NotificationBuffer:
     if _buffer is None:
         with _buffer_lock:
             if _buffer is None:
-                _buffer = NotificationBuffer()
+                try:
+                    from ccproxy.config import get_config
+
+                    max_events = get_config().mcp.buffer.max_events_per_task
+                except Exception:
+                    max_events = DEFAULT_MAX_EVENTS
+                _buffer = NotificationBuffer(max_events=max_events)
     return _buffer
 
 

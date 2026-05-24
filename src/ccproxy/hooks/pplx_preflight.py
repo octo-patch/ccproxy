@@ -38,9 +38,6 @@ logger = logging.getLogger(__name__)
 
 __all__ = ["pplx_preflight", "pplx_preflight_guard"]
 
-_PREFLIGHT_MAX_QUERY = 2000
-_PREFLIGHT_TIMEOUT = 5.0
-
 
 def pplx_preflight_guard(ctx: Context) -> bool:
     """Run only when forward_oauth resolved the Perplexity sentinel."""
@@ -50,7 +47,7 @@ def pplx_preflight_guard(ctx: Context) -> bool:
 
 @hook(reads=["query_str"], writes=[])
 def pplx_preflight(ctx: Context, _: dict[str, Any]) -> Context:
-    """Fire ``GET /search/new?q=<query[:2000]>`` as a best-effort warm-up.
+    """Fire ``GET /search/new`` with the complete ``query_str`` as a warm-up.
 
     Failures are warned-and-swallowed: the main ``perplexity_ask`` proceeds
     regardless. The preflight's success state is stamped on
@@ -67,11 +64,12 @@ def pplx_preflight(ctx: Context, _: dict[str, Any]) -> Context:
     if not token:
         logger.debug("pplx_preflight: no session token available; skipping")
         return ctx
+    preflight_config = config.pplx.search
 
     try:
         httpx.get(
             PERPLEXITY_PREFLIGHT_URL,
-            params={"q": query[:_PREFLIGHT_MAX_QUERY]},
+            params={"q": query},
             headers={
                 "Cookie": f"{PERPLEXITY_SESSION_COOKIE}={token}",
                 "User-Agent": PERPLEXITY_BROWSER_UA,
@@ -79,7 +77,7 @@ def pplx_preflight(ctx: Context, _: dict[str, Any]) -> Context:
                 "Origin": PERPLEXITY_URL_BASE,
                 "Accept": "application/json",
             },
-            timeout=_PREFLIGHT_TIMEOUT,
+            timeout=preflight_config.preflight_timeout_seconds,
             follow_redirects=True,
         )
         ctx.flow.metadata["ccproxy.pplx.preflight"] = True
