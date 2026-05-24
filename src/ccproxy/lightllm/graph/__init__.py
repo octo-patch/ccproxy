@@ -18,6 +18,7 @@ from ccproxy.lightllm.graph.anthropic_render import AnthropicResponseRenderFSM
 from ccproxy.lightllm.graph.google_intake import GoogleResponseIntakeFSM
 from ccproxy.lightllm.graph.openai_intake import OpenAIResponseIntakeFSM
 from ccproxy.lightllm.graph.openai_render import OpenAIResponseRenderFSM
+from ccproxy.lightllm.graph.openai_responses_render import OpenAIResponsesRenderFSM
 from ccproxy.lightllm.graph.perplexity_intake import PerplexityResponseIntakeFSM
 from ccproxy.lightllm.parsed import InboundFormat
 
@@ -48,7 +49,9 @@ _GOOGLE_COMPATIBLE = frozenset({"google", "gemini", "vertex_ai", "vertex_ai_beta
 AnyAsyncIntakeFSM = (
     AnthropicResponseIntakeFSM | OpenAIResponseIntakeFSM | GoogleResponseIntakeFSM | PerplexityResponseIntakeFSM
 )
-AnyAsyncRenderFSM = AnthropicResponseRenderFSM | OpenAIResponseRenderFSM
+AnyAsyncRenderFSM = (
+    AnthropicResponseRenderFSM | OpenAIResponseRenderFSM | OpenAIResponsesRenderFSM
+)
 
 
 class UnsupportedUpstreamError(ValueError):
@@ -107,6 +110,8 @@ def dispatch_render(*, inbound_format: InboundFormat, model: str = "unknown") ->
         return AnthropicResponseRenderFSM(model=model)
     if inbound_format is InboundFormat.OPENAI_CHAT:
         return OpenAIResponseRenderFSM(model=model)
+    if inbound_format is InboundFormat.OPENAI_RESPONSES:
+        return OpenAIResponsesRenderFSM(model=model)
     raise UnsupportedListenerError(f"no response render for inbound_format={inbound_format}")
 
 

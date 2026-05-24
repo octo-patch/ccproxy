@@ -173,6 +173,7 @@ module = [
   "ccproxy.lightllm.graph.google_intake",
   "ccproxy.lightllm.graph.openai_intake",
   "ccproxy.lightllm.graph.openai_render",
+  "ccproxy.lightllm.graph.openai_responses_render",
   "ccproxy.lightllm.graph.perplexity_intake",
   "ccproxy.lightllm.graph.sse_pipeline",
   "ccproxy.lightllm.graph._subgraph_patch",
