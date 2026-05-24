@@ -2,11 +2,8 @@
 
 Converts Anthropic Messages request JSON to / from pydantic-ai's
 ``list[ModelMessage]`` IR. Reuses the SDK's `TypedDict`s
-(``anthropic.types.beta.*``) for typed dispatch.
-
-Replaces the two-FSM stack in ``ccproxy.lightllm.graph.anthropic_load``
-plus ``ccproxy.lightllm.graph.anthropic_dump`` with a single procedural
-adapter modeled on the pydantic-ai UI adapters in
+(``anthropic.types.beta.*``) for typed dispatch. Procedural adapter
+modeled on the pydantic-ai UI adapters in
 ``pydantic_ai.ui.{ag_ui,vercel_ai}``.
 
 The Anthropic API uses a top-level ``system`` field separate from
@@ -16,7 +13,8 @@ items in IR are emitted as ``cache_control`` annotations on the
 preceding block (or, for system blocks, on the matching system block).
 
 ``build_event_stream`` raises ``NotImplementedError``; streaming
-intake/render still lives in ``ccproxy.lightllm.graph.anthropic_*``.
+intake/render lives in :mod:`ccproxy.lightllm.graph.anthropic_intake`
+and :mod:`ccproxy.lightllm.graph.anthropic_render`.
 """
 
 from __future__ import annotations

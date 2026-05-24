@@ -5,13 +5,12 @@ Converts OpenAI Chat Completions request JSON to / from pydantic-ai's
 (``openai.types.chat.*``) for typed dispatch — the wire types are dicts
 at runtime, so we read via dict syntax and use ``cast(...)`` for IDE /
 type-checker support without paying a Pydantic validation tax.
-
-Replaces the four-FSM stack in ``ccproxy.lightllm.graph.openai_load`` +
-``openai_dump`` with a single procedural adapter modeled on the
-pydantic-ai UI adapters in ``pydantic_ai.ui.{ag_ui,vercel_ai}``.
+Procedural adapter modeled on the pydantic-ai UI adapters in
+``pydantic_ai.ui.{ag_ui,vercel_ai}``.
 
 ``build_event_stream`` raises ``NotImplementedError``; streaming
-intake/render still lives in ``ccproxy.lightllm.graph.openai_*``.
+intake/render lives in :mod:`ccproxy.lightllm.graph.openai_intake` and
+:mod:`ccproxy.lightllm.graph.openai_render`.
 """
 
 from __future__ import annotations

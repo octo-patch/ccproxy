@@ -56,7 +56,14 @@ ccproxy:
         type: command
       host: api.anthropic.com
       path: /v1/messages
-      provider: anthropic
+      type: anthropic
+    codex:
+      auth:
+        command: jq -r '.tokens.access_token' ~/.codex/auth.json
+        type: command
+      host: chatgpt.com
+      path: /backend-api/codex/responses
+      type: openai_responses
     deepseek:
       auth:
         command: printenv DEEPSEEK_API_KEY
@@ -64,7 +71,7 @@ ccproxy:
         type: command
       host: api.deepseek.com
       path: /anthropic/v1/messages
-      provider: anthropic
+      type: anthropic
     gemini:
       auth:
         client_id: 681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com
@@ -72,7 +79,7 @@ ccproxy:
         type: google_oauth
       host: cloudcode-pa.googleapis.com
       path: /v1internal:{action}
-      provider: gemini
+      type: gemini
     perplexity_pro:
       auth:
         file: ~/.opnix/secrets/perplexity-pro-api-key
@@ -80,7 +87,7 @@ ccproxy:
       fingerprint_profile: chrome131
       host: www.perplexity.ai
       path: /rest/sse/perplexity_ask
-      provider: perplexity_pro
+      type: perplexity_pro
   shaping:
     enabled: true
     providers:

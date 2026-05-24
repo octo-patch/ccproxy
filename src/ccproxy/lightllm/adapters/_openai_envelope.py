@@ -1,8 +1,8 @@
 """OpenAI-specific envelope helpers.
 
-Extracted from the retired FSM modules (graph/openai_load.py + openai_dump.py).
 Handles tool/settings parsing, wire-to-IR key mapping, and raw_extras stitching
-for the OpenAI Chat Completions API wire format.
+for the OpenAI Chat Completions API wire format. Companion to
+:class:`OpenAIChatAdapter`.
 """
 
 from __future__ import annotations

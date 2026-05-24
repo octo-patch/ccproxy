@@ -1,8 +1,8 @@
 """Anthropic-specific envelope helpers.
 
-Extracted from the retired FSM modules (graph/anthropic_load.py + anthropic_dump.py).
 Handles tool/settings parsing, system prompt extraction, cache control normalization,
-and raw_extras stitching for the Anthropic Messages API wire format.
+and raw_extras stitching for the Anthropic Messages API wire format. Companion to
+:class:`AnthropicAdapter`.
 """
 
 from __future__ import annotations

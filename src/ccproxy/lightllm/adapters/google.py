@@ -5,9 +5,9 @@ Converts pydantic-ai's ``list[ModelMessage]`` IR to Google Gemini
 doesn't accept Gemini-format inbound requests, so :meth:`load_messages`
 raises :class:`NotImplementedError`.
 
-Replaces the CaptureSentinel-based ``ccproxy.lightllm.graph.google_dump`` with
-direct construction of the Google API wire body (camelCase keys, base64-encoded
-inline data, generationConfig hoist for sampling parameters).
+Direct construction of the Google API wire body: camelCase keys,
+base64-encoded inline data, ``generationConfig`` hoist for sampling
+parameters.
 """
 
 from __future__ import annotations

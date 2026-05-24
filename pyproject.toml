@@ -167,15 +167,11 @@ disallow_any_generics = false
 [[tool.mypy.overrides]]
 module = [
   "ccproxy.lightllm.graph",
-  "ccproxy.lightllm.graph.anthropic_dump",
   "ccproxy.lightllm.graph.anthropic_intake",
-  "ccproxy.lightllm.graph.anthropic_load",
   "ccproxy.lightllm.graph.anthropic_render",
   "ccproxy.lightllm.graph.buffered",
   "ccproxy.lightllm.graph.google_intake",
-  "ccproxy.lightllm.graph.openai_dump",
   "ccproxy.lightllm.graph.openai_intake",
-  "ccproxy.lightllm.graph.openai_load",
   "ccproxy.lightllm.graph.openai_render",
   "ccproxy.lightllm.graph.perplexity_intake",
   "ccproxy.lightllm.graph.sse_pipeline",

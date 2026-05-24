@@ -52,8 +52,15 @@ from ccproxy.lightllm.adapters._openai_envelope import (
 from ccproxy.lightllm.adapters._openai_envelope import (
     _parse_tools as _openai_parse_tools,
 )
+from ccproxy.lightllm.adapters._openai_responses_envelope import (
+    _ABSORBED_TOP_LEVEL as _RESPONSES_ABSORBED,
+)
+from ccproxy.lightllm.adapters._openai_responses_envelope import (
+    _parse_responses_settings,
+)
 from ccproxy.lightllm.adapters.anthropic import AnthropicAdapter
 from ccproxy.lightllm.adapters.openai_chat import OpenAIChatAdapter
+from ccproxy.lightllm.adapters.openai_responses import OpenAIResponsesAdapter
 from ccproxy.lightllm.parsed import InboundFormat, ParsedRequest
 
 if TYPE_CHECKING:
@@ -114,6 +121,8 @@ def render_request(parsed: ParsedRequest, *, inbound_format: InboundFormat) -> b
         return AnthropicAdapter.render(parsed)
     if inbound_format is InboundFormat.OPENAI_CHAT:
         return OpenAIChatAdapter.render(parsed)
+    if inbound_format is InboundFormat.OPENAI_RESPONSES:
+        return OpenAIResponsesAdapter.render(parsed)
     raise ValueError(f"no IR renderer for inbound_format={inbound_format}")
 
 
@@ -122,6 +131,8 @@ def _parse_fields(*, body: dict[str, Any], inbound_format: InboundFormat) -> _Pa
         return _parse_anthropic(body)
     if inbound_format is InboundFormat.OPENAI_CHAT:
         return _parse_openai_chat(body)
+    if inbound_format is InboundFormat.OPENAI_RESPONSES:
+        return _parse_openai_responses(body)
     raise ValueError(f"no IR parser for inbound_format={inbound_format}")
 
 
@@ -185,6 +196,58 @@ def _parse_openai_chat(body: dict[str, Any]) -> _ParsedFields:
 
     for key, value in body.items():
         if key in _OPENAI_ABSORBED:
+            continue
+        if key in raw_extras:
+            continue
+        raw_extras[key] = value
+
+    return _ParsedFields(
+        messages=messages,
+        request_parameters=request_parameters,
+        settings=settings,
+        raw_extras=raw_extras,
+    )
+
+
+# ── OpenAI Responses ────────────────────────────────────────────────────────
+
+
+def _parse_openai_responses(body: dict[str, Any]) -> _ParsedFields:
+    """Parse a ``/v1/responses`` request body into typed IR fields.
+
+    Handles the bare-string ``input`` shorthand by wrapping into a
+    single user message. Tools share the Chat shape, so we reuse
+    :func:`_openai_parse_tools`. Settings use Responses-specific
+    naming (``max_output_tokens`` vs Chat's ``max_completion_tokens``)
+    so a dedicated :func:`_parse_responses_settings` runs.
+    """
+    raw_input: Any = body.get("input")
+    if isinstance(raw_input, str):
+        input_items: list[Any] = (
+            [{"type": "message", "role": "user", "content": raw_input}] if raw_input else []
+        )
+    elif isinstance(raw_input, list):
+        input_items = list(raw_input)
+    else:
+        input_items = []
+
+    raw_extras: dict[str, Any] = {}
+    messages = OpenAIResponsesAdapter.load_messages(
+        input_items,
+        instructions=body.get("instructions"),
+        raw_extras=raw_extras,
+    )
+
+    raw_tools = cast(list[Any], body.get("tools", []) or [])
+    function_tools = _openai_parse_tools(raw_tools)
+    settings = _parse_responses_settings(body)
+    request_parameters = ModelRequestParameters(function_tools=function_tools)
+
+    if "tool_choice" in body:
+        raw_extras["tool_choice"] = body["tool_choice"]
+
+    for key, value in body.items():
+        if key in _RESPONSES_ABSORBED:
             continue
         if key in raw_extras:
             continue

@@ -117,6 +117,12 @@ def _select_inbound_format(req: http.Request | None) -> InboundFormat:
         return InboundFormat.ANTHROPIC_MESSAGES
     if path.startswith("/v1/chat/completions") or path.startswith("/chat/completions"):
         return InboundFormat.OPENAI_CHAT
+    if (
+        path.startswith("/v1/responses")
+        or path.startswith("/responses")
+        or path.startswith("/backend-api/codex/responses")
+    ):
+        return InboundFormat.OPENAI_RESPONSES
     return InboundFormat.UNKNOWN
 
 
@@ -429,11 +435,14 @@ class Context:
         # Pick the listener-side adapter and render bytes.
         from ccproxy.lightllm.adapters.anthropic import AnthropicAdapter
         from ccproxy.lightllm.adapters.openai_chat import OpenAIChatAdapter
+        from ccproxy.lightllm.adapters.openai_responses import OpenAIResponsesAdapter
 
         if self._inbound_format is InboundFormat.ANTHROPIC_MESSAGES:
             rendered = AnthropicAdapter.render(self)
         elif self._inbound_format is InboundFormat.OPENAI_CHAT:
             rendered = OpenAIChatAdapter.render(self)
+        elif self._inbound_format is InboundFormat.OPENAI_RESPONSES:
+            rendered = OpenAIResponsesAdapter.render(self)
         else:
             raise ValueError(f"no outbound renderer for inbound_format={self._inbound_format}")
 

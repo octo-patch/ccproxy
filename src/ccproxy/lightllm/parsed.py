@@ -30,6 +30,7 @@ class InboundFormat(StrEnum):
     UNKNOWN = "unknown"
     ANTHROPIC_MESSAGES = "anthropic_messages"
     OPENAI_CHAT = "openai_chat"
+    OPENAI_RESPONSES = "openai_responses"
 
 
 @dataclass(frozen=True)

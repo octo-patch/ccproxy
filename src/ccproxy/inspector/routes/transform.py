@@ -51,6 +51,7 @@ _FORMAT_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"^/(?:gemini/)?v1beta/models/[^/]+:"), "gemini"),
     (re.compile(r"^/(?:gemini/)?v1alpha/models/[^/]+:"), "gemini"),
     (re.compile(r"^/v1internal:"), "gemini"),
+    (re.compile(r"^/(?:v1/|backend-api/codex/)?responses(?:/|$)"), "openai_responses"),
 )
 """URL-prefix patterns ccproxy recognises as a known wire format."""
 

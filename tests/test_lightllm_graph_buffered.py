@@ -117,6 +117,58 @@ class TestAnthropicBufferedToOpenAI:
             out = json.loads(out_bytes)
             assert out["choices"][0]["message"]["content"] == "via deepseek"
 
+
+# ── Anthropic buffered → OpenAI Responses ──────────────────────────────────
+
+
+class TestAnthropicBufferedToOpenAIResponses:
+    """Phase 4A end-to-end: Anthropic upstream + /v1/responses listener.
+
+    The Codex CLI smoke-test path: client POSTs Responses-shape, ccproxy
+    cross-format-transforms to Anthropic upstream, response comes back
+    as BetaMessage JSON and gets synthesized into a Responses envelope.
+    """
+
+    def test_simple_text(self) -> None:
+        raw = _make_anthropic_text_body("Hello world")
+        out_bytes = transform_buffered_response_sync(
+            raw_bytes=raw,
+            provider_type="anthropic",
+            inbound_format=InboundFormat.OPENAI_RESPONSES,
+            model="claude-3-5-haiku-20241022",
+            request_params=ModelRequestParameters(),
+        )
+        out = json.loads(out_bytes)
+        assert out["object"] == "response"
+        assert out["model"] == "claude-3-5-haiku-20241022"
+        assert out["status"] == "completed"
+        assert out["output"] == [
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "Hello world"}],
+            }
+        ]
+        assert out["id"].startswith("resp_") or out["id"]
+
+    def test_tool_call_extraction(self) -> None:
+        raw = _make_anthropic_tool_body()
+        out_bytes = transform_buffered_response_sync(
+            raw_bytes=raw,
+            provider_type="anthropic",
+            inbound_format=InboundFormat.OPENAI_RESPONSES,
+            model="claude-3-5-haiku-20241022",
+            request_params=ModelRequestParameters(),
+        )
+        out = json.loads(out_bytes)
+        kinds = [item["type"] for item in out["output"]]
+        assert "message" in kinds
+        assert "function_call" in kinds
+        fn = next(it for it in out["output"] if it["type"] == "function_call")
+        assert fn["name"] == "get_weather"
+        assert json.loads(fn["arguments"]) == {"city": "Paris"}
+
+
 # ── OpenAI buffered → Anthropic BetaMessage ────────────────────────────────
 
 

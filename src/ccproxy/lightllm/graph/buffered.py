@@ -449,6 +449,89 @@ def _parts_to_openai_chat_completion(
     }
 
 
+def _parts_to_openai_responses(
+    *,
+    parts: list[ModelResponsePart],
+    model: str,
+    provider_response_id: str | None = None,
+    finish_reason: str | None = None,
+) -> dict[str, Any]:
+    """Serialize IR parts into an OpenAI ``/v1/responses`` buffered JSON dict.
+
+    Produces the ``Response`` envelope: ``output[]`` is a list of
+    items derived from the IR parts. :class:`TextPart` chunks coalesce
+    into one ``message`` item with ``content=[{type: "output_text",
+    text: ...}]``. :class:`ToolCallPart` becomes a ``function_call``
+    item. :class:`ThinkingPart` becomes a ``reasoning`` item with its
+    text under ``content=[{type: "reasoning_text", text: ...}]``.
+
+    ``finish_reason`` is captured in the envelope's ``status``:
+    ``"completed"`` normally, ``"incomplete"`` for length / max_tokens
+    truncation, mirroring the OpenAI Response spec.
+    """
+    text_chunks: list[str] = []
+    output_items: list[dict[str, Any]] = []
+
+    def flush_text() -> None:
+        if text_chunks:
+            output_items.append(
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [
+                        {"type": "output_text", "text": "".join(text_chunks)}
+                    ],
+                }
+            )
+            text_chunks.clear()
+
+    for part in parts:
+        if isinstance(part, TextPart):
+            if part.content:
+                text_chunks.append(part.content)
+        elif isinstance(part, ToolCallPart):
+            flush_text()
+            args = part.args
+            if isinstance(args, dict):
+                args_str = json.dumps(args, separators=(",", ":"))
+            elif isinstance(args, str):
+                args_str = args
+            else:
+                args_str = json.dumps(args or {}, separators=(",", ":"))
+            output_items.append(
+                {
+                    "type": "function_call",
+                    "call_id": part.tool_call_id,
+                    "name": part.tool_name,
+                    "arguments": args_str,
+                }
+            )
+        elif isinstance(part, ThinkingPart):
+            flush_text()
+            output_items.append(
+                {
+                    "type": "reasoning",
+                    "summary": [],
+                    "content": [
+                        {"type": "reasoning_text", "text": part.content or ""}
+                    ],
+                }
+            )
+    flush_text()
+
+    status = "incomplete" if finish_reason == "length" else "completed"
+
+    return {
+        "id": provider_response_id or f"resp_{uuid.uuid4().hex[:24]}",
+        "object": "response",
+        "created_at": int(time.time()),
+        "model": model,
+        "status": status,
+        "output": output_items,
+        "usage": {"input_tokens": 0, "output_tokens": 0},
+    }
+
+
 def _parts_to_anthropic_message(
     *,
     parts: list[ModelResponsePart],
@@ -563,6 +646,13 @@ def transform_buffered_response_sync(
         )
     elif inbound_format is InboundFormat.ANTHROPIC_MESSAGES:
         out_dict = _parts_to_anthropic_message(parts=parts, model=model)
+    elif inbound_format is InboundFormat.OPENAI_RESPONSES:
+        out_dict = _parts_to_openai_responses(
+            parts=parts,
+            model=model,
+            provider_response_id=_intake_provider_response_id(intake),
+            finish_reason=_intake_finish_reason(intake),
+        )
     else:
         raise UnsupportedListenerError(
             f"no buffered renderer for inbound_format={inbound_format}"

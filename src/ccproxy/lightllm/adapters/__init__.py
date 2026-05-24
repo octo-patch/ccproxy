@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 from ccproxy.lightllm.adapters.anthropic import AnthropicAdapter
 from ccproxy.lightllm.adapters.google import GoogleAdapter
 from ccproxy.lightllm.adapters.openai_chat import OpenAIChatAdapter
+from ccproxy.lightllm.adapters.openai_responses import OpenAIResponsesAdapter
 from ccproxy.lightllm.adapters.perplexity import PerplexityAdapter
 
 if TYPE_CHECKING:
@@ -65,5 +66,6 @@ __all__ = [
     "GoogleAdapter",
     "LLMRenderInput",
     "OpenAIChatAdapter",
+    "OpenAIResponsesAdapter",
     "PerplexityAdapter",
 ]

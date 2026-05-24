@@ -204,6 +204,7 @@ class InboundFormat(StrEnum):  # StrEnum native in pydantic_graph >=1.99.0
     UNKNOWN = "unknown"
     ANTHROPIC_MESSAGES = "anthropic_messages"   # /v1/messages
     OPENAI_CHAT = "openai_chat"                 # /v1/chat/completions
+    OPENAI_RESPONSES = "openai_responses"       # /v1/responses (Codex CLI)
 ```
 
 Pinned at `Context` construction from path + headers. Drives the choice of
@@ -624,6 +625,69 @@ outbound renderer (or response render) stitches it back onto the wire body.
 | `tool_choice` | The body's `tool_choice` | IR has no slot |
 | `response_format` | The body's `response_format` | IR has no slot |
 
+**OpenAI Responses adapter** (`adapters/openai_responses.py`):
+
+The `input[]` discriminated union has 27 `type` values. Four conventional
+buckets cover them all plus forward-compat:
+
+| Key | What | Why |
+|---|---|---|
+| `openai_responses:reasoning:{i}` | Full ``reasoning`` item dict at index `i` | pydantic-ai's `ThinkingPart` only carries a content string; structured `summary[]` + `content[]` + `encrypted_content` cannot be modelled |
+| `openai_responses:server_tool:{i}` | One of 17 server-side tool kinds (`web_search_call`, `code_interpreter_call`, `mcp_call`, `file_search_call`, `computer_call`/`_output`, `apply_patch_call`/`_output`, `local_shell_call`/`_output`, `shell_call`/`_output`, `image_generation_call`, `custom_tool_call`/`_output`, `mcp_list_tools`, `mcp_approval_request`/`_response`, `tool_search_call`/`_output`, `compaction`, `item_reference`) | No IR equivalent; preserved for lossless round-trip when re-rendering the request |
+| `openai_responses:item_id:{i}` | Item `id` field | Used by ``previous_response_id`` chaining (Codex CLI resume) |
+| `openai_responses:unknown_item:{i}` | Item with unrecognized `type` | Forward-compat: future SDK additions degrade safely instead of crashing |
+| `openai_responses:refusal:{i}:{j}` | Assistant `refusal` content part | No IR slot |
+| `tool_choice` | The body's `tool_choice` | IR has no slot |
+| Other unmodeled top-level keys | Copied verbatim under their wire name | E.g. `previous_response_id`, `prompt_cache_key`, `prompt_cache_retention`, `reasoning`, `parallel_tool_calls` |
+
+**Bare-string input normalization**: ``ResponseCreateParams.input`` is
+``Union[str, list[ResponseInputItem]]``. The Responses parser
+(`adapters/_envelope.py:_parse_openai_responses`) wraps a bare string
+into a single ``{"type": "message", "role": "user", "content": "..."}``
+item before invoking ``OpenAIResponsesAdapter.load_messages``. The
+adapter's render path always emits the verbose-message form (never bare
+string) — round-tripping a bare-string request through IR produces a
+verbose-form wire body, which is semantically identical for upstreams.
+
+**Buffered output arm**: ``InboundFormat.OPENAI_RESPONSES`` is wired
+into ``buffered.py:transform_buffered_response_sync`` via the
+``_parts_to_openai_responses`` helper. Any upstream provider
+(Anthropic, OpenAI Chat, Google, Perplexity) can satisfy a
+``/v1/responses`` request — the buffered transform synthesizes the
+upstream's SSE shape, drains the existing intake FSM, then renders
+``parts_manager.get_parts()`` into the ``Response`` envelope JSON
+returned to the listener.
+
+**Streaming intake/render**: Phase 4B work for cross-format streaming
+(e.g. Anthropic upstream emitting SSE that needs translation to
+Responses SSE for a `/v1/responses` listener). ``OPENAI_RESPONSES`` is
+intentionally NOT wired into ``dispatch_render``; the inspector
+catches the resulting ``UnsupportedListenerError`` in
+`addon.py:_install_streaming_transformer` and falls back to
+passthrough (the upstream SSE bytes reach the client unchanged). For
+the same-format Codex case below this is the desired behavior; for
+true cross-format streaming the client receives upstream-shape SSE
+which it may not understand — fix in Phase 4B.
+
+**Same-format Codex passthrough (the canonical path)**: When a
+listener `/v1/responses` request resolves (via sentinel) to a Provider
+whose `type` is also ``openai_responses``, the transform router
+auto-derives action=``redirect``. This bypasses cross-format transform
+entirely — no `dispatch_dump_sync`, no buffered intake, no SSE
+transform. ccproxy stamps the auth header, rewrites
+host/path to the upstream (typically
+`chatgpt.com/backend-api/codex/responses`), and streams the upstream
+response straight back to the client. The buffered output arm above is
+ONLY used when a `/v1/responses` request cross-format-transforms to a
+non-Responses upstream (e.g., Anthropic for testing); the codex
+sentinel routing is pure passthrough.
+
+`_FORMAT_PATTERNS` in `inspector/routes/transform.py` and
+`_select_inbound_format` in `pipeline/context.py` both recognize
+the canonical Codex CLI path `/backend-api/codex/responses` (the
+`CHATGPT_CODEX_BASE_URL` base + `/responses` endpoint) in addition to
+the public-API `/v1/responses` form.
+
 ### Response-side conventions
 
 Streaming intakes drive `ModelResponsePartsManager` directly and don't
@@ -922,9 +986,12 @@ render file when the vendor is a listener format) for the FSMs:
 
 `tests/test_lightllm_graph_anthropic_dump.py` and
 `tests/test_lightllm_graph_anthropic_load.py` together assert the
-roundtrip. The pattern is: load body → IR via the adapter, wrap in a
-`ParsedRequest` (or `Context`) test fixture, render back to wire bytes via
-the adapter, then compare against the input:
+roundtrip. (The historical ``_dump`` / ``_load`` names predate the
+adapter consolidation — the tests exercise `AnthropicAdapter` through
+the `parse_request` / `render_request` fixtures in
+``adapters/_envelope.py``.) The pattern is: load body → IR via the
+adapter, wrap in a `ParsedRequest` (or `Context`) test fixture, render
+back to wire bytes via the adapter, then compare against the input:
 
 ```python
 # Load wire → IR. raw_extras and settings come from envelope helpers;
@@ -979,8 +1046,9 @@ them.
 ### Lossiness assertions
 
 `tests/test_lightllm_graph_anthropic_dump.py` and
-`tests/test_lightllm_graph_anthropic_load.py` have tests ensuring the
-adapter doesn't drop:
+`tests/test_lightllm_graph_anthropic_load.py` (historical names
+preserved; see Roundtrip section above) have tests ensuring the adapter
+doesn't drop:
 
 * `tool_name` populated for `ToolReturnPart` via two-pass lookup
 * `BinaryContent.media_type` preserved
@@ -1140,7 +1208,7 @@ envelope without unwrap).
 | Inspector streaming call site | `src/ccproxy/inspector/addon.py:_install_streaming_transformer` |
 | Inspector buffered call site | `src/ccproxy/inspector/routes/transform.py:handle_transform_response` |
 | Inspector transform call site | `src/ccproxy/inspector/routes/transform.py:_handle_transform` |
-| Tests (request side) | `tests/test_lightllm_graph_{anthropic,openai}_{load,dump}.py` + `_google_dump.py` + `_perplexity_dump.py` + `_dispatch_sync.py` |
+| Tests (request side) | `tests/test_lightllm_graph_{anthropic,openai}_{load,dump}.py` + `_openai_responses_load.py` + `_google_dump.py` + `_perplexity_dump.py` + `_dispatch_sync.py` (historical file names — they exercise the adapters in ``src/ccproxy/lightllm/adapters/``) |
 | Tests (response FSMs) | `tests/test_lightllm_graph_intake_*.py`, `test_lightllm_graph_render_*.py`, `test_lightllm_graph_buffered.py`, `test_lightllm_graph_sse_pipeline.py` |
 | Perplexity Pro provider config + exceptions | `src/ccproxy/lightllm/pplx.py` |
 | Perplexity business logic | `src/ccproxy/lightllm/pplx_steps.py`, `pplx_threads.py` |
