@@ -154,6 +154,7 @@ def _build_addons(
         ForwardedRequestContentview,
         ProviderResponseContentview,
     )
+    from ccproxy.inspector.fingerprint_capture import FingerprintCaptureAddon
     from ccproxy.inspector.gemini_addon import GeminiAddon
     from ccproxy.inspector.multi_har_saver import MultiHARSaver
     from ccproxy.inspector.oauth_addon import OAuthAddon
@@ -205,7 +206,7 @@ def _build_addons(
     inbound_hooks = hooks_cfg.get("inbound", []) if isinstance(hooks_cfg, dict) else hooks_cfg
     outbound_hooks = hooks_cfg.get("outbound", []) if isinstance(hooks_cfg, dict) else []
 
-    addons: list[Any] = [addon, MultiHARSaver(), ShapeCaptureAddon()]
+    addons: list[Any] = [addon, FingerprintCaptureAddon(), MultiHARSaver(), ShapeCaptureAddon()]
 
     if inbound_hooks:
         addons.append(_make_pipeline_router("ccproxy_inbound", inbound_hooks))

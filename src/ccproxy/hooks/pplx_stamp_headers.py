@@ -49,8 +49,7 @@ __all__ = ["pplx_stamp_headers", "pplx_stamp_headers_guard"]
 
 def pplx_stamp_headers_guard(ctx: Context) -> bool:
     """Run only when forward_oauth resolved the Perplexity sentinel."""
-    assert ctx.flow is not None
-    return ctx.flow.metadata.get("ccproxy.oauth_provider") == PERPLEXITY_PROVIDER_NAME
+    return ctx.metadata.oauth_provider == PERPLEXITY_PROVIDER_NAME
 
 
 @hook(reads=[], writes=[])

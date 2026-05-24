@@ -32,7 +32,7 @@ def shape_guard(ctx: Context) -> bool:
     """Run on reverse proxy or OAuth-injected flows with a completed transform."""
     assert ctx.flow is not None
     is_reverse = isinstance(ctx.flow.client_conn.proxy_mode, ReverseMode)
-    is_oauth = ctx.flow.metadata.get("ccproxy.oauth_injected", False)
+    is_oauth = ctx.metadata.oauth_injected
     if not (is_reverse or is_oauth):
         return False
 

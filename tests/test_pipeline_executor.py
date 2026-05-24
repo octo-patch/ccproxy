@@ -42,6 +42,7 @@ def make_spec(
 def _make_flow(body: dict | None = None) -> MagicMock:
     flow = MagicMock()
     flow.id = "test-flow-id"
+    flow.metadata = {}
     flow.request.content = json.dumps(
         body
         or {
@@ -234,18 +235,17 @@ class TestPipelineExecutorBasic:
             executor.execute(flow)
         assert any("skipped" in r.message for r in caplog.records)
 
-    def test_hook_mutates_body_and_commits(self):
-        """Hook body mutations are flushed to flow.request.content."""
+    def test_hook_mutates_metadata_proxy(self):
+        """Hook metadata mutations are stored in the ccproxy flow namespace."""
 
         def touch_metadata(ctx, params):
-            ctx.metadata["touched"] = True
+            ctx.metadata.oauth_injected = True
             return ctx
 
         flow = _make_flow()
         executor = PipelineExecutor(hooks=[make_spec("touch", handler=touch_metadata)])
         executor.execute(flow)
-        body = json.loads(flow.request.content)
-        assert body["metadata"]["touched"] is True
+        assert flow.metadata["ccproxy.oauth_injected"] is True
 
     def test_hook_mutates_headers_live(self):
         """Hook header mutations are applied to flow.request.headers immediately."""

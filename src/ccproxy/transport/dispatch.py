@@ -32,6 +32,8 @@ import httpx
 from curl_cffi.requests.impersonate import BrowserTypeLiteral
 from httpx_curl_cffi import AsyncCurlTransport
 
+from ccproxy.inspector.fingerprint import CapturedFingerprint
+
 MAX_SESSIONS = 16
 """Cap on cached clients before LRU eviction kicks in."""
 
@@ -73,32 +75,42 @@ class _Cache:
     ) -> None:
         self._max = max_sessions
         self._idle = idle_timeout
-        self._entries: OrderedDict[tuple[str, str], _Entry] = OrderedDict()
+        self._entries: OrderedDict[tuple[str, str, str], _Entry] = OrderedDict()
         self._lock = asyncio.Lock()
 
-    async def get(self, *, host: str, profile: str) -> httpx.AsyncClient:
+    async def get(
+        self,
+        *,
+        host: str,
+        profile: str,
+        fingerprint: CapturedFingerprint | None = None,
+    ) -> httpx.AsyncClient:
         """Return a cached client for ``(host, profile)``, creating one if absent.
 
         Raises:
             UnknownFingerprintProfileError: ``profile`` is not in :data:`VALID_PROFILES`.
         """
-        if profile not in VALID_PROFILES:
+        if fingerprint is None and profile not in VALID_PROFILES:
             raise UnknownFingerprintProfileError(
                 f"unknown curl-cffi impersonate profile {profile!r}; valid profiles: {sorted(VALID_PROFILES)}"
             )
-        impersonate = cast(BrowserTypeLiteral, profile)
+        impersonate = cast(BrowserTypeLiteral, profile) if fingerprint is None else None
 
         async with self._lock:
             now = time.monotonic()
             await self._evict_idle(now)
-            key = (host, profile)
+            key = (host, profile, fingerprint.transport_cache_key if fingerprint is not None else "")
             entry = self._entries.get(key)
             if entry is not None:
                 entry.last_used = now
                 self._entries.move_to_end(key)
                 return entry.client
 
-            client = httpx.AsyncClient(transport=AsyncCurlTransport(impersonate=impersonate))
+            if fingerprint is None:
+                transport = AsyncCurlTransport(impersonate=impersonate)
+            else:
+                transport = AsyncCurlTransport(**fingerprint.transport_kwargs())
+            client = httpx.AsyncClient(transport=transport)
             self._entries[key] = _Entry(client=client, last_used=now)
             await self._evict_lru()
             return client
@@ -136,19 +148,28 @@ def _get_cache() -> _Cache:
     return _cache
 
 
-async def get_client(*, host: str, profile: str) -> httpx.AsyncClient:
+async def get_client(
+    *,
+    host: str,
+    profile: str,
+    fingerprint: CapturedFingerprint | None = None,
+) -> httpx.AsyncClient:
     """Fetch a cached :class:`httpx.AsyncClient` impersonating ``profile``.
 
     Args:
         host: Destination hostname. Used as a cache-key component so distinct
             providers don't share a connection pool.
-        profile: curl-cffi impersonate profile name (e.g. ``"chrome131"``).
+        profile: curl-cffi impersonate profile name (e.g. ``"chrome131"``) or
+            captured shape-backed profile name.
+        fingerprint: Captured native TLS profile. When provided, curl-cffi is
+            driven by JA3/signature-algorithm options instead of browser
+            impersonation.
 
     Returns:
         A cached client. The caller MUST NOT close it; the cache owns the
         lifecycle.
     """
-    return await _get_cache().get(host=host, profile=profile)
+    return await _get_cache().get(host=host, profile=profile, fingerprint=fingerprint)
 
 
 async def aclose_all() -> None:

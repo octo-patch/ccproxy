@@ -50,8 +50,7 @@ def inject_mcp_notifications_guard(ctx: Context) -> bool:
     """Guard: skip if no messages or no events for this session."""
     if not ctx.messages:
         return False
-    assert ctx.flow is not None
-    session_id = ctx.flow.metadata.get("ccproxy.session_id", "")
+    session_id = ctx.metadata.session_id
     if not session_id:
         return False
     return get_buffer().has_events_for_session(session_id)
@@ -63,8 +62,7 @@ def inject_mcp_notifications_guard(ctx: Context) -> bool:
 )
 def inject_mcp_notifications(ctx: Context, params: dict[str, Any]) -> Context:
     """Inject buffered MCP notification events as tool_use/tool_result pairs."""
-    assert ctx.flow is not None
-    session_id = ctx.flow.metadata.get("ccproxy.session_id", "")
+    session_id = ctx.metadata.session_id
     if not session_id:
         return ctx
 

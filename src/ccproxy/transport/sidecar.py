@@ -31,6 +31,7 @@ from starlette.responses import Response, StreamingResponse
 from starlette.routing import Route
 
 from ccproxy import transport
+from ccproxy.inspector.fingerprint import CapturedFingerprint
 
 logger = logging.getLogger(__name__)
 
@@ -95,7 +96,8 @@ async def _handle(request: Request) -> Response:
     body = await request.body()
 
     try:
-        client = await transport.get_client(host=host, profile=profile)
+        fingerprint = _resolve_captured_fingerprint(profile)
+        client = await transport.get_client(host=host, profile=profile, fingerprint=fingerprint)
     except transport.UnknownFingerprintProfileError as e:
         return Response(str(e), status_code=400)
 
@@ -125,6 +127,14 @@ async def _handle(request: Request) -> Response:
         status_code=upstream.status_code,
         headers=dict(_filter_response_headers(list(upstream.headers.raw))),
     )
+
+
+def _resolve_captured_fingerprint(profile: str) -> CapturedFingerprint | None:
+    if profile in transport.VALID_PROFILES:
+        return None
+    from ccproxy.shaping.store import get_store
+
+    return get_store().pick_fingerprint(profile)
 
 
 def _build_app() -> Starlette:

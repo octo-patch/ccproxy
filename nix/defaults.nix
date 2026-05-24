@@ -12,7 +12,7 @@
         host = "api.anthropic.com";
         path = "/v1/messages";
         type = "anthropic";
-        fingerprint_profile = "chrome131";
+        fingerprint_profile = "anthropic";
       };
       gemini = {
         auth = {

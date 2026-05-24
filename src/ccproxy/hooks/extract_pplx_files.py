@@ -70,8 +70,7 @@ class FileInfo:
 
 def extract_pplx_files_guard(ctx: Context) -> bool:
     """Run only when forward_oauth resolved the Perplexity sentinel."""
-    assert ctx.flow is not None
-    return ctx.flow.metadata.get("ccproxy.oauth_provider") == PERPLEXITY_PROVIDER_NAME
+    return ctx.metadata.oauth_provider == PERPLEXITY_PROVIDER_NAME
 
 
 def _collect_parts(messages: list[Any]) -> list[tuple[int, int, dict[str, Any]]]:

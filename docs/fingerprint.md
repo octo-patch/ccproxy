@@ -10,17 +10,32 @@ has to keep them separate:
 For the Anthropic path, `providers.anthropic.fingerprint_profile` opts routed
 reverse-proxy traffic into the in-process sidecar. The active code path is:
 
-1. [`forward_oauth`](../src/ccproxy/hooks/forward_oauth.py) detects the
+1. [`FingerprintCaptureAddon`](../src/ccproxy/inspector/fingerprint_capture.py)
+   reads mitmproxy's TLS ClientHello event, computes JA3/JA4 material, and
+   stores it on the later HTTP flow as `ccproxy.fingerprint.client`.
+2. [`ShapeCaptureAddon`](../src/ccproxy/inspector/shape_capturer.py) writes
+   that profile into `shapes/{provider}.mflow` metadata as
+   `ccproxy.fingerprint.profile` when `ccproxy flows shape {provider}` is run.
+   Bundled fallbacks carry the same metadata in
+   `ccproxy/templates/shapes/{provider}.mflow`.
+3. [`forward_oauth`](../src/ccproxy/hooks/forward_oauth.py) detects the
    `sk-ant-oat-ccproxy-anthropic` sentinel and stores `ccproxy.oauth_provider`.
-2. [`transform`](../src/ccproxy/inspector/routes/transform.py) rewrites the
+4. [`transform`](../src/ccproxy/inspector/routes/transform.py) rewrites the
    reverse-proxy request to `https://api.anthropic.com/v1/messages`.
-3. [`TransportOverrideAddon`](../src/ccproxy/inspector/transport_override_addon.py)
+5. [`TransportOverrideAddon`](../src/ccproxy/inspector/transport_override_addon.py)
    sees the provider's `fingerprint_profile`, stores the real target URL in
    `X-CCProxy-Target-Url`, stores the profile in `X-CCProxy-Impersonate`, and
    rewrites the mitmproxy destination to the localhost sidecar.
-4. [`sidecar`](../src/ccproxy/transport/sidecar.py) forwards the request through
-   [`httpx-curl-cffi`](../src/ccproxy/transport/dispatch.py), which applies the
-   selected curl-cffi impersonation profile.
+6. [`sidecar`](../src/ccproxy/transport/sidecar.py) forwards the request through
+   [`httpx-curl-cffi`](../src/ccproxy/transport/dispatch.py). Browser profile
+   names use curl-cffi impersonation directly; shape-backed names such as
+   `anthropic` load the captured JA3/signature-algorithm/http-version profile.
+
+Captured shape metadata is preserved in the `.mflow` artifact. Runtime shape
+application stamps only request headers, query parameters, and body content
+onto the active provider request; captured `.mflow` metadata is not copied onto
+the active request flow unless code explicitly asks for a specific metadata
+entry such as the embedded fingerprint profile.
 
 WireGuard reference traffic is still useful for comparing against the real
 client, but it does not automatically exercise the sidecar. It is normally
@@ -135,6 +150,25 @@ printf 'PCAP=%s\n' "$pcap"
 
 Use the same ClientHello extraction command against the new pcap.
 
+To persist the captured profile for replay, shape the Anthropic request flow:
+
+```bash
+ccproxy flows list --json | jq '.[] | select(.request.pretty_host == "api.anthropic.com" and (.request.path | startswith("/v1/messages"))) | .id'
+ccproxy flows shape anthropic --jq 'map(select(.id == "<flow-id>"))'
+uv run python - <<'PY'
+from pathlib import Path
+from mitmproxy import http
+from mitmproxy.io import FlowReader
+from ccproxy.inspector.fingerprint import REPLAY_FINGERPRINT_METADATA
+
+path = Path.home() / ".config/ccproxy/shapes/anthropic.mflow"
+with path.open("rb") as fo:
+    flows = [flow for flow in FlowReader(fo).stream() if isinstance(flow, http.HTTPFlow)]
+fingerprint = flows[-1].metadata[REPLAY_FINGERPRINT_METADATA]
+print({key: fingerprint[key] for key in ("ja3", "ja4", "ja4_r", "http_version", "alpn_protocols")})
+PY
+```
+
 To inspect decrypted HTTP/1.1 request fields:
 
 ```bash
@@ -162,10 +196,9 @@ Measured with Claude Code `2.1.150` against Anthropic:
 
 | Path | JA3 | JA4 | ALPN |
 | --- | --- | --- | --- |
-| Claude Code inside WireGuard | `d871d02cecbde59abbf8f4806134addf` | `13d1714h1_5b57614c22b0_43ade6aba3df` | `http/1.1` |
-| Native mitmproxy provider leg | `5659c10619c455ea477287b12cf3f7e7` | `13d2812h1_a01be8c064b6_8e6e362c5eac` | `http/1.1` |
+| Claude Code inside WireGuard | `d871d02cecbde59abbf8f4806134addf` | `t13d1714h1_5b57614c22b0_43ade6aba3df` | `http/1.1` |
+| Shape-backed `anthropic` sidecar | `d871d02cecbde59abbf8f4806134addf` | `t13d1714h1_5b57614c22b0_43ade6aba3df` | `http/1.1` |
+| Native mitmproxy provider leg | `5659c10619c455ea477287b12cf3f7e7` | `t13d2812h1_a01be8c064b6_8e6e362c5eac` | `http/1.1` |
 
-`chrome131` is expected to change the provider-visible leg from mitmproxy's
-native OpenSSL profile to curl-cffi's Chrome-like profile. It is not expected
-to match Claude Code's native Node/Bun TLS fingerprint exactly unless curl-cffi
-adds a matching impersonation profile.
+Use `tshark` to compare `ALPN + JA3 + JA4 + JA4_r`; that tuple is the repeatable
+verification target for sidecar replay.

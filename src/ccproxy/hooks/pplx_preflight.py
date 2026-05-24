@@ -41,8 +41,7 @@ __all__ = ["pplx_preflight", "pplx_preflight_guard"]
 
 def pplx_preflight_guard(ctx: Context) -> bool:
     """Run only when forward_oauth resolved the Perplexity sentinel."""
-    assert ctx.flow is not None
-    return ctx.flow.metadata.get("ccproxy.oauth_provider") == PERPLEXITY_PROVIDER_NAME
+    return ctx.metadata.oauth_provider == PERPLEXITY_PROVIDER_NAME
 
 
 @hook(reads=["query_str"], writes=[])
@@ -80,8 +79,8 @@ def pplx_preflight(ctx: Context, _: dict[str, Any]) -> Context:
             timeout=preflight_config.preflight_timeout_seconds,
             follow_redirects=True,
         )
-        ctx.flow.metadata["ccproxy.pplx.preflight"] = True
+        ctx.metadata.pplx.preflight = True
     except Exception:
         logger.warning("pplx_preflight: side request failed", exc_info=True)
-        ctx.flow.metadata["ccproxy.pplx.preflight"] = False
+        ctx.metadata.pplx.preflight = False
     return ctx

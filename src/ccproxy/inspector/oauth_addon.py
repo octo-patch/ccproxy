@@ -14,6 +14,7 @@ from mitmproxy import http
 
 from ccproxy import transport
 from ccproxy.config import get_config
+from ccproxy.inspector.fingerprint import CapturedFingerprint
 
 logger = logging.getLogger(__name__)
 
@@ -60,7 +61,15 @@ class OAuthAddon:
         headers.pop("x-ccproxy-oauth-injected", None)
 
         profile = flow.metadata.get("ccproxy.fingerprint_profile") or transport.DEFAULT_PROFILE
-        client = await transport.get_client(host=flow.request.pretty_host, profile=profile)
+        fingerprint = _resolve_captured_fingerprint(profile)
+        if fingerprint is None:
+            client = await transport.get_client(host=flow.request.pretty_host, profile=profile)
+        else:
+            client = await transport.get_client(
+                host=flow.request.pretty_host,
+                profile=profile,
+                fingerprint=fingerprint,
+            )
         retry_resp = await client.request(
             method=flow.request.method,
             url=flow.request.pretty_url,
@@ -78,3 +87,11 @@ class OAuthAddon:
             flow.response.headers.add(key, value)
         flow.response.content = retry_resp.content
         return True
+
+
+def _resolve_captured_fingerprint(profile: str) -> CapturedFingerprint | None:
+    if profile in transport.VALID_PROFILES:
+        return None
+    from ccproxy.shaping.store import get_store
+
+    return get_store().pick_fingerprint(profile)

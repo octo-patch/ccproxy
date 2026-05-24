@@ -20,6 +20,7 @@ _DEFAULT_BODY = {"model": "test", "messages": [], "metadata": {}}
 def _make_flow(body: dict | None = None, headers: dict | None = None) -> MagicMock:
     flow = MagicMock()
     flow.id = "test-id"
+    flow.metadata = {}
     flow.request.content = json.dumps(_DEFAULT_BODY if body is None else body).encode()
     flow.request.headers = dict(headers or {})
     return flow
@@ -41,10 +42,10 @@ class TestContextFromFlow:
         assert isinstance(part, UserPromptPart)
         assert part.content == "hi"
 
-    def test_parses_metadata_from_body(self):
+    def test_body_metadata_remains_in_extras(self):
         flow = _make_flow(body={"model": "m", "messages": [], "metadata": {"key": "val"}})
         ctx = Context.from_flow(flow)
-        assert ctx.metadata["key"] == "val"
+        assert ctx.extras.get("metadata.key") == "val"
 
     def test_parses_system_from_body(self):
         flow = _make_flow(body={"model": "m", "messages": [], "system": "Be helpful."})
@@ -129,10 +130,46 @@ class TestBodyProperties:
         ctx.commit()
         assert ctx._body["tools"][0]["name"] == "test"
 
-    def test_metadata_setdefault_behavior(self):
+    def test_metadata_writes_to_ccproxy_flow_namespace(self):
+        ctx = Context.from_flow(_make_flow())
+        ctx.metadata.oauth_provider = "anthropic"
+        assert ctx.metadata.oauth_provider == "anthropic"
+        assert ctx.flow_metadata["ccproxy.oauth_provider"] == "anthropic"
+
+    def test_metadata_mapping_writes_dynamic_keys(self):
         ctx = Context.from_flow(_make_flow())
         ctx.metadata["new_key"] = "new_val"
-        assert ctx.metadata["new_key"] == "new_val"
+        assert ctx.flow_metadata["ccproxy.new_key"] == "new_val"
+
+    def test_metadata_accepts_prefixed_keys(self):
+        ctx = Context.from_flow(_make_flow())
+        ctx.metadata["ccproxy.trace_id"] = "t123"
+        assert ctx.metadata["trace_id"] == "t123"
+        assert ctx.flow_metadata["ccproxy.trace_id"] == "t123"
+
+    def test_nested_metadata_section_writes_dotted_keys(self):
+        ctx = Context.from_flow(_make_flow())
+        ctx.metadata.pplx.preflight = True
+        assert ctx.flow_metadata["ccproxy.pplx.preflight"] is True
+        assert ctx.metadata.pplx.preflight is True
+
+    def test_nested_metadata_section_reads_existing_dotted_keys(self):
+        flow = _make_flow()
+        flow.metadata["ccproxy.fingerprint.client"] = {"ja3": "abc"}
+        ctx = Context.from_flow(flow)
+        assert ctx.metadata.fingerprint.client == {"ja3": "abc"}
+
+    def test_nested_metadata_mapping_writes_dynamic_keys(self):
+        ctx = Context.from_flow(_make_flow())
+        ctx.metadata.pplx.source = "web"
+        assert ctx.flow_metadata["ccproxy.pplx.source"] == "web"
+        assert ctx.metadata.pplx.source == "web"
+
+    def test_dynamic_metadata_sections_can_nest(self):
+        ctx = Context.from_flow(_make_flow())
+        ctx.metadata.custom.section.value = 3
+        assert ctx.flow_metadata["ccproxy.custom.section.value"] == 3
+        assert ctx.metadata.custom.section.value == 3
 
 
 class TestHeaderMethods:
@@ -164,7 +201,8 @@ class TestHeaderMethods:
 
 class TestMetadataConvenienceProperties:
     def test_oauth_provider_getter(self):
-        flow = _make_flow(body={"model": "m", "messages": [], "metadata": {"ccproxy_oauth_provider": "anthropic"}})
+        flow = _make_flow(body={"model": "m", "messages": []})
+        flow.metadata["ccproxy.oauth_provider"] = "anthropic"
         ctx = Context.from_flow(flow)
         assert ctx.oauth_provider == "anthropic"
 
@@ -178,13 +216,14 @@ class TestCommit:
         written = json.loads(flow.request.content)
         assert written["model"] == "updated"
 
-    def test_commit_includes_metadata_changes(self):
+    def test_commit_keeps_ccproxy_metadata_out_of_body(self):
         flow = _make_flow()
         ctx = Context.from_flow(flow)
-        ctx.metadata["trace_id"] = "t123"
+        ctx.metadata.conversation_id = "t123"
         ctx.commit()
         written = json.loads(flow.request.content)
-        assert written["metadata"]["trace_id"] == "t123"
+        assert "metadata" not in written
+        assert flow.metadata["ccproxy.conversation_id"] == "t123"
 
     def test_commit_includes_system_when_set(self):
         flow = _make_flow()

@@ -113,8 +113,7 @@ def _build_session_id(flow: http.HTTPFlow, model: str) -> str:
 
 def gemini_cli_guard(ctx: Context) -> bool:
     """Run when forward_oauth resolved the Gemini sentinel key."""
-    assert ctx.flow is not None
-    return ctx.flow.metadata.get("ccproxy.oauth_provider") == "gemini"
+    return ctx.metadata.oauth_provider == "gemini"
 
 
 @hook(

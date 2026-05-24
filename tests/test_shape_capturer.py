@@ -9,8 +9,10 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from mitmproxy import http
+from mitmproxy.io import FlowReader
 from mitmproxy.test import tflow
 
+from ccproxy.inspector.fingerprint import CLIENT_FINGERPRINT_METADATA, REPLAY_FINGERPRINT_METADATA
 from ccproxy.inspector.shape_capturer import ShapeCaptureAddon
 from ccproxy.shaping.store import ShapeStore, clear_store_instance
 
@@ -41,6 +43,37 @@ def _flow(flow_id: str = "abc123") -> http.HTTPFlow:
         {"x-app": "cli", "user-agent": "test-cli/1.0", "content-type": "application/json"},
     )
     return f
+
+
+def _fingerprint_dict() -> dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "source": "test",
+        "captured_at": "2026-05-24T00:00:00+00:00",
+        "sni": "api.anthropic.com",
+        "alpn_protocols": ["http/1.1"],
+        "legacy_version": 771,
+        "supported_versions": ["0304", "0303"],
+        "cipher_suites": ["1301", "1302"],
+        "extensions": ["0000", "0010"],
+        "supported_groups": ["001d"],
+        "ec_point_formats": ["00"],
+        "signature_algorithms": ["0403"],
+        "signature_algorithm_names": ["ecdsa_secp256r1_sha256"],
+        "ja3": "ja3-test",
+        "ja3_full": "771,4865-4866,0-16,29,0",
+        "ja4": "ja4-test",
+        "ja4_r": "ja4-r-test",
+        "http_version": "v1_1",
+    }
+
+
+def _read_raw_shape(store: ShapeStore, provider: str) -> http.HTTPFlow:
+    path = store._path(provider)
+    with path.open("rb") as fo:
+        flows = [flow for flow in FlowReader(fo).stream() if isinstance(flow, http.HTTPFlow)]  # type: ignore[no-untyped-call]
+    assert flows
+    return flows[-1]
 
 
 def _run_shape(
@@ -148,12 +181,43 @@ class TestShapeCaptureAddon:
         assert picked is not None
         assert picked.request is not None
         assert picked.response is None
-        assert picked.metadata == {}
+        assert picked.metadata["ccproxy.runtime"] == "value"
         assert picked.request.method == "POST"
         assert picked.request.pretty_host == "api.anthropic.com"
         assert picked.request.headers.get("user-agent") == "test-cli/1.0"
         assert "authorization" not in picked.request.headers
         assert "cookie" not in picked.request.headers
+        raw = _read_raw_shape(store, "anthropic")
+        assert raw.metadata["ccproxy.runtime"] == "value"
+
+    def test_mflow_mode_embeds_captured_fingerprint(self, store: ShapeStore) -> None:
+        capturer = ShapeCaptureAddon()
+        flow = _flow("abc123")
+        flow.metadata[CLIENT_FINGERPRINT_METADATA] = _fingerprint_dict()
+
+        result = _run_shape(capturer, {"abc123": flow}, "abc123", "anthropic")
+
+        assert result["fingerprint"] == "embedded"
+        raw = _read_raw_shape(store, "anthropic")
+        fingerprint = raw.metadata[REPLAY_FINGERPRINT_METADATA]
+        assert fingerprint["provider"] == "anthropic"
+        assert fingerprint["user_agent"] == "test-cli/1.0"
+        assert fingerprint["runtime_version"] is None
+        assert store.pick_fingerprint("anthropic") is not None
+
+    def test_patch_mode_embeds_captured_fingerprint(self, store: ShapeStore) -> None:
+        capturer = ShapeCaptureAddon()
+        base = _flow("base")
+        target = _flow("target")
+        target.metadata[CLIENT_FINGERPRINT_METADATA] = _fingerprint_dict()
+        store.add("anthropic", base)
+
+        result = _run_shape(capturer, {"target": target}, "target", "anthropic", mode="patch")
+
+        assert result["fingerprint"] == "embedded"
+        raw = _read_raw_shape(store, "anthropic")
+        fingerprint = raw.metadata[REPLAY_FINGERPRINT_METADATA]
+        assert fingerprint["ja3"] == "ja3-test"
 
 
 class TestFindHttpFlow:

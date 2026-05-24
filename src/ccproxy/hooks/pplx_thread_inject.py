@@ -54,8 +54,7 @@ __all__ = ["pplx_thread_inject", "pplx_thread_inject_guard"]
 
 def pplx_thread_inject_guard(ctx: Context) -> bool:
     """Run only when forward_oauth resolved the Perplexity sentinel."""
-    assert ctx.flow is not None
-    return ctx.flow.metadata.get("ccproxy.oauth_provider") == PERPLEXITY_PROVIDER_NAME
+    return ctx.metadata.oauth_provider == PERPLEXITY_PROVIDER_NAME
 
 
 def _thread_fetch_params(*, limit: int, cursor: str | None) -> list[tuple[str, str]]:
@@ -251,6 +250,7 @@ def pplx_thread_inject(ctx: Context, _: dict[str, Any]) -> Context:
 
     if resolved is None:
         return ctx
+    assert resolved_via is not None
 
     if resolved_via == "metadata" and thread_entry_count is not None and isinstance(body.get("messages"), list):
         client_user_turns = _count_client_user_turns(body["messages"])
@@ -267,7 +267,7 @@ def pplx_thread_inject(ctx: Context, _: dict[str, Any]) -> Context:
                     ),
                 )
             if mode == "warn":
-                flow.metadata["ccproxy.pplx.divergence"] = divergence
+                ctx.metadata.pplx.divergence = divergence
                 logger.warning("pplx_thread_inject: divergence (warn): %s", divergence)
 
     pplx_extras = body.get("pplx")
@@ -280,7 +280,7 @@ def pplx_thread_inject(ctx: Context, _: dict[str, Any]) -> Context:
     body["pplx"] = pplx_extras
     ctx._body = body
 
-    flow.metadata["ccproxy.pplx.resolved_via"] = resolved_via
+    ctx.metadata.pplx.resolved_via = resolved_via
     logger.info(
         "pplx_thread_inject: resolved_via=%s backend_uuid=%s%s",
         resolved_via,

@@ -20,7 +20,7 @@ When ccproxy's lightllm transform converts a request, the outbound payload is AP
 - **System prompt structure**: Claude Code's compliance preamble as the first system block
 - **Metadata identity**: Nested JSON in `metadata.user_id` with `device_id`, `account_uuid`, `session_id`
 
-A **shape** is a captured, known-good request carrying this complete compliance envelope. Packaged defaults and explicit full overrides are stored as request-only `.mflow` files. Normal user customization is stored as a quilt-style patch queue against a deterministic `shape.json` projection of that request.
+A **shape** is a captured, known-good request carrying this complete compliance envelope. Packaged defaults and explicit full overrides are stored as response-free `.mflow` files: request state plus preserved flow metadata. Normal user customization is stored as a quilt-style patch queue against a deterministic `shape.json` projection of that request.
 
 ccproxy ships sanitized default shapes for built-in shaping providers. These bundled shapes are read-only package assets and are used automatically when the user has not captured an override. User customizations normally live as small `.patch` files under `$CCPROXY_CONFIG_DIR/shapes/{provider}/`.
 
@@ -58,10 +58,10 @@ A good shape has a successful (2xx) response, originates from the authentic targ
 
 ### Under the Hood
 
-`ccproxy flows shape` invokes `MitmwebClient.save_shape()` → `POST /commands/ccproxy.shape` → `ShapeCaptureAddon.save_shape_artifact()` (`inspector/shape_capturer.py`). The addon validates the flow (POST method, JSON content-type, `capture.path_pattern` regex), sanitizes it, and then:
+`ccproxy flows shape` invokes `MitmwebClient.save_shape()` → `POST /commands/ccproxy.shape` → `ShapeCaptureAddon.save_shape_artifact()` (`inspector/shape_capturer.py`). The addon validates the flow (POST method, JSON content-type, `capture.path_pattern` regex), sanitizes it, preserves serializable flow metadata, embeds any captured replay fingerprint under `ccproxy.fingerprint.profile`, and then:
 
 - Default mode: canonicalizes the selected request and provider base into `shape.json`, writes a standard unified diff as `{shapes_dir}/{provider}/0001-local-shape.patch`, and lists it in `{shapes_dir}/{provider}/series`.
-- `--mflow` mode: writes a sanitized request-only `{shapes_dir}/{provider}.mflow` override via `FlowWriter`.
+- `--mflow` mode: writes a sanitized response-free `{shapes_dir}/{provider}.mflow` override via `FlowWriter`.
 
 ### Shape Storage
 

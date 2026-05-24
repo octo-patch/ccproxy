@@ -9,6 +9,8 @@ from pathlib import Path
 from mitmproxy import http
 from mitmproxy.io import FlowReader
 
+from ccproxy.inspector.fingerprint import REPLAY_FINGERPRINT_METADATA
+
 TEMPLATES_SHAPES_DIR = Path(__file__).parents[1] / "src" / "ccproxy" / "templates" / "shapes"
 DUMMY_UUID = "00000000-0000-0000-0000-000000000000"
 UUID_RE = re.compile(rb"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.I)
@@ -61,10 +63,13 @@ def test_bundled_shapes_are_sanitized() -> None:
         assert len(flows) == 1
         flow = flows[0]
         assert flow.response is None
-        assert dict(flow.metadata) == {}
         assert len(flow.request.content or b"") < 4096
         assert "authorization" not in flow.request.headers
         assert "cookie" not in flow.request.headers
+
+        metadata_text = json.dumps(flow.metadata, sort_keys=True, default=str).lower()
+        for marker in BODY_LEAK_MARKERS:
+            assert marker not in metadata_text
 
         body = json.loads(flow.request.content or b"{}")
         body_text = json.dumps(body, sort_keys=True).lower()
@@ -93,6 +98,24 @@ def test_anthropic_default_shape_is_minimal() -> None:
     assert identity["account_uuid"] == DUMMY_UUID
     assert identity["device_id"] == DUMMY_UUID
     assert identity["session_id"] == DUMMY_UUID
+
+
+def test_anthropic_default_fingerprint_is_minimal() -> None:
+    flow = _read_flows(TEMPLATES_SHAPES_DIR / "anthropic.mflow")[0]
+    fingerprint = flow.metadata[REPLAY_FINGERPRINT_METADATA]
+
+    assert fingerprint["provider"] == "anthropic"
+    assert fingerprint["sni"] == "api.anthropic.com"
+    assert fingerprint["http_version"] == "v1_1"
+    assert fingerprint["alpn_protocols"] == ["http/1.1"]
+    assert fingerprint["ja3"] == "d871d02cecbde59abbf8f4806134addf"
+    assert fingerprint["ja4"] == "t13d1714h1_5b57614c22b0_43ade6aba3df"
+    assert fingerprint["user_agent"] is None
+    assert fingerprint["runtime_version"] is None
+
+    body_text = json.dumps(fingerprint, sort_keys=True).lower()
+    for marker in BODY_LEAK_MARKERS:
+        assert marker not in body_text
 
 
 def test_gemini_default_shape_is_minimal() -> None:

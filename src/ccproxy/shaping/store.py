@@ -7,15 +7,19 @@ Optional package defaults are read from a fallback directory.
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import shutil
 import threading
+from collections.abc import Mapping, Sequence
 from pathlib import Path
+from typing import Any
 
 from mitmproxy import http
 from mitmproxy.io import FlowReader, FlowWriter
 
 from ccproxy.config import get_config, get_config_dir
+from ccproxy.inspector.fingerprint import REPLAY_FINGERPRINT_METADATA, CapturedFingerprint
 from ccproxy.shaping.patches import ShapePatchWriteResult, apply_shape_patch_series, write_shape_patch
 from ccproxy.utils import get_templates_dir
 
@@ -38,8 +42,9 @@ class ShapeStore:
     def add(self, provider: str, flow: http.HTTPFlow) -> None:
         """Append a flow to the provider's shape file."""
         path = self._path(provider)
+        writable = _prepare_flow_for_write(flow)
         with self._lock, path.open("ab") as fo:
-            FlowWriter(fo).add(flow)  # type: ignore[no-untyped-call]
+            FlowWriter(fo).add(writable)  # type: ignore[no-untyped-call]
         logger.info("Saved shape for flow %s under provider %s", flow.id, provider)
 
     def pick(self, provider: str) -> http.HTTPFlow | None:
@@ -77,6 +82,27 @@ class ShapeStore:
                 patch_name=patch_name,
             )
 
+    def write_fingerprint(self, provider: str, fingerprint: CapturedFingerprint) -> Path:
+        """Embed the provider's captured native TLS fingerprint profile in its ``.mflow`` metadata."""
+        path = self._path(provider)
+        with self._lock:
+            flow = self._pick_base(provider)
+            if flow is None:
+                raise ValueError(f"no base shape available for provider {provider}")
+            flow.metadata[REPLAY_FINGERPRINT_METADATA] = fingerprint.to_dict()
+            self._write_single(path, flow)
+        logger.info("Saved fingerprint profile for provider %s at %s", provider, path)
+        return path
+
+    def pick_fingerprint(self, provider: str) -> CapturedFingerprint | None:
+        """Return the fingerprint profile embedded in the user shape, then bundled default."""
+        with self._lock:
+            for flow in (self._pick_from(self._path(provider)), self._pick_from(self._fallback_path(provider))):
+                fingerprint = _fingerprint_from_metadata(provider, flow)
+                if fingerprint is not None:
+                    return fingerprint
+            return None
+
     def clear(self, provider: str) -> None:
         """Delete the provider's user override and patch queue, if any."""
         with self._lock:
@@ -108,6 +134,12 @@ class ShapeStore:
         if user_flow is not None:
             return user_flow
         return self._pick_from(self._fallback_path(provider))
+
+    @staticmethod
+    def _write_single(path: Path, flow: http.HTTPFlow) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("wb") as fo:
+            FlowWriter(fo).add(_prepare_flow_for_write(flow))  # type: ignore[no-untyped-call]
 
     @staticmethod
     def _pick_from(path: Path | None) -> http.HTTPFlow | None:
@@ -166,3 +198,39 @@ def clear_store_instance() -> None:
     """Reset the singleton (for tests)."""
     global _store_instance
     _store_instance = None
+
+
+def _prepare_flow_for_write(flow: http.HTTPFlow) -> http.HTTPFlow:
+    clone: http.HTTPFlow = flow.copy()  # type: ignore[no-untyped-call]
+    clone.metadata = {str(key): _metadata_to_state(value) for key, value in clone.metadata.items()}
+    return clone
+
+
+def _metadata_to_state(value: Any) -> Any:
+    if value is None or isinstance(value, (bool, int, float, str, bytes)):
+        return value
+    if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        return _metadata_to_state(dataclasses.asdict(value))
+    if hasattr(value, "get_state"):
+        try:
+            return _metadata_to_state(value.get_state())
+        except Exception as exc:
+            logger.debug("Failed to serialize metadata value via get_state(): %s", exc)
+    if isinstance(value, Mapping):
+        return {str(k): _metadata_to_state(v) for k, v in value.items()}
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return [_metadata_to_state(item) for item in value]
+    return repr(value)
+
+
+def _fingerprint_from_metadata(provider: str, flow: http.HTTPFlow | None) -> CapturedFingerprint | None:
+    if flow is None:
+        return None
+    raw = flow.metadata.get(REPLAY_FINGERPRINT_METADATA)
+    if not isinstance(raw, dict):
+        return None
+    try:
+        return CapturedFingerprint.from_dict(raw)
+    except Exception as exc:
+        logger.warning("Failed to load fingerprint profile for provider %s: %s", provider, exc)
+        return None

@@ -70,8 +70,7 @@ def forward_oauth(ctx: Context, _: dict[str, Any]) -> Context:
         )
 
     _inject_token(ctx, provider, token)
-    assert ctx.flow is not None
-    ctx.flow.metadata["ccproxy.oauth_provider"] = provider
+    ctx.metadata.oauth_provider = provider
     logger.info("OAuth token injected for provider '%s' (sentinel)", provider)
     return ctx
 
@@ -104,5 +103,4 @@ def _inject_token(ctx: Context, provider: str, token: str) -> None:
         if header != target_header:
             ctx.set_header(header, "")
 
-    assert ctx.flow is not None
-    ctx.flow.metadata["ccproxy.oauth_injected"] = True
+    ctx.metadata.oauth_injected = True

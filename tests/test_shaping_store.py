@@ -7,8 +7,10 @@ from typing import Any
 
 import pytest
 from mitmproxy import http
+from mitmproxy.io import FlowReader
 from mitmproxy.test import tflow
 
+from ccproxy.inspector.fingerprint import REPLAY_FINGERPRINT_METADATA, CapturedFingerprint
 from ccproxy.shaping.store import ShapeStore
 
 
@@ -26,6 +28,37 @@ def _flow(host: str = "api.anthropic.com", path: str = "/v1/messages") -> http.H
         {"x-custom": "v"},
     )
     return f
+
+
+def _fingerprint() -> CapturedFingerprint:
+    return CapturedFingerprint(
+        schema_version=1,
+        source="test",
+        captured_at="2026-05-24T00:00:00+00:00",
+        sni="api.anthropic.com",
+        alpn_protocols=("http/1.1",),
+        legacy_version=771,
+        supported_versions=("0304", "0303"),
+        cipher_suites=("1301", "1302"),
+        extensions=("0000", "0010"),
+        supported_groups=("001d",),
+        ec_point_formats=("00",),
+        signature_algorithms=("0403",),
+        signature_algorithm_names=("ecdsa_secp256r1_sha256",),
+        ja3="ja3-test",
+        ja3_full="771,4865-4866,0-16,29,0",
+        ja4="ja4-test",
+        ja4_r="ja4-r-test",
+        http_version="v1_1",
+        provider="anthropic",
+    )
+
+
+def _read_shape(path: Path) -> http.HTTPFlow:
+    with path.open("rb") as fo:
+        flows = [flow for flow in FlowReader(fo).stream() if isinstance(flow, http.HTTPFlow)]  # type: ignore[no-untyped-call]
+    assert flows
+    return flows[-1]
 
 
 class TestShapeStore:
@@ -140,6 +173,52 @@ class TestShapeStore:
         ShapeStore(seeds_dir).add("anthropic", _flow())
         picked = ShapeStore(seeds_dir).pick("anthropic")
         assert picked is not None
+
+    def test_pick_preserves_shape_metadata(self, seeds_dir: Path) -> None:
+        store = ShapeStore(seeds_dir)
+        flow = _flow()
+        flow.metadata["ccproxy.shape"] = "persisted"
+        flow.metadata[REPLAY_FINGERPRINT_METADATA] = _fingerprint().to_dict()
+        store.add("anthropic", flow)
+
+        picked = store.pick("anthropic")
+        fingerprint = store.pick_fingerprint("anthropic")
+        raw = _read_shape(seeds_dir / "anthropic.mflow")
+
+        assert picked is not None
+        assert picked.metadata["ccproxy.shape"] == "persisted"
+        assert raw.metadata["ccproxy.shape"] == "persisted"
+        assert fingerprint is not None
+        assert fingerprint.ja3 == "ja3-test"
+
+    def test_pick_fingerprint_falls_back_when_user_shape_lacks_profile(self, tmp_path: Path) -> None:
+        user_dir = tmp_path / "user"
+        fallback_dir = tmp_path / "fallback"
+        fallback = _flow(host="fallback.example")
+        fallback.metadata[REPLAY_FINGERPRINT_METADATA] = _fingerprint().to_dict()
+        ShapeStore(fallback_dir).add("anthropic", fallback)
+        store = ShapeStore(user_dir, fallback_dir=fallback_dir)
+        store.add("anthropic", _flow(host="user.example"))
+
+        fingerprint = store.pick_fingerprint("anthropic")
+
+        assert fingerprint is not None
+        assert fingerprint.ja4 == "ja4-test"
+
+    def test_write_fingerprint_copies_fallback_shape_to_user_file(self, tmp_path: Path) -> None:
+        user_dir = tmp_path / "user"
+        fallback_dir = tmp_path / "fallback"
+        ShapeStore(fallback_dir).add("anthropic", _flow(host="fallback.example"))
+        store = ShapeStore(user_dir, fallback_dir=fallback_dir)
+
+        store.write_fingerprint("anthropic", _fingerprint())
+
+        picked = store.pick("anthropic")
+        raw = _read_shape(user_dir / "anthropic.mflow")
+        assert picked is not None
+        assert picked.request is not None
+        assert picked.request.pretty_host == "fallback.example"
+        assert raw.metadata[REPLAY_FINGERPRINT_METADATA]["ja3"] == "ja3-test"
 
 
 class TestGetStoreSingleton:
