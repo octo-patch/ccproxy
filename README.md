@@ -333,7 +333,7 @@ even if both tools refresh concurrently.
 | Hook | Stage | Purpose |
 | --- | --- | --- |
 | `forward_oauth` | inbound | Sentinel key (`sk-ant-oat-ccproxy-{provider}`) substitution from `providers` |
-| `extract_session_id` | inbound | Parses `metadata.user_id` → stores session_id on `flow.metadata` |
+| `extract_session_id` | inbound | Parses `metadata.user_id` → stores session_id on `ctx.metadata.session_id` |
 | `gemini_cli` | outbound | Single hook for Gemini sentinel-key traffic: `v1internal` envelope wrap, conditional UA masquerade, path rewrite to `cloudcode-pa`, and unwrap on the way back |
 | `inject_mcp_notifications` | outbound | Injects buffered MCP terminal events as synthetic tool_use/tool_result |
 | `verbose_mode` | outbound | Strips `redact-thinking-*` from `anthropic-beta` header |

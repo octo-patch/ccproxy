@@ -769,7 +769,7 @@ The threading from listener → FSM is straight-through:
 incoming wire body
   → _parse_tools           sets ToolDefinition.tool_kind
   → ModelRequestParameters carries function_tools (with kind)
-  → TransformMeta          stamps request_parameters on flow.metadata
+  → TransformMeta          carries request_parameters from ctx.metadata
   → dispatch_intake        passes request_params into FSM constructor
   → ModelResponsePartsManager.__init__
                            builds _tool_kind_by_name from function_tools
@@ -813,7 +813,7 @@ HookResult = _HookSuccess | _HookSkipped | _HookError | _HookDeferred
 
 The executor in `src/ccproxy/pipeline/executor.py` wraps each hook
 invocation and stores the resulting `HookResult` on
-`flow.metadata[_HOOK_RESULTS_KEY]` (keyed by hook name). Hook
+`ctx.metadata.hook_results`. Hook
 implementations don't construct these directly — the executor emits the
 appropriate variant based on execution outcome, guard evaluation, and
 override headers.
@@ -886,7 +886,7 @@ def _install_streaming_transformer(self, flow, transform):
     render = dispatch_render(inbound_format=inbound_format, model=transform.model)
     pipeline = SSEPipeline(intake=intake, render=render)
     flow.response.stream = pipeline
-    flow.metadata["ccproxy.sse_transformer"] = pipeline
+    metadata_from_flow(flow).sse_transformer = pipeline
 ```
 
 `InspectorAddon.response` calls `pipeline.close()` on flow finalization to

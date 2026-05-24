@@ -389,8 +389,8 @@ ccproxy:
 
 | Hook | Stage | Purpose |
 |---|---|---|
-| `ccproxy.hooks.forward_oauth` | inbound | Substitutes sentinel keys (`sk-ant-oat-ccproxy-{name}`) with the cached auth token from `providers[name].auth`; injects `Authorization: Bearer …` (or the custom `auth.header` when set) and stamps `flow.metadata["ccproxy.oauth_provider"]` for downstream routing |
-| `ccproxy.hooks.extract_session_id` | inbound | Reads `metadata.user_id` via `glom(ctx._body, 'metadata.user_id')` and stores session_id on `flow.metadata` for downstream use |
+| `ccproxy.hooks.forward_oauth` | inbound | Substitutes sentinel keys (`sk-ant-oat-ccproxy-{name}`) with the cached auth token from `providers[name].auth`; injects `Authorization: Bearer …` (or the custom `auth.header` when set) and stamps `ctx.metadata.oauth_provider` for downstream routing |
+| `ccproxy.hooks.extract_session_id` | inbound | Reads `metadata.user_id` via `glom(ctx._body, 'metadata.user_id')` and stores session_id on `ctx.metadata.session_id` for downstream use |
 | `ccproxy.hooks.gemini_cli` | outbound | Single hook for all Gemini sentinel-key traffic. Wraps standard Gemini bodies in the `v1internal` envelope, conditionally masquerades `google-genai-sdk/*` UAs as Gemini CLI, rewrites paths to `cloudcode-pa`, and unwraps the `{response: {...}}` envelope on the way back. |
 | `ccproxy.hooks.inject_mcp_notifications` | outbound | Injects buffered MCP terminal events as synthetic tool_use/tool_result blocks |
 | `ccproxy.hooks.verbose_mode` | outbound | Strips `redact-thinking-*` flags from the `anthropic-beta` header |
@@ -467,7 +467,7 @@ ccproxy:
 
 ## Transform Overrides
 
-The default `inspector.transforms` list is empty: routing comes from sentinel-key resolution against the `providers` map. When a sentinel key arrives, ccproxy resolves the matching `Provider`, sets `flow.metadata["ccproxy.oauth_provider"]`, and either redirects (incoming format matches `provider`) or cross-transforms via lightllm (formats differ). Most users never need a `TransformOverride`.
+The default `inspector.transforms` list is empty: routing comes from sentinel-key resolution against the `providers` map. When a sentinel key arrives, ccproxy resolves the matching `Provider`, sets `ctx.metadata.oauth_provider`, and either redirects (incoming format matches `provider`) or cross-transforms via lightllm (formats differ). Most users never need a `TransformOverride`.
 
 `inspector.transforms` is an ordered list of `TransformOverride` entries layered on top of Provider auto-routing. The first regex match wins. Use overrides for edge cases — bypassing auth for a specific host, forcing a particular destination for a path/model combo, etc.
 

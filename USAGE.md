@@ -390,7 +390,7 @@ Optional `auth.header` overrides the target header name (default:
 ### 401 retry
 
 When a response returns 401 and the request used an OAuth-injected token
-(`flow.metadata["ccproxy.oauth_injected"]`), `OAuthAddon.response()` calls
+(`metadata_from_flow(flow).oauth_injected`), `OAuthAddon.response()` calls
 `config.resolve_oauth_token(provider)` to re-resolve the credential source.
 For OAuth-source providers (`anthropic_oauth`, `google_oauth`) this triggers
 another in-process refresh attempt; for static `command` / `file` loaders it
@@ -569,7 +569,7 @@ otel:
 
 Each span includes HTTP semantics (`http.request.method`, `url.full`,
 `server.address`), ccproxy-specific attributes (`ccproxy.proxy_direction`,
-`ccproxy.session_id`), and GenAI semantic conventions (`gen_ai.system`,
+`ctx.metadata.session_id`), and GenAI semantic conventions (`gen_ai.system`,
 `gen_ai.operation.name`) for flows to known provider hosts.
 
 The Jaeger container in `compose.yaml` accepts OTLP gRPC on port 4317 and serves

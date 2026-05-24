@@ -60,7 +60,7 @@ The hook is **idempotent**: if the body is already in v1internal envelope shape
 
 ### Trigger
 
-Fires only when `flow.metadata["ccproxy.oauth_provider"] == "gemini"` — set by
+Fires only when `ctx.metadata.oauth_provider == "gemini"` — set by
 `forward_oauth` after sentinel-key resolution. Other Gemini traffic (raw API
 key, no sentinel) is not touched.
 
@@ -167,7 +167,7 @@ the gemini-cli npm distribution — ccproxy does not vendor them; supply them in
 your config.
 
 `forward_oauth` substitutes the sentinel key with the resolved token and stamps
-`flow.metadata["ccproxy.oauth_provider"] = "gemini"` so the `gemini_cli` hook
+`ctx.metadata.oauth_provider = "gemini"` so the `gemini_cli` hook
 fires. On a 401 from upstream, `OAuthAddon` (not the gemini_cli hook itself)
 re-resolves the credential source via `config.resolve_oauth_token("gemini")`
 and replays the request.
@@ -175,7 +175,7 @@ and replays the request.
 ## Capacity fallback (GeminiAddon)
 
 `GeminiAddon` orchestrates Gemini-specific capacity handling for any flow
-flagged with `flow.metadata["ccproxy.oauth_provider"] == "gemini"`. On a
+flagged with `metadata_from_flow(flow).oauth_provider == "gemini"`. On a
 429/503 carrying `RESOURCE_EXHAUSTED` or `INTERNAL` status, it sticky-retries
 the original model up to `sticky_retry_attempts` times (honouring
 `RetryInfo.retryDelay` per attempt, capped by
@@ -253,7 +253,7 @@ See `examples/gemini_sdk_via_ccproxy.py` (text) and
 
 ### Streaming response shows `{"response": {...}}` envelope
 - `GeminiAddon.responseheaders` should install `EnvelopeUnwrapStream`. Check
-  that `flow.metadata["ccproxy.oauth_provider"] == "gemini"`,
+  that `metadata_from_flow(flow).oauth_provider == "gemini"`,
   `transform.is_streaming == True`, and `transform.mode == "redirect"` are
   all set on the flow record. If `transform` is `None`, the `gemini_cli` hook
   didn't fire — check `oauth_provider` metadata.

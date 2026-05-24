@@ -85,7 +85,7 @@ Client request (captured as ClientRequest snapshot)
   ▼
 Inbound hooks (DAG order)
   forward_oauth:      sentinel key -> real OAuth token
-  extract_session_id: metadata.user_id -> flow.metadata
+  extract_session_id: metadata.user_id -> ctx.metadata.session_id
   │
   ▼
 Transform (first matching rule wins)
@@ -115,8 +115,8 @@ Forwarded request -> Provider API
 
 | Indicator | Meaning |
 |-----------|---------|
-| `flow.metadata["ccproxy.oauth_injected"]` (or `x-ccproxy-oauth-injected: 1` request header) | OAuth token was injected by `forward_oauth` |
-| `flow.metadata["ccproxy.oauth_provider"] == "X"` | Sentinel key resolved to provider X |
+| `ctx.metadata.oauth_injected` / `metadata_from_flow(flow).oauth_injected` | OAuth token was injected by `forward_oauth` |
+| `ctx.metadata.oauth_provider == "X"` / `metadata_from_flow(flow).oauth_provider == "X"` | Sentinel key resolved to provider X |
 | Host changed (client vs forwarded) | Transform or redirect rewrote the destination |
 | Body identity headers present on forwarded but not client | `shape` hook replayed a captured shape |
 | Body wrapped in `{model, project, request}` envelope | `gemini_cli` hook wrapped the body for cloudcode-pa |

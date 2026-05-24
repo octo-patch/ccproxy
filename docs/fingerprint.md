@@ -12,14 +12,15 @@ reverse-proxy traffic into the in-process sidecar. The active code path is:
 
 1. [`FingerprintCaptureAddon`](../src/ccproxy/inspector/fingerprint_capture.py)
    reads mitmproxy's TLS ClientHello event, computes JA3/JA4 material, and
-   stores it on the later HTTP flow as `ccproxy.fingerprint.client`.
+   stores it on the later HTTP flow as `metadata_from_flow(flow).fingerprint.client`
+   (`ccproxy.fingerprint.client` in serialized flow metadata).
 2. [`ShapeCaptureAddon`](../src/ccproxy/inspector/shape_capturer.py) writes
    that profile into `shapes/{provider}.mflow` metadata as
    `ccproxy.fingerprint.profile` when `ccproxy flows shape {provider}` is run.
    Bundled fallbacks carry the same metadata in
    `ccproxy/templates/shapes/{provider}.mflow`.
 3. [`forward_oauth`](../src/ccproxy/hooks/forward_oauth.py) detects the
-   `sk-ant-oat-ccproxy-anthropic` sentinel and stores `ccproxy.oauth_provider`.
+   `sk-ant-oat-ccproxy-anthropic` sentinel and stores `ctx.metadata.oauth_provider`.
 4. [`transform`](../src/ccproxy/inspector/routes/transform.py) rewrites the
    reverse-proxy request to `https://api.anthropic.com/v1/messages`.
 5. [`TransportOverrideAddon`](../src/ccproxy/inspector/transport_override_addon.py)

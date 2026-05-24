@@ -487,15 +487,14 @@ OpenAI client (openai-python, aider, anything)
 ccproxy port 4000 / 4001 (mitmweb reverse listener)
    │
    ▼ addon chain (registered in inspector/process.py:_build_addons)
-   InspectorAddon            stamps flow.metadata["ccproxy.conversation_id"] (SHA12 of first user)
-                             stamps flow.metadata["ccproxy.flow_id"]
+   InspectorAddon            stamps metadata_from_flow(flow).conversation_id (SHA12 of first user)
                              starts OTel span
    MultiHARSaver             HAR capture (passive)
    ShapeCaptureAddon         shape capture (skipped for perplexity — no shaping)
    InspectorRouter (inbound) runs the inbound DAG:
      1. forward_oauth          resolves sentinel → session cookie
-                               stamps flow.metadata["ccproxy.oauth_provider"] = "perplexity_pro"
-     2. extract_session_id     reads metadata.user_id → flow.metadata["ccproxy.session_id"]
+                               stamps ctx.metadata.oauth_provider = "perplexity_pro"
+     2. extract_session_id     reads metadata.user_id → ctx.metadata.session_id
      3. extract_pplx_files     walks messages for image_url parts
                                uploads to S3 via batch_create_upload_urls + multipart + subscribe
                                writes S3 URLs to ctx._body["pplx"]["attachments"]
@@ -794,7 +793,7 @@ for clarification then retry with a more specific query.
 ### Resolution chain (`pplx_thread_inject`)
 
 `src/ccproxy/hooks/pplx_thread_inject.py`. Inbound DAG hook running after
-`forward_oauth` (needs `flow.metadata["ccproxy.oauth_provider"]`) and
+`forward_oauth` (needs `ctx.metadata.oauth_provider`) and
 `extract_session_id`. Stops at the first hit.
 
 ```
@@ -812,7 +811,7 @@ if slug:
 
 if not resolved:
     # Mode 2 — Organic L1 cache
-    conv_id = flow.metadata["ccproxy.conversation_id"]
+    conv_id = ctx.metadata.conversation_id
     cached = PerplexityThreadStore.get(conv_id)
     if cached:
         resolved = {backend_uuid, context_uuid, read_write_token}
@@ -828,7 +827,7 @@ ctx._body["pplx"] = {
     "frontend_context_uuid": resolved["context_uuid"],
     "read_write_token":    resolved["read_write_token"],
 }
-flow.metadata["ccproxy.pplx.resolved_via"] = resolved_via
+ctx.metadata.pplx.resolved_via = resolved_via
 ```
 
 `ctx._body["pplx"]` flows through LiteLLM's `map_openai_params` into
@@ -898,7 +897,8 @@ class PerplexityAddon:
         if not self._is_pplx_flow(flow):
             return
         raw_body = self._extract_raw_body(flow)        # see below
-        conv_id = flow.metadata.get("ccproxy.conversation_id")
+        metadata = metadata_from_flow(flow)
+        conv_id = metadata.conversation_id
         if not raw_body or not conv_id:
             return
         ids = self._scan_for_ids(raw_body)             # _parse_sse_line + _extract_deltas
@@ -911,7 +911,7 @@ class PerplexityAddon:
             context_uuid=ids["context_uuid"],
             thread_url_slug=ids.get("thread_url_slug"),
         )
-        flow.metadata["ccproxy.pplx.captured_ids"] = dict(ids)
+        metadata.pplx.captured_ids = dict(ids)
 ```
 
 **The `_extract_raw_body` trick**: by the time PerplexityAddon runs, the
@@ -924,13 +924,14 @@ stashed BEFORE the rewrite.
 ```python
 def _extract_raw_body(flow):
     # Preferred: raw upstream body stashed by InspectorAddon
-    record = flow.metadata.get(InspectorMeta.RECORD)
+    metadata = metadata_from_flow(flow)
+    record = metadata.record
     if record and record.provider_response:
         body = record.provider_response.body
         if isinstance(body, bytes) and body:
             return body
     # Fallback for streaming-only paths
-    transformer = flow.metadata.get("ccproxy.sse_transformer")
+    transformer = metadata.sse_transformer
     if transformer and transformer.raw_body:
         return transformer.raw_body
     # Last resort
@@ -1026,10 +1027,10 @@ answer. Silent failure — the worst kind.
 ```python
 try:
     httpx.get(PERPLEXITY_PREFLIGHT_URL, params={"q": query[:2000]}, ...)
-    ctx.flow.metadata["ccproxy.pplx.preflight"] = True
+    ctx.metadata.pplx.preflight = True
 except Exception:
     logger.warning("pplx_preflight: side request failed", exc_info=True)
-    ctx.flow.metadata["ccproxy.pplx.preflight"] = False
+    ctx.metadata.pplx.preflight = False
 return ctx
 ```
 
@@ -1569,7 +1570,7 @@ locally. Options:
 
 ### Mode 2 (L1 cache) not hitting
 
-Check `flow.metadata["ccproxy.conversation_id"]`:
+Check `ctx.metadata.conversation_id` / the serialized `ccproxy.conversation_id` value:
 
 ```bash
 ccproxy flows compare <flow_id> | grep conversation_id

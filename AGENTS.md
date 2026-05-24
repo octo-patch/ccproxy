@@ -155,8 +155,8 @@ cascades into capacity fallback.
 
 | Hook | Stage | Purpose |
 | --- | --- | --- |
-| `forward_oauth` | inbound | Substitute sentinel key (`sk-ant-oat-ccproxy-{provider}`); stamps `flow.metadata["ccproxy.oauth_*"]`. |
-| `extract_session_id` | inbound | `glom(body, "metadata.user_id")` → `flow.metadata` session_id. |
+| `forward_oauth` | inbound | Substitute sentinel key (`sk-ant-oat-ccproxy-{provider}`); stamps `ctx.metadata.oauth_provider` / `ctx.metadata.oauth_injected`. |
+| `extract_session_id` | inbound | `glom(body, "metadata.user_id")` → `ctx.metadata.session_id`. |
 | `extract_pplx_files` | inbound | Upload Perplexity `image_url` parts via batch chain; write S3 URLs to body; strip non-text. Perplexity-guarded. |
 | `pplx_thread_inject` | inbound | Three-mode Perplexity thread continuation (body session_id / L1 cache hit / pass-through). |
 | `gemini_cli` | outbound | Wrap Gemini bodies in `v1internal` envelope; rewrite paths to `cloudcode-pa`; masquerade SDK UA; idempotent. |
@@ -193,7 +193,8 @@ cascades into capacity fallback.
 - **`flows/store.py`** — TTL store (3600s, lazy cleanup) keyed by `x-ccproxy-flow-id` for
   cross-addon state. `FlowRecord` carries client/forwarded/provider snapshots plus auth/otel/
   transform metadata plus `conversation_id` (SHA12 of first user text) and `system_prompt_sha`.
-  `InspectorMeta` provides string constants for `flow.metadata` keys.
+  `ctx.metadata` / `metadata_from_flow(flow)` are the supported ccproxy metadata access APIs;
+  `flow.metadata` is only their mitmproxy backing store.
 
 - **`transport/`** — Cached `httpx.AsyncClient` instances backed by `httpx-curl-cffi`’s
   `AsyncCurlTransport` for browser TLS+HTTP/2 fingerprint impersonation. `get_client(*, host,
@@ -343,9 +344,9 @@ browser-shape headers (stamped by `pplx_stamp_headers`). 22 models in
 > (`~/dev/docs/man/pplx/*.md`), failure modes, and rationale that aren’t in the code comments.
 
 Routing precedence per request: (1) `inspector.transforms` regex match wins first; (2) sentinel
-resolution via `flow.metadata["ccproxy.oauth_provider"]` set by `forward_oauth` resolves to a
-`providers[name]` lookup; (3) ReverseMode flows fall through to a 501 OpenAI-shape error, WireGuard
-flows pass through unchanged.
+resolution via `ctx.metadata.oauth_provider` / `metadata_from_flow(flow).oauth_provider` set by
+`forward_oauth` resolves to a `providers[name]` lookup; (3) ReverseMode flows fall through to a 501
+OpenAI-shape error, WireGuard flows pass through unchanged.
 For sentinel-resolved Provider routing the action auto-derives: matching wire format → `redirect`,
 otherwise cross-format `transform` via lightllm.
 
@@ -381,11 +382,10 @@ Vendored fact lists live separately in `src/ccproxy/specs/claude_code_constants.
   `~/dev/projects/foo/.ccproxy/` → `ccproxy-foo`). `ccproxy logs` tails the log file.
 - **Hook error isolation**: Errors in one hook don’t block others.
   `OAuthConfigError` is the exception — it propagates through the pipeline (fatal).
-- **Body metadata footgun**: `ctx.metadata` uses `setdefault`, which creates an empty `metadata` key
-  in the body on read.
-  `commit()` strips empty metadata dicts to prevent upstream rejection (Google: “Unknown name
-  metadata”). Hooks needing flow-level state should use `ctx.flow.metadata["ccproxy.key"]`, NOT
-  `ctx.metadata["key"]`.
+- **Metadata access**: `ctx.metadata` is the ccproxy-owned flow metadata facade backed by
+  mitmproxy's `flow.metadata`. It never mutates request-body `metadata`. Hooks needing body-level
+  metadata should use `ctx.extras.get("metadata.foo")`; hooks needing ccproxy flow state should use
+  `ctx.metadata.foo` or nested dot access such as `ctx.metadata.pplx.resolved_via`.
 - **Three-layer access model** for hooks:
   1. Header ops — `ctx.get_header()` / `ctx.set_header()`
   2. Typed ops — `ctx.system`, `ctx.messages`, `ctx.tools` (Pydantic AI objects)

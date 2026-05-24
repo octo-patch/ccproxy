@@ -115,8 +115,8 @@ ReadySignal → InspectorAddon → MultiHARSaver → ShapeCaptureAddon
 | `ccproxy_inbound` | `InspectorRouter` (pipeline) | DAG executor for `hooks.inbound` entries — OAuth sentinel substitution (`forward_oauth`), session ID extraction (`extract_session_id`). Skipped if no inbound hooks configured. |
 | `ccproxy_transform` | `InspectorRouter` (transform) | lightllm dispatch — matches `inspector.transforms` rules and falls back to sentinel-driven `Provider` routing. Rewrites destination (always) and body (cross-format). Handles non-streaming response transform back to OpenAI shape. |
 | `ccproxy_outbound` | `InspectorRouter` (pipeline) | DAG executor for `hooks.outbound` entries — `gemini_cli` (cloudcode-pa envelope wrap), `inject_mcp_notifications`, `verbose_mode` (strip `redact-thinking-*`), `shape` (replay captured compliance envelope), `commitbee_compat`. Skipped if no outbound hooks configured. |
-| `OAuthAddon` | `OAuthAddon` | 401-detect → refresh → replay. Triggered by `flow.metadata["ccproxy.oauth_injected"]` set by `forward_oauth`. Re-resolves the credential source via `config.resolve_oauth_token(provider)` and replays the request with the fresh token. |
-| `GeminiAddon` | `GeminiAddon` | Two responsibilities for `flow.metadata["ccproxy.oauth_provider"] == "gemini"` flows: capacity fallback (sticky retry on the original model + walk `gemini_capacity.fallback_models` on 429/503) and cloudcode-pa envelope unwrap (buffered via `unwrap_buffered`, streaming via `EnvelopeUnwrapStream` installed in `responseheaders`). |
+| `OAuthAddon` | `OAuthAddon` | 401-detect → refresh → replay. Triggered by `metadata_from_flow(flow).oauth_injected` set by `forward_oauth`. Re-resolves the credential source via `config.resolve_oauth_token(provider)` and replays the request with the fresh token. |
+| `GeminiAddon` | `GeminiAddon` | Two responsibilities for `metadata_from_flow(flow).oauth_provider == "gemini"` flows: capacity fallback (sticky retry on the original model + walk `gemini_capacity.fallback_models` on 429/503) and cloudcode-pa envelope unwrap (buffered via `unwrap_buffered`, streaming via `EnvelopeUnwrapStream` installed in `responseheaders`). |
 
 The pipeline routers are only added to the chain if the corresponding hook list is non-empty:
 
@@ -155,7 +155,7 @@ def _get_direction(self, flow: http.HTTPFlow) -> Direction | None:
 ```
 
 `FlowRecord.direction` is typed as `Literal["inbound"]`. The pipeline route handlers guard on
-`flow.metadata.get(InspectorMeta.DIRECTION) != "inbound"` as a sanity check, but this check never
+`metadata_from_flow(flow).direction != "inbound"` as a sanity check, but this check never
 fails in practice since all accepted flows are inbound.
 
 ---
@@ -201,14 +201,16 @@ class FlowRecord:
 | `conversation_id` | `InspectorAddon.request()` (SHA12 of first user text, or `flow:{flow.id}` fallback) | MCP tools (`list_conversations`), CLI grouping |
 | `system_prompt_sha` | `InspectorAddon.request()` (SHA12 of `json.dumps(system, sort_keys=True)`) | OTel span attributes, MCP tools |
 
-### InspectorMeta keys
+### Metadata Facade
 
-`InspectorMeta` provides string constants for `flow.metadata` dict keys:
+`ctx.metadata` and `metadata_from_flow(flow)` provide the supported typed access surface for
+ccproxy-owned flow metadata. The serialized mitmproxy backing keys remain `ccproxy.*`, but raw
+mitmproxy metadata access is reserved to the facade implementation.
 
 ```python
-class InspectorMeta:
-    RECORD    = "ccproxy.record"     # FlowRecord reference
-    DIRECTION = "ccproxy.direction"  # "inbound"
+metadata = metadata_from_flow(flow)
+metadata.record      # FlowRecord reference
+metadata.direction   # "inbound"
 ```
 
 ### AuthMeta
@@ -578,7 +580,7 @@ degradation:
 
 Spans are started in `InspectorAddon.request()` and ended in `InspectorAddon.response()` or
 `InspectorAddon.error()`. The span object is stored in `FlowRecord.otel` (an `OtelMeta` instance).
-For flows without a record, spans fall back to direct storage in `flow.metadata["ccproxy.otel_span"]`.
+For flows without a record, spans fall back to `metadata_from_flow(flow).otel_span`.
 
 ### Span attributes
 

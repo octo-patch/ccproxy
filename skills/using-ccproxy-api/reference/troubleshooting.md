@@ -109,7 +109,7 @@ jq -r '.claudeAiOauth.accessToken' ~/.claude/.credentials.json
 claude
 ```
 
-ccproxy auto-retries on 401: `OAuthAddon.response()` detects HTTP 401 on flows where `forward_oauth` injected an OAuth token (`flow.metadata["ccproxy.oauth_injected"]`), calls `config.resolve_oauth_token(provider)`, and replays the request with whatever the resolver returns.
+ccproxy auto-retries on 401: `OAuthAddon.response()` detects HTTP 401 on flows where `forward_oauth` injected an OAuth token (`metadata_from_flow(flow).oauth_injected`), calls `config.resolve_oauth_token(provider)`, and replays the request with whatever the resolver returns.
 
 ### Wrong sentinel key provider name
 
