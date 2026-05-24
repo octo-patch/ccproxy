@@ -46,6 +46,30 @@ class TestShapeStore:
         store = ShapeStore(seeds_dir)
         assert store.pick("anthropic") is None
 
+    def test_pick_uses_fallback_when_user_shape_missing(self, tmp_path: Path) -> None:
+        user_dir = tmp_path / "user"
+        fallback_dir = tmp_path / "fallback"
+        ShapeStore(fallback_dir).add("anthropic", _flow(host="fallback.example"))
+
+        picked = ShapeStore(user_dir, fallback_dir=fallback_dir).pick("anthropic")
+
+        assert picked is not None
+        assert picked.request is not None
+        assert picked.request.pretty_host == "fallback.example"
+
+    def test_pick_prefers_user_shape_over_fallback(self, tmp_path: Path) -> None:
+        user_dir = tmp_path / "user"
+        fallback_dir = tmp_path / "fallback"
+        ShapeStore(fallback_dir).add("anthropic", _flow(host="fallback.example"))
+        store = ShapeStore(user_dir, fallback_dir=fallback_dir)
+        store.add("anthropic", _flow(host="user.example"))
+
+        picked = store.pick("anthropic")
+
+        assert picked is not None
+        assert picked.request is not None
+        assert picked.request.pretty_host == "user.example"
+
     def test_pick_returns_most_recent(self, seeds_dir: Path) -> None:
         store = ShapeStore(seeds_dir)
         store.add("anthropic", _flow(host="old.example"))
@@ -62,6 +86,22 @@ class TestShapeStore:
         store.clear("anthropic")
         assert not (seeds_dir / "anthropic.mflow").exists()
 
+    def test_clear_reveals_fallback_shape(self, tmp_path: Path) -> None:
+        user_dir = tmp_path / "user"
+        fallback_dir = tmp_path / "fallback"
+        ShapeStore(fallback_dir).add("anthropic", _flow(host="fallback.example"))
+        store = ShapeStore(user_dir, fallback_dir=fallback_dir)
+        store.add("anthropic", _flow(host="user.example"))
+
+        store.clear("anthropic")
+        picked = store.pick("anthropic")
+
+        assert not (user_dir / "anthropic.mflow").exists()
+        assert (fallback_dir / "anthropic.mflow").exists()
+        assert picked is not None
+        assert picked.request is not None
+        assert picked.request.pretty_host == "fallback.example"
+
     def test_clear_is_idempotent(self, seeds_dir: Path) -> None:
         ShapeStore(seeds_dir).clear("never-seeded")
 
@@ -69,6 +109,16 @@ class TestShapeStore:
         store = ShapeStore(seeds_dir)
         store.add("anthropic", _flow())
         store.add("gemini", _flow())
+        assert store.list_providers() == ["anthropic", "gemini"]
+
+    def test_list_providers_includes_fallbacks(self, tmp_path: Path) -> None:
+        user_dir = tmp_path / "user"
+        fallback_dir = tmp_path / "fallback"
+        ShapeStore(fallback_dir).add("anthropic", _flow())
+        ShapeStore(fallback_dir).add("gemini", _flow())
+        store = ShapeStore(user_dir, fallback_dir=fallback_dir)
+        store.add("anthropic", _flow(host="user.example"))
+
         assert store.list_providers() == ["anthropic", "gemini"]
 
     def test_isolates_per_provider(self, seeds_dir: Path) -> None:
@@ -126,4 +176,24 @@ class TestGetStoreSingleton:
         clear_store_instance()
 
         assert get_store() is get_store()
+        clear_store_instance()
+
+    def test_get_store_uses_bundled_fallback_dir(self, tmp_path: Path, monkeypatch: Any) -> None:
+        from ccproxy.config import CCProxyConfig, set_config_instance
+        from ccproxy.shaping.store import clear_store_instance, get_store
+
+        config_dir = tmp_path / "config"
+        templates_dir = tmp_path / "templates"
+        fallback_dir = templates_dir / "shapes"
+        ShapeStore(fallback_dir).add("anthropic", _flow(host="fallback.example"))
+        monkeypatch.setenv("CCPROXY_CONFIG_DIR", str(config_dir))
+        monkeypatch.setattr("ccproxy.shaping.store.get_templates_dir", lambda: templates_dir)
+        set_config_instance(CCProxyConfig())
+        clear_store_instance()
+
+        picked = get_store().pick("anthropic")
+
+        assert picked is not None
+        assert picked.request is not None
+        assert picked.request.pretty_host == "fallback.example"
         clear_store_instance()

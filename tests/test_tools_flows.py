@@ -7,20 +7,24 @@ import httpx
 import pytest
 
 from ccproxy.flows import (
+    FlowReplSession,
     FlowsClear,
     FlowsCompare,
     FlowsDiff,
     FlowsDump,
     FlowsList,
+    FlowsRepl,
     MitmwebClient,
     _do_compare,
     _do_diff,
     _do_dump,
     _do_list,
+    _do_repl,
     _format_body,
     _git_diff,
     _header_value,
     _make_client,
+    _repl_namespace,
     _run_jq,
     handle_flows,
 )
@@ -453,6 +457,116 @@ class TestRunJq:
         assert _run_jq([], ".") == []
 
 
+class TestFlowReplSession:
+    """Tests for the interactive flows REPL facade."""
+
+    def _flow(self, id: str, status_code: int = 200) -> dict:
+        return {
+            "id": id,
+            "request": {
+                "method": "POST",
+                "pretty_host": "api.example.com",
+                "path": "/v1/messages",
+                "headers": [],
+            },
+            "response": {"status_code": status_code},
+        }
+
+    def test_flow_ref_by_index_and_prefix(self) -> None:
+        session = FlowReplSession(MagicMock(), [self._flow("abc123"), self._flow("def456")])
+
+        assert session.flow(1)["id"] == "def456"
+        assert session.flow("abc")["id"] == "abc123"
+        assert session.flow_id("def") == "def456"
+
+    def test_ambiguous_prefix_raises(self) -> None:
+        session = FlowReplSession(MagicMock(), [self._flow("abc123"), self._flow("abc999")])
+
+        with pytest.raises(ValueError, match="ambiguous"):
+            session.flow("abc")
+
+    def test_apply_filter_mutates_flows_and_ids_references(self) -> None:
+        session = FlowReplSession(MagicMock(), [self._flow("abc123", 200), self._flow("def456", 500)])
+        namespace = _repl_namespace(session)
+        flows_ref = namespace["flows"]
+        ids_ref = namespace["ids"]
+
+        result = session.apply("map(select(.response.status_code == 500))")
+
+        assert result == [self._flow("def456", 500)]
+        assert flows_ref == [self._flow("def456", 500)]
+        assert ids_ref == ["def456"]
+
+    def test_request_and_response_pretty_print(self) -> None:
+        client = MagicMock()
+        client.get_request_body.return_value = b'{"model":"claude"}'
+        client.get_response_body.return_value = b'{"id":"msg_1"}'
+        session = FlowReplSession(client, [self._flow("abc123")])
+
+        assert '"model": "claude"' in session.request(0)
+        assert '"id": "msg_1"' in session.response("abc")
+
+    @patch("ccproxy.flows._git_diff")
+    def test_diff_compares_selected_request_bodies(self, mock_git_diff: MagicMock) -> None:
+        client = MagicMock()
+        client.get_request_body.side_effect = [b'{"a":1}', b'{"a":2}']
+        session = FlowReplSession(client, [self._flow("abc123"), self._flow("def456")])
+
+        session.diff("abc", "def")
+
+        mock_git_diff.assert_called_once()
+        assert mock_git_diff.call_args.args[2] == "flow:abc123"
+        assert mock_git_diff.call_args.args[3] == "flow:def456"
+
+    def test_dump_writes_har_to_path(self, tmp_path: Path) -> None:
+        client = MagicMock()
+        client.dump_har.return_value = '{"log": {}}'
+        session = FlowReplSession(client, [self._flow("abc123")])
+        output = tmp_path / "flow.har"
+
+        result = session.dump("abc", path=output)
+
+        assert result == output
+        assert output.read_text() == '{"log": {}}'
+        client.dump_har.assert_called_once_with(["abc123"])
+
+    def test_shape_saves_selected_flows(self) -> None:
+        client = MagicMock()
+        client.save_shape.return_value = {"provider": "anthropic", "flows_saved": 1}
+        session = FlowReplSession(client, [self._flow("abc123")])
+
+        result = session.shape("anthropic", 0)
+
+        assert result["provider"] == "anthropic"
+        client.save_shape.assert_called_once_with(["abc123"], "anthropic")
+
+    def test_clear_deletes_selected_flows_and_refreshes(self) -> None:
+        client = MagicMock()
+        client.list_flows.return_value = []
+        session = FlowReplSession(client, [self._flow("abc123"), self._flow("def456")])
+
+        assert session.clear("abc") == 1
+
+        client.delete_flow.assert_called_once_with("abc123")
+        assert session.flows == []
+
+
+class TestDoRepl:
+    @patch("ccproxy.flows._embed_repl")
+    def test_starts_repl_with_session_namespace(self, mock_embed: MagicMock) -> None:
+        client = MagicMock()
+        flows = [{"id": "abc123", "request": {}, "response": {}}]
+        flows_cfg = MagicMock(default_jq_filters=[])
+
+        _do_repl(client, flows, flows_cfg=flows_cfg, jq_filter=[])
+
+        namespace, banner = mock_embed.call_args.args
+        assert namespace["session"].flows == flows
+        assert namespace["client"] is client
+        assert namespace["show"] == namespace["session"].show
+        assert "ccproxy flows repl" in banner
+
+
 class TestDoList:
     def _make_mock_flow(
         self,
@@ -803,6 +917,28 @@ class TestHandleFlows:
 
         mock_compare.assert_called_once()
         assert mock_compare.call_args.args[1] == flow_set
+
+    @patch("ccproxy.config.get_config")
+    @patch("ccproxy.flows._make_client")
+    @patch("ccproxy.flows._resolve_flow_set")
+    @patch("ccproxy.flows._do_repl")
+    def test_repl_subcommand(
+        self,
+        mock_repl: MagicMock,
+        mock_resolve: MagicMock,
+        mock_client: MagicMock,
+        mock_config: MagicMock,
+    ) -> None:
+        mock_ctx = MagicMock()
+        mock_client.return_value.__enter__ = MagicMock(return_value=mock_ctx)
+        mock_client.return_value.__exit__ = MagicMock(return_value=False)
+        flow_set = [{"id": "a"}]
+        mock_resolve.return_value = flow_set
+
+        handle_flows(FlowsRepl(), Path("/tmp"))  # noqa: S108
+
+        mock_repl.assert_called_once()
+        assert mock_repl.call_args.args[1] == flow_set
 
     @patch("ccproxy.config.get_config")
     @patch("ccproxy.flows._make_client")

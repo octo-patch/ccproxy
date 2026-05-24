@@ -29,6 +29,12 @@ from ccproxy.transport import VALID_PROFILES
 
 logger = logging.getLogger(__name__)
 
+PplxSource = Literal["web", "scholar", "social", "edgar"]
+
+
+def _default_pplx_sources() -> list[PplxSource]:
+    return ["web"]
+
 __all__ = [
     "AnthropicShapingConfig",
     "AnyAuthSource",
@@ -184,6 +190,14 @@ class ShapingConfig(BaseModel):
     Defaults to ``{config_dir}/shaping/shapes`` when unset.
     """
 
+    patches_dir: str | None = None
+    """Directory holding per-provider shape patch series.
+
+    Defaults to ``{config_dir}/shaping/patches`` when unset. Each provider
+    directory may contain a quilt-style ``series`` file listing unified
+    diffs against the virtual ``shape.json`` file.
+    """
+
     providers: dict[str, ProviderShapingConfig] = Field(default_factory=dict)
     """Per-provider shaping profiles keyed by provider name (e.g. ``anthropic``).
 
@@ -290,7 +304,7 @@ class PplxSearchConfig(BaseModel):
     language: str = "en-US"
     timezone: str = "America/Los_Angeles"
     search_focus: Literal["internet", "writing"] = "internet"
-    sources: list[Literal["web", "scholar", "social", "edgar"]] = Field(default_factory=lambda: ["web"])
+    sources: list[PplxSource] = Field(default_factory=_default_pplx_sources)
     search_recency_filter: Literal["DAY", "WEEK", "MONTH", "YEAR"] | None = None
     is_incognito: bool = False
     skip_search_enabled: bool = True

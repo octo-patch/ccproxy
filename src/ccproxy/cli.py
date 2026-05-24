@@ -31,6 +31,7 @@ from ccproxy.flows import (
     FlowsDiff,
     FlowsDump,
     FlowsList,
+    FlowsRepl,
     FlowsShape,
     handle_flows,
 )
@@ -954,7 +955,7 @@ def main(
             mermaid=cmd.mermaid,
         )
 
-    elif isinstance(cmd, FlowsList | FlowsDump | FlowsDiff | FlowsCompare | FlowsShape | FlowsClear):
+    elif isinstance(cmd, FlowsList | FlowsDump | FlowsDiff | FlowsCompare | FlowsShape | FlowsRepl | FlowsClear):
         handle_flows(cmd, config_dir)
 
 

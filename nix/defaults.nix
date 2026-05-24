@@ -140,6 +140,7 @@
     shaping = {
       enabled = true;
       shapes_dir = "~/.config/ccproxy/shaping/shapes";
+      patches_dir = "~/.config/ccproxy/shaping/patches";
       providers = {
         anthropic = {
           content_fields = [

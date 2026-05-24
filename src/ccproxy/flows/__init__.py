@@ -19,14 +19,18 @@ command (registered by ``MultiHARSaver`` in ``ccproxy.inspector.multi_har_saver`
 
 from __future__ import annotations
 
+import atexit
+import code
 import contextlib
+import importlib
 import json
 import subprocess
 import sys
 import tempfile
+from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, cast
 
 import httpx
 import humanize
@@ -209,6 +213,10 @@ class FlowsShape(_FlowsBase):
     """Target provider name (e.g., 'anthropic', 'gemini')."""
 
 
+class FlowsRepl(_FlowsBase):
+    """Open an interactive Python REPL over the resolved flow set."""
+
+
 class FlowsClear(_FlowsBase):
     """Clear the resolved flow set (or everything with --all)."""
 
@@ -222,6 +230,7 @@ Flows = Annotated[
     | Annotated[FlowsDiff, tyro.conf.subcommand(name="diff")]
     | Annotated[FlowsCompare, tyro.conf.subcommand(name="compare")]
     | Annotated[FlowsShape, tyro.conf.subcommand(name="shape")]
+    | Annotated[FlowsRepl, tyro.conf.subcommand(name="repl")]
     | Annotated[FlowsClear, tyro.conf.subcommand(name="clear")],
     tyro.conf.subcommand(
         name="flows",
@@ -266,6 +275,9 @@ def _dt(ts: float) -> datetime:
     return datetime.fromtimestamp(ts, tz=UTC)
 
 
+FlowRef = int | str | dict[str, Any]
+
+
 # --- JQ filter pipeline ---
 
 
@@ -304,6 +316,159 @@ def _resolve_flow_set(
     if not filters:
         return raw
     return _run_jq(raw, " | ".join(filters))
+
+
+def _resolve_flow_ref(flow_set: list[dict[str, Any]], ref: FlowRef) -> dict[str, Any]:
+    """Resolve an index, exact id, id prefix, or flow dict to a flow from the current set."""
+    if isinstance(ref, dict):
+        flow_id = ref.get("id")
+        if isinstance(flow_id, str):
+            for flow in flow_set:
+                if flow.get("id") == flow_id:
+                    return flow
+        raise ValueError("flow dict is not in the current set")
+
+    if isinstance(ref, int):
+        try:
+            return flow_set[ref]
+        except IndexError as e:
+            raise ValueError(f"flow index {ref} is out of range") from e
+
+    matches = [flow for flow in flow_set if str(flow.get("id", "")).startswith(ref)]
+    if not matches:
+        raise ValueError(f"no flow matches {ref!r}")
+    if len(matches) > 1:
+        ids = ", ".join(str(flow["id"])[:8] for flow in matches[:5])
+        raise ValueError(f"flow prefix {ref!r} is ambiguous: {ids}")
+    return matches[0]
+
+
+def _select_flows(
+    flow_set: list[dict[str, Any]],
+    refs: Sequence[FlowRef] | None,
+) -> list[dict[str, Any]]:
+    """Return selected flows, preserving set order when refs is None."""
+    if refs is None:
+        return list(flow_set)
+    return [_resolve_flow_ref(flow_set, ref) for ref in refs]
+
+
+class FlowReplSession:
+    """Mutable REPL facade over a resolved mitmweb flow set."""
+
+    def __init__(
+        self,
+        client: MitmwebClient,
+        flow_set: list[dict[str, Any]],
+        *,
+        flows_cfg: Any | None = None,
+        jq_filter: Sequence[str] | None = None,
+    ) -> None:
+        default_filters = getattr(flows_cfg, "default_jq_filters", []) if flows_cfg is not None else []
+        self.client = client
+        self.default_jq_filters = [str(filter_str) for filter_str in default_filters]
+        self.jq_filter = [str(filter_str) for filter_str in (jq_filter or [])]
+        self.flows: list[dict[str, Any]] = []
+        self.ids: list[str] = []
+        self._set_flows(flow_set)
+
+    def __repr__(self) -> str:
+        return f"FlowReplSession(flows={len(self.flows)})"
+
+    def _set_flows(self, flow_set: list[dict[str, Any]]) -> None:
+        self.flows[:] = flow_set
+        self.ids[:] = [str(flow["id"]) for flow in flow_set]
+
+    def _selected(self, refs: Sequence[FlowRef]) -> list[dict[str, Any]]:
+        return _select_flows(self.flows, refs or None)
+
+    def flow(self, ref: FlowRef = 0) -> dict[str, Any]:
+        """Return a flow dict by index, exact id, id prefix, or existing flow dict."""
+        return _resolve_flow_ref(self.flows, ref)
+
+    def flow_id(self, ref: FlowRef = 0) -> str:
+        """Return a full flow id from any accepted flow reference."""
+        return str(self.flow(ref)["id"])
+
+    def show(self, *, json_output: bool = False) -> None:
+        """Render the current flow set with the same table used by ``flows list``."""
+        _do_list(Console(), self.flows, json_output=json_output)
+
+    def refresh(self) -> list[dict[str, Any]]:
+        """Reload flows from mitmweb and reapply config + CLI filters."""
+        flow_set = self.client.list_flows()
+        for filter_str in [*self.default_jq_filters, *self.jq_filter]:
+            flow_set = _run_jq(flow_set, filter_str)
+        self._set_flows(list(flow_set))
+        return self.flows
+
+    def apply(self, filter_str: str) -> list[dict[str, Any]]:
+        """Apply a jq array filter to the current in-memory flow set."""
+        self._set_flows(_run_jq(self.flows, filter_str))
+        return self.flows
+
+    def request(self, ref: FlowRef = 0, *, pretty: bool = True) -> str:
+        """Return a flow's request body."""
+        text = self.client.get_request_body(self.flow_id(ref)).decode("utf-8", errors="replace")
+        return _format_body(text) if pretty else text
+
+    def response(self, ref: FlowRef = 0, *, pretty: bool = True) -> str:
+        """Return a flow's response body."""
+        text = self.client.get_response_body(self.flow_id(ref)).decode("utf-8", errors="replace")
+        return _format_body(text) if pretty else text
+
+    def diff(self, left: FlowRef = 0, right: FlowRef = 1) -> None:
+        """Diff request bodies for two flows."""
+        left_id = self.flow_id(left)
+        right_id = self.flow_id(right)
+        _git_diff(
+            self.request(left, pretty=True),
+            self.request(right, pretty=True),
+            f"flow:{left_id[:8]}",
+            f"flow:{right_id[:8]}",
+        )
+
+    def compare(self, *refs: FlowRef) -> None:
+        """Diff client-vs-forwarded request and provider-vs-client response for selected flows."""
+        _do_compare(self.client, self._selected(refs))
+
+    def dump(self, *refs: FlowRef, path: str | Path | None = None) -> str | Path:
+        """Dump selected flows as HAR JSON, optionally writing it to ``path``."""
+        flow_ids = [str(flow["id"]) for flow in self._selected(refs)]
+        har = self.client.dump_har(flow_ids)
+        if path is None:
+            print(har)
+            return har
+        output_path = Path(path)
+        output_path.write_text(har)
+        return output_path
+
+    def shape(self, provider: str, *refs: FlowRef) -> dict[str, Any]:
+        """Save selected flows as a provider shape and return the mitmproxy command summary."""
+        flow_ids = [str(flow["id"]) for flow in self._selected(refs)]
+        return self.client.save_shape(flow_ids, provider)
+
+    def clear(self, *refs: FlowRef) -> int:
+        """Delete selected flows from mitmweb and refresh the current set."""
+        selected = self._selected(refs)
+        for flow in selected:
+            self.client.delete_flow(str(flow["id"]))
+        self.refresh()
+        return len(selected)
+
+    def save_request(self, ref: FlowRef = 0, path: str | Path | None = None) -> Path:
+        """Write a pretty request body to disk."""
+        flow_id = self.flow_id(ref)
+        output_path = Path(path) if path is not None else Path(f"{flow_id[:8]}-request.json")
+        output_path.write_text(self.request(ref, pretty=True))
+        return output_path
+
+    def save_response(self, ref: FlowRef = 0, path: str | Path | None = None) -> Path:
+        """Write a pretty response body to disk."""
+        flow_id = self.flow_id(ref)
+        output_path = Path(path) if path is not None else Path(f"{flow_id[:8]}-response.json")
+        output_path.write_text(self.response(ref, pretty=True))
+        return output_path
 
 
 # --- Per-command handlers ---
@@ -510,11 +675,96 @@ def _do_clear(
     console.print(f"Cleared {len(flow_set)} flow(s).")
 
 
+def _repl_namespace(session: FlowReplSession) -> dict[str, Any]:
+    """Build the user namespace for ``flows repl``."""
+    return {
+        "session": session,
+        "client": session.client,
+        "flows": session.flows,
+        "ids": session.ids,
+        "show": session.show,
+        "jq": session.apply,
+        "refresh": session.refresh,
+        "reload": session.refresh,
+        "flow": session.flow,
+        "flow_id": session.flow_id,
+        "request": session.request,
+        "response": session.response,
+        "diff": session.diff,
+        "compare": session.compare,
+        "dump": session.dump,
+        "shape": session.shape,
+        "clear": session.clear,
+        "save_request": session.save_request,
+        "save_response": session.save_response,
+    }
+
+
+def _repl_banner(session: FlowReplSession) -> str:
+    helper_names = (
+        "show",
+        "jq",
+        "refresh",
+        "flow",
+        "request",
+        "response",
+        "diff",
+        "compare",
+        "dump",
+        "shape",
+        "clear",
+        "save_request",
+        "save_response",
+    )
+    helpers = ", ".join(helper_names)
+    return (
+        f"ccproxy flows repl: {len(session.flows)} flow(s) loaded\n"
+        f"session, client, flows, ids, and helpers are available: {helpers}\n"
+        "Examples: show(); request(0); diff(0, 1); jq('map(select(.response.status_code == 500))')"
+    )
+
+
+def _install_repl_history(history_path: Path) -> None:
+    with contextlib.suppress(ImportError):
+        import readline
+
+        history_path.parent.mkdir(parents=True, exist_ok=True)
+        with contextlib.suppress(FileNotFoundError):
+            readline.read_history_file(str(history_path))
+        atexit.register(readline.write_history_file, str(history_path))
+
+
+def _embed_repl(namespace: dict[str, Any], banner: str) -> None:
+    """Launch IPython when present, falling back to the stdlib interactive console."""
+    _install_repl_history(Path.home() / ".ccproxy-flows-repl-history")
+    with contextlib.suppress(ImportError):
+        ipython = importlib.import_module("IPython")
+        embed = getattr(ipython, "embed", None)
+        if callable(embed):
+            cast(Callable[..., None], embed)(user_ns=namespace, banner1=banner)
+            return
+
+    console = code.InteractiveConsole(locals=namespace)
+    console.interact(banner=banner, exitmsg="")
+
+
+def _do_repl(
+    client: MitmwebClient,
+    flow_set: list[dict[str, Any]],
+    *,
+    flows_cfg: Any,
+    jq_filter: Sequence[str],
+) -> None:
+    """Start the interactive flows REPL."""
+    session = FlowReplSession(client, flow_set, flows_cfg=flows_cfg, jq_filter=jq_filter)
+    _embed_repl(_repl_namespace(session), _repl_banner(session))
+
+
 # --- Dispatch ---
 
 
 def handle_flows(
-    cmd: FlowsList | FlowsDump | FlowsDiff | FlowsCompare | FlowsShape | FlowsClear,
+    cmd: FlowsList | FlowsDump | FlowsDiff | FlowsCompare | FlowsShape | FlowsRepl | FlowsClear,
     _config_dir: Path,
 ) -> None:
     """Dispatch flows subcommand actions by isinstance."""
@@ -535,6 +785,8 @@ def handle_flows(
                 _do_compare(client, flow_set)
             elif isinstance(cmd, FlowsShape):
                 _do_shape(err, client, flow_set, provider=cmd.provider)
+            elif isinstance(cmd, FlowsRepl):
+                _do_repl(client, flow_set, flows_cfg=config.flows, jq_filter=cmd.jq_filter)
             elif isinstance(cmd, FlowsClear):
                 _do_clear(err, client, flow_set, clear_all=cmd.all)
     except httpx.ConnectError:
