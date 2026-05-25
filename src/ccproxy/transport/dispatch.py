@@ -29,6 +29,7 @@ from dataclasses import dataclass
 from typing import cast, get_args
 
 import httpx
+from curl_cffi.const import CurlOpt
 from curl_cffi.requests.impersonate import BrowserTypeLiteral
 from httpx_curl_cffi import AsyncCurlTransport
 
@@ -107,7 +108,10 @@ class _Cache:
                 return entry.client
 
             if fingerprint is None:
-                transport = AsyncCurlTransport(impersonate=impersonate)
+                transport = AsyncCurlTransport(
+                    impersonate=impersonate,
+                    curl_options={CurlOpt.HTTP_CONTENT_DECODING: 0},
+                )
             else:
                 transport = AsyncCurlTransport(**fingerprint.transport_kwargs())
             client = httpx.AsyncClient(transport=transport)

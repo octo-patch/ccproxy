@@ -29,6 +29,11 @@ _STRIP_SHAPE_HEADERS = {
     "host",
     "transfer-encoding",
     "connection",
+    # Internal ccproxy correlation header — meaningful only to the running
+    # process that observed the flow. No identity value persists into a
+    # shape, so strip at capture time. Apply-time defense in depth lives
+    # in EgressSanitizerAddon.
+    "x-ccproxy-flow-id",
 }
 
 
@@ -70,7 +75,7 @@ class ShapeCaptureAddon:
                 logger.warning("ccproxy.shape: no flow with id %s, skipping", fid)
                 missing.append(fid)
                 continue
-            if not _validate_flow(flow, provider, profile):
+            if not _validate_flow(flow, profile):
                 missing.append(fid)
                 continue
             fingerprint = _fingerprint_from_flow(flow, provider)
@@ -128,7 +133,6 @@ class ShapeCaptureAddon:
 
 def _validate_flow(
     flow: http.HTTPFlow,
-    provider: str,
     profile: object | None,
 ) -> bool:
     """Check that a flow is a valid API request suitable for shaping."""

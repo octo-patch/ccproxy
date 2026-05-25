@@ -156,15 +156,20 @@ class CapturedFingerprint:
         return hashlib.sha256(json.dumps(doc, sort_keys=True).encode()).hexdigest()[:16]
 
     def transport_kwargs(self) -> dict[str, Any]:
-        kwargs: dict[str, Any] = {
+        curl_options: dict[CurlOpt, Any] = {CurlOpt.HTTP_CONTENT_DECODING: 0}
+        # Disable libcurl's client-side Content-Encoding decoding so the
+        # sidecar forwards compressed bytes verbatim; mitmproxy's existing
+        # decoder handles Content-Encoding for both the upstream response
+        # to the client and the inspector capture. The Accept-Encoding
+        # request header still goes out on the wire via CURLOPT_ACCEPT_ENCODING,
+        # preserving the impersonated browser fingerprint.
+        if self.signature_algorithm_names:
+            curl_options[CurlOpt.SSL_SIG_HASH_ALGS] = ",".join(self.signature_algorithm_names)
+        return {
             "ja3": self.ja3_full,
             "http_version": _HTTP_VERSION_VALUES.get(self.http_version, CurlHttpVersion.V1_1),
+            "curl_options": curl_options,
         }
-        if self.signature_algorithm_names:
-            kwargs["curl_options"] = {
-                CurlOpt.SSL_SIG_HASH_ALGS: ",".join(self.signature_algorithm_names),
-            }
-        return kwargs
 
     def with_request_context(self, *, provider: str, user_agent: str, runtime_version: str) -> CapturedFingerprint:
         raw = self.to_dict()

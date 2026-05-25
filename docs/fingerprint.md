@@ -7,14 +7,22 @@ has to keep them separate:
 - **Provider-visible traffic**: the TLS connection made by ccproxy to the real provider.
 - **Mitmproxy flow data**: HTTP semantics after TLS has already been terminated.
 
-For the Anthropic path, `providers.anthropic.fingerprint_profile` opts routed
-reverse-proxy traffic into the in-process sidecar. The active code path is:
+The TLS fingerprint is treated as an inherent property of every captured
+shape: `ccproxy flows shape <provider>` writes the JA3/JA4 material parsed
+from the originating ClientHello into the same `.mflow` it persists. At
+runtime, any provider whose shape carries an embedded fingerprint
+automatically replays through the impersonating sidecar — no explicit
+`providers.<name>.fingerprint_profile` is required.
+
+The active code path:
 
 1. [`FingerprintCaptureAddon`](../src/ccproxy/inspector/fingerprint_capture.py)
    reads mitmproxy's TLS ClientHello event, computes JA3/JA4 material, and
    stores it on the later HTTP flow as `metadata_from_flow(flow).fingerprint.client`
-   (`ccproxy.fingerprint.client` in serialized flow metadata).
-2. [`ShapeCaptureAddon`](../src/ccproxy/inspector/shape_capturer.py) writes
+   (`ccproxy.fingerprint.client` in serialized flow metadata). This fires
+   for both reverse-proxy and WireGuard listeners, so any traffic that
+   reaches mitmproxy contributes a fingerprint.
+2. [`ShapeCaptureAddon`](../src/ccproxy/inspector/shape_capturer.py) embeds
    that profile into `shapes/{provider}.mflow` metadata as
    `ccproxy.fingerprint.profile` when `ccproxy flows shape {provider}` is run.
    Bundled fallbacks carry the same metadata in
@@ -24,23 +32,111 @@ reverse-proxy traffic into the in-process sidecar. The active code path is:
 4. [`transform`](../src/ccproxy/inspector/routes/transform.py) rewrites the
    reverse-proxy request to `https://api.anthropic.com/v1/messages`.
 5. [`TransportOverrideAddon`](../src/ccproxy/inspector/transport_override_addon.py)
-   sees the provider's `fingerprint_profile`, stores the real target URL in
-   `X-CCProxy-Target-Url`, stores the profile in `X-CCProxy-Impersonate`, and
+   resolves the fingerprint by precedence: an explicit
+   `providers.<name>.fingerprint_profile` wins; otherwise it calls
+   `ShapeStore.pick_fingerprint(provider.type)` and engages the sidecar with
+   `provider.type` as the impersonate key when the shape carries a captured
+   profile. Either way it stores the real target URL in
+   `X-CCProxy-Target-Url`, the profile in `X-CCProxy-Impersonate`, and
    rewrites the mitmproxy destination to the localhost sidecar.
 6. [`sidecar`](../src/ccproxy/transport/sidecar.py) forwards the request through
    [`httpx-curl-cffi`](../src/ccproxy/transport/dispatch.py). Browser profile
    names use curl-cffi impersonation directly; shape-backed names such as
    `anthropic` load the captured JA3/signature-algorithm/http-version profile.
 
-Captured shape metadata is preserved in the `.mflow` artifact. Runtime shape
-application stamps only request headers, query parameters, and body content
-onto the active provider request; captured `.mflow` metadata is not copied onto
-the active request flow unless code explicitly asks for a specific metadata
-entry such as the embedded fingerprint profile.
+Set `providers.<name>.fingerprint_profile` only as an override — either to
+force a `curl-cffi` browser name (e.g. `chrome131` for `perplexity_pro`,
+which has no captured shape counterpart) or to reuse another provider's
+captured shape.
 
-WireGuard reference traffic is still useful for comparing against the real
-client, but it does not automatically exercise the sidecar. It is normally
-passed through as already-addressed upstream traffic.
+## Capture a Profile From Your CLI
+
+Any HTTP client that can be driven through `ccproxy run --inspect` becomes a
+source of TLS fingerprints. The WireGuard namespace terminates TLS on the
+mitmproxy side, so `FingerprintCaptureAddon` sees the real ClientHello and
+attaches it to the flow as `ccproxy.fingerprint.client`.
+
+```bash
+# 1. Drive your CLI through the namespaced jail.
+ccproxy run --inspect -- <your-tool> <args>
+
+# 2. Find the captured flow for the provider you want to shape.
+ccproxy flows list --jq '
+  .[] | select(.request.pretty_host == "api.anthropic.com"
+            and (.request.path | startswith("/v1/messages"))) | .id
+'
+
+# 3. Persist it as the provider's shape (--mflow writes the full flow,
+#    embedding ccproxy.fingerprint.profile in its metadata).
+ccproxy flows shape anthropic --jq 'map(select(.id == "<flow-id>"))' --mflow
+
+# 4. Done. The next outbound request that ccproxy routes through this
+#    provider replays the captured JA3 + signature algorithms via the
+#    in-process curl-cffi sidecar. Verify with the tshark recipes below.
+```
+
+Substitute `anthropic` for any provider declared in `ccproxy.yaml` (e.g.
+`openai`, `deepseek`, a custom provider you added). The provider does not
+need an explicit `fingerprint_profile` — the shape's embedded fingerprint
+drives the runtime impersonation automatically.
+
+Per-CLI fingerprinting means you can:
+
+- Capture from a vendor's official SDK and route arbitrary harnesses
+  through ccproxy as that SDK.
+- Swap impersonation by replacing
+  `~/.config/ccproxy/shapes/<provider>.mflow` — no daemon restart, no
+  config change.
+- A/B different clients by capturing each into a distinct provider entry
+  that shares the same upstream host.
+
+WireGuard reference traffic also remains useful for comparing against the
+real client, even when not shaped — `tls_clienthello` always populates
+`ccproxy.fingerprint.client` so the inspector and MCP tools can read it.
+
+## Bundled vs personal shapes
+
+There are two on-disk tiers, with deliberately different fidelity:
+
+- **Personal shapes** at `~/.config/ccproxy/shapes/<provider>.mflow` —
+  written by `ccproxy flows shape <provider>` from a real captured
+  request. Capture is **deliberately generous**: every observed header
+  (except actual auth tokens), the full body, and the
+  `ccproxy.fingerprint.profile` metadata all persist. The runtime
+  selectively applies fields per `shaping.providers.<name>` config —
+  saving more on disk costs nothing and gives future apply-time policy
+  changes room to work without recapture.
+- **Bundled shapes** at `src/ccproxy/templates/shapes/<provider>.mflow` —
+  shipped in the public repo as the working baseline. They MUST NOT
+  carry any capturer identity (UUIDs, `metadata.user_id` real values,
+  `diagnostics.previous_message_id`, ccproxy-internal correlation
+  headers). `scripts/package-mflows.py` is the one-way distillation:
+
+  ```bash
+  # capture a fresh shape, then package it for the public bundle:
+  ccproxy flows shape anthropic --mflow            # → ~/.config/...
+  uv run python scripts/package-mflows.py \
+      ~/.config/ccproxy/shapes/anthropic.mflow \
+      --out src/ccproxy/templates/shapes/anthropic.mflow
+
+  # pre-commit gate runs in --verify mode:
+  uv run python scripts/package-mflows.py --verify
+  ```
+
+  The pre-commit hook (`.pre-commit-config.yaml` → `package-mflows-verify`)
+  blocks commits if a bundled `.mflow` contains a header in the scrubber's
+  drop list, a non-placeholder `metadata.user_id`, a non-null
+  `diagnostics.previous_message_id`, a non-empty `tools[]`, or any
+  flow-metadata key other than `ccproxy.fingerprint.profile`.
+
+**Degradation note.** The bundled shape's `metadata.user_id` is an
+all-zero UUID triple. If Anthropic ever turns identity-presence in
+`metadata.user_id` into a detection vector, every install relying on the
+bundled fallback will be flagged uniformly. The cure is per-user
+capture: `ccproxy flows shape anthropic` → personal shape carries your
+real `device_id` / `account_uuid` and survives this class of detection.
+The same applies to any future identity-bearing field that gets added to
+the scrubber's drop list.
 
 ## Tooling
 

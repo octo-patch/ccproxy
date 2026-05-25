@@ -1,7 +1,8 @@
 """Tests for ccproxy.inspector.transport_override_addon.TransportOverrideAddon.
 
-Covers: no-op when oauth_provider absent, no-op when provider unknown,
-no-op when fingerprint_profile=None, and full rewrite when profile is set.
+Covers the engagement precedence: explicit ``Provider.fingerprint_profile``
+wins, otherwise falls back to ``ShapeStore.pick_fingerprint(provider.type)``,
+otherwise leaves the flow on mitmproxy's native transport.
 """
 
 from __future__ import annotations
@@ -13,10 +14,61 @@ import pytest
 
 from ccproxy.config import CCProxyConfig, Provider, set_config_instance
 from ccproxy.flows.store import FlowRecord, InspectorMeta
+from ccproxy.inspector.fingerprint import CapturedFingerprint
 from ccproxy.inspector.transport_override_addon import TransportOverrideAddon
 from ccproxy.transport.sidecar import IMPERSONATE_HEADER, TARGET_URL_HEADER
 
 _SIDECAR_PORT = 19200
+
+
+# ---------------------------------------------------------------------------
+# Shape-store stub fixture
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def shape_fingerprint(monkeypatch: pytest.MonkeyPatch):
+    """Stub ``ShapeStore.pick_fingerprint`` with a configurable return value.
+
+    Returns a setter that takes the desired ``CapturedFingerprint | None`` to
+    return from the next ``get_store().pick_fingerprint(...)`` call. Defaults
+    to ``None`` (no shape fingerprint available) so tests that don't set it
+    behave as if no shape exists.
+    """
+    state: dict[str, CapturedFingerprint | None] = {"value": None}
+    fake_store = MagicMock()
+    fake_store.pick_fingerprint = MagicMock(side_effect=lambda _provider: state["value"])
+    monkeypatch.setattr("ccproxy.shaping.store.get_store", lambda: fake_store)
+
+    def setter(value: CapturedFingerprint | None) -> None:
+        state["value"] = value
+
+    return setter
+
+
+def _make_captured_fingerprint(provider: str = "anthropic") -> CapturedFingerprint:
+    """Build a minimal valid CapturedFingerprint for fallback tests."""
+    return CapturedFingerprint(
+        schema_version=1,
+        source="test",
+        captured_at="2026-05-24T00:00:00Z",
+        sni="api.anthropic.com",
+        alpn_protocols=("http/1.1",),
+        legacy_version=0x0303,
+        supported_versions=("0x0304", "0x0303"),
+        cipher_suites=("0x1301", "0x1302", "0x1303"),
+        extensions=("0x0000", "0x0010"),
+        supported_groups=("0x001d",),
+        ec_point_formats=("0x00",),
+        signature_algorithms=("0x0403", "0x0804"),
+        signature_algorithm_names=("ecdsa_secp256r1_sha256", "rsa_pss_rsae_sha256"),
+        ja3="769,4865-4866-4867,0-10,29,0",
+        ja3_full="t13d1714h1_5b57614c22b0_43ade6aba3df",
+        ja4="t13d1714h1",
+        ja4_r="t13d1714h1_test",
+        http_version="http/1.1",
+        provider=provider,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -119,9 +171,10 @@ class TestNoopPaths:
         assert flow.request.host == original_host
         assert "ccproxy.transport_override" not in flow.metadata
 
-    async def test_noop_when_fingerprint_profile_is_none(self) -> None:
-        """Provider exists but fingerprint_profile=None — flow is untouched."""
+    async def test_noop_when_fingerprint_profile_is_none_and_no_shape(self, shape_fingerprint) -> None:
+        """Provider exists, fingerprint_profile=None, no shape fingerprint — flow is untouched."""
         _set_provider("anthropic", fingerprint_profile=None)
+        shape_fingerprint(None)
         flow = _make_flow(oauth_provider="anthropic")
         original_host = flow.request.host
         original_port = flow.request.port
@@ -133,8 +186,9 @@ class TestNoopPaths:
         assert flow.request.port == original_port
         assert "ccproxy.transport_override" not in flow.metadata
 
-    async def test_noop_leaves_headers_clean_when_no_profile(self) -> None:
+    async def test_noop_leaves_headers_clean_when_no_profile_and_no_shape(self, shape_fingerprint) -> None:
         _set_provider("anthropic", fingerprint_profile=None)
+        shape_fingerprint(None)
         flow = _make_flow(oauth_provider="anthropic")
 
         addon = TransportOverrideAddon(sidecar_port=_SIDECAR_PORT)
@@ -383,9 +437,12 @@ class TestForwardedRequestCapture:
         assert flow.request.port == _SIDECAR_PORT
         assert flow.metadata.get("ccproxy.transport_override") is True
 
-    async def test_no_fingerprint_profile_leaves_forwarded_request_none(self) -> None:
-        """Provider with fingerprint_profile=None — forwarded_request stays None."""
+    async def test_no_fingerprint_profile_and_no_shape_leaves_forwarded_request_none(
+        self, shape_fingerprint
+    ) -> None:
+        """Provider with fingerprint_profile=None AND no shape — forwarded_request stays None."""
         _set_provider("anthropic", fingerprint_profile=None)
+        shape_fingerprint(None)
         flow = _make_flow(oauth_provider="anthropic")
         record = FlowRecord(direction="inbound")
         flow.metadata[InspectorMeta.RECORD] = record
@@ -394,6 +451,85 @@ class TestForwardedRequestCapture:
         await addon.request(flow)
 
         assert record.forwarded_request is None
+
+
+# ---------------------------------------------------------------------------
+# Implicit shape-driven path — fingerprint_profile=None + shape has fingerprint
+# ---------------------------------------------------------------------------
+
+
+class TestShapeImplicitPath:
+    """When Provider.fingerprint_profile is None and the shape carries a
+    CapturedFingerprint, sidecar engages implicitly keyed by provider.type."""
+
+    async def test_shape_fingerprint_engages_sidecar(self, shape_fingerprint) -> None:
+        _set_provider("anthropic", fingerprint_profile=None)
+        shape_fingerprint(_make_captured_fingerprint())
+        flow = _make_flow(oauth_provider="anthropic")
+
+        addon = TransportOverrideAddon(sidecar_port=_SIDECAR_PORT)
+        await addon.request(flow)
+
+        assert flow.request.host == "127.0.0.1"
+        assert flow.request.port == _SIDECAR_PORT
+        assert flow.request.scheme == "http"
+
+    async def test_shape_fingerprint_uses_provider_type_as_impersonate_key(
+        self, shape_fingerprint
+    ) -> None:
+        """The IMPERSONATE_HEADER carries provider.type (= shape lookup key)."""
+        provider = Provider(
+            host="api.anthropic.com",
+            type="anthropic",
+            fingerprint_profile=None,
+        )
+        cfg = CCProxyConfig(providers={"some-alias": provider})
+        set_config_instance(cfg)
+        shape_fingerprint(_make_captured_fingerprint())
+        flow = _make_flow(oauth_provider="some-alias")
+
+        addon = TransportOverrideAddon(sidecar_port=_SIDECAR_PORT)
+        await addon.request(flow)
+
+        assert flow.request.headers[IMPERSONATE_HEADER] == "anthropic"
+        assert flow.metadata["ccproxy.fingerprint_profile"] == "anthropic"
+
+    async def test_explicit_profile_wins_over_shape_fingerprint(self, shape_fingerprint) -> None:
+        """Explicit Provider.fingerprint_profile takes precedence; shape is not consulted."""
+        _set_provider("anthropic", fingerprint_profile="chrome131")
+        shape_fingerprint(_make_captured_fingerprint())
+
+        flow = _make_flow(oauth_provider="anthropic")
+
+        addon = TransportOverrideAddon(sidecar_port=_SIDECAR_PORT)
+        await addon.request(flow)
+
+        assert flow.request.headers[IMPERSONATE_HEADER] == "chrome131"
+        assert flow.metadata["ccproxy.fingerprint_profile"] == "chrome131"
+
+    async def test_target_url_preserved_in_implicit_path(self, shape_fingerprint) -> None:
+        _set_provider("anthropic", fingerprint_profile=None)
+        shape_fingerprint(_make_captured_fingerprint())
+        pretty_url = "https://api.anthropic.com/v1/messages"
+        flow = _make_flow(oauth_provider="anthropic", pretty_url=pretty_url)
+
+        addon = TransportOverrideAddon(sidecar_port=_SIDECAR_PORT)
+        await addon.request(flow)
+
+        assert flow.request.headers[TARGET_URL_HEADER] == pretty_url
+
+    async def test_forwarded_request_captured_in_implicit_path(self, shape_fingerprint) -> None:
+        _set_provider("anthropic", fingerprint_profile=None)
+        shape_fingerprint(_make_captured_fingerprint())
+        flow = _make_flow(oauth_provider="anthropic")
+        record = FlowRecord(direction="inbound")
+        flow.metadata[InspectorMeta.RECORD] = record
+
+        addon = TransportOverrideAddon(sidecar_port=_SIDECAR_PORT)
+        await addon.request(flow)
+
+        assert record.forwarded_request is not None
+        assert record.forwarded_request.url == "https://api.anthropic.com/v1/messages"
 
 
 # ---------------------------------------------------------------------------

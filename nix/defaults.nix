@@ -12,7 +12,6 @@
         host = "api.anthropic.com";
         path = "/v1/messages";
         type = "anthropic";
-        fingerprint_profile = "anthropic";
       };
       gemini = {
         auth = {
@@ -146,6 +145,7 @@
           content_fields = [
             "model" "messages" "tools" "tool_choice" "system" "thinking" "context_management"
             "stream" "max_tokens" "temperature" "top_p" "top_k" "stop_sequences"
+            "diagnostics"
           ];
           merge_strategies = { system = "prepend_shape:2"; };
           shape_hooks = [

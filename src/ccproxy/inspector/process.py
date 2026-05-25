@@ -154,6 +154,7 @@ def _build_addons(
         ForwardedRequestContentview,
         ProviderResponseContentview,
     )
+    from ccproxy.inspector.egress_sanitizer_addon import EgressSanitizerAddon
     from ccproxy.inspector.fingerprint_capture import FingerprintCaptureAddon
     from ccproxy.inspector.gemini_addon import GeminiAddon
     from ccproxy.inspector.multi_har_saver import MultiHARSaver
@@ -220,6 +221,10 @@ def _build_addons(
     addons.append(OAuthAddon())
     addons.append(GeminiAddon())
     addons.append(PerplexityAddon())
+    # Last addon in the chain: drops ccproxy-internal x-ccproxy-* headers
+    # after every other addon has had a chance to read them. Keeps our
+    # correlation IDs from leaking onto the wire to upstream providers.
+    addons.append(EgressSanitizerAddon())
 
     return addons
 

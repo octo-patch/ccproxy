@@ -1,11 +1,21 @@
 """Rewrite ``flow.request`` to the in-process sidecar for impersonated outbound.
 
-Selection is keyed on the ccproxy metadata facade. When the resolved
-:class:`~ccproxy.config.Provider` declares a ``fingerprint_profile``, this
-addon stashes the real target in ``X-CCProxy-Target-Url`` and the profile in
-``X-CCProxy-Impersonate``, then rewrites destination to ``127.0.0.1:<sidecar>``.
-mitmproxy's existing upstream pipeline does the rest — the sidecar makes the
-actual upstream call via ``httpx-curl-cffi`` and streams the response back.
+Selection is keyed on the ccproxy metadata facade. Engagement precedence,
+given a resolved :class:`~ccproxy.config.Provider`:
+
+1. ``Provider.fingerprint_profile`` set in config — always wins. Used for
+   browser-name overrides (``chrome131``, ``firefox144``) or to force a
+   different provider's shape.
+2. Unset, but ``ShapeStore.pick_fingerprint(provider.type)`` returns a
+   :class:`~ccproxy.inspector.fingerprint.CapturedFingerprint` — the
+   fingerprint is an inherent property of the captured shape, so sidecar
+   engages implicitly with ``provider.type`` as the impersonate key.
+3. Neither — mitmproxy's native transport is used unchanged.
+
+When engaged, the addon stashes the real target in ``X-CCProxy-Target-Url``
+and the profile in ``X-CCProxy-Impersonate``, then rewrites destination to
+``127.0.0.1:<sidecar>``. The sidecar makes the actual upstream call via
+``httpx-curl-cffi`` and streams the response back.
 """
 
 from __future__ import annotations
@@ -35,10 +45,17 @@ class TransportOverrideAddon:
             return
 
         provider = get_config().providers.get(provider_name)
-        if provider is None or provider.fingerprint_profile is None:
+        if provider is None:
             return
 
         profile = provider.fingerprint_profile
+        if profile is None:
+            from ccproxy.shaping.store import get_store
+
+            if get_store().pick_fingerprint(provider.type) is None:
+                return
+            profile = provider.type
+
         target_url = flow.request.pretty_url
 
         record = metadata.record

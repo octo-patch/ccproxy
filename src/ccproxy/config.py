@@ -455,12 +455,22 @@ class Provider(BaseModel):
     from what the destination speaks."""
 
     fingerprint_profile: str | None = None
-    """Transport fingerprint profile name.
+    """Explicit override for the transport fingerprint profile name.
 
-    Browser profiles (e.g. ``"chrome131"``) map directly to curl-cffi
-    impersonation. Shape-backed profiles (e.g. ``"anthropic"``) resolve through
-    the provider shape's ``.mflow`` metadata, with the bundled shape as fallback.
-    ``None`` keeps mitmproxy's native transport.
+    Resolution precedence in
+    :class:`~ccproxy.inspector.transport_override_addon.TransportOverrideAddon`:
+
+    1. This field set — always wins. Browser profiles (``"chrome131"``,
+       ``"firefox144"``) map directly to ``curl-cffi`` impersonation;
+       shape-backed names (``"anthropic"``) resolve through the named
+       shape's ``.mflow`` metadata, with the bundled shape as fallback.
+       Use this to force a different provider's shape or a browser-name
+       profile for providers that don't have a captured shape.
+    2. ``None`` and a shape for ``type`` exists with embedded
+       :class:`~ccproxy.inspector.fingerprint.CapturedFingerprint` —
+       sidecar engages implicitly keyed by ``type``. The fingerprint is
+       treated as an inherent property of the captured shape.
+    3. ``None`` and no shape fingerprint — mitmproxy's native transport.
     """
 
     @field_validator("type", mode="before")
@@ -638,6 +648,20 @@ class McpConfig(BaseModel):
     buffer: McpBufferConfig = Field(default_factory=McpBufferConfig)
 
 
+def _default_hooks() -> dict[str, list[str | dict[str, Any]]]:
+    return {
+        "inbound": [
+            "ccproxy.hooks.forward_oauth",
+            "ccproxy.hooks.extract_session_id",
+        ],
+        "outbound": [
+            "ccproxy.hooks.inject_mcp_notifications",
+            "ccproxy.hooks.verbose_mode",
+            "ccproxy.hooks.shape",
+        ],
+    }
+
+
 class CCProxyConfig(BaseSettings):
     """Main configuration for ccproxy that reads from ccproxy.yaml."""
 
@@ -737,19 +761,7 @@ class CCProxyConfig(BaseSettings):
 
     # Hook configurations — either a flat list (all inbound) or a dict
     # with ``inbound`` and ``outbound`` keys for two-stage pipeline.
-    hooks: dict[str, list[str | dict[str, Any]]] = Field(
-        default_factory=lambda: {  # type: ignore[arg-type]
-            "inbound": [
-                "ccproxy.hooks.forward_oauth",
-                "ccproxy.hooks.extract_session_id",
-            ],
-            "outbound": [
-                "ccproxy.hooks.inject_mcp_notifications",
-                "ccproxy.hooks.verbose_mode",
-                "ccproxy.hooks.shape",
-            ],
-        },
-    )
+    hooks: dict[str, list[str | dict[str, Any]]] = Field(default_factory=lambda: _default_hooks())
 
     ccproxy_config_path: Path = Field(default_factory=lambda: Path("./ccproxy.yaml"))
 

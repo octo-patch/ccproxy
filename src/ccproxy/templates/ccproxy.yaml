@@ -80,7 +80,7 @@ ccproxy:
   providers:
     anthropic:
       auth:
-        command: jq -r '.claudeAiOauth.accessToken' ~/.claude/.credentials.json
+        command: printenv CLAUDE_CODE_OAUTH_TOKEN
         type: command
       host: api.anthropic.com
       path: /v1/messages
@@ -136,6 +136,7 @@ ccproxy:
         - top_p
         - top_k
         - stop_sequences
+        - diagnostics
         merge_strategies:
           system: prepend_shape:2
         preserve_headers:
