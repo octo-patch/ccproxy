@@ -1,14 +1,14 @@
 """Shared constants and base exceptions for ccproxy."""
 
 
-class OAuthConfigError(ValueError):
-    """Raised when OAuth configuration is missing or invalid."""
+class AuthConfigError(ValueError):
+    """Raised when provider auth configuration is missing or invalid."""
 
 
-# Sentinel API key prefix that triggers OAuth token substitution from ccproxy config.
+# Sentinel API key prefix that triggers auth token substitution from ccproxy config.
 # Format: sk-ant-oat-ccproxy-{provider} where {provider} matches a key in providers.
 # Example: sk-ant-oat-ccproxy-anthropic uses the token from providers.anthropic.auth
-OAUTH_SENTINEL_PREFIX = "sk-ant-oat-ccproxy-"
+AUTH_SENTINEL_PREFIX = "sk-ant-oat-ccproxy-"
 
 # Regex patterns for detecting sensitive header values to redact.
 # Pattern captures the prefix to preserve (e.g., "Bearer sk-ant-") while redacting middle.

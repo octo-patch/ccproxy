@@ -463,7 +463,7 @@ ccproxy:
   port: 4000
   hooks:
     inbound:
-      - ccproxy.hooks.forward_oauth
+      - ccproxy.hooks.inject_auth
 """)
         log_file = tmp_path / "ccproxy.log"
         log_file.write_text("log content")
@@ -873,7 +873,7 @@ ccproxy:
     port: 8084
   hooks:
     inbound:
-      - ccproxy.hooks.forward_oauth
+      - ccproxy.hooks.inject_auth
       - ccproxy.hooks.extract_session_id
     outbound:
       - ccproxy.hooks.inject_mcp_notifications
@@ -893,7 +893,7 @@ ccproxy:
 
         assert "Pipeline" in out
         for hook_name in (
-            "forward_oauth",
+            "inject_auth",
             "extract_session_id",
             "inject_mcp_notifications",
             "verbose_mode",

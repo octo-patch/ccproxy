@@ -1,7 +1,7 @@
-"""Regression: legacy auth-source YAML formats still resolve after the oauth/ split.
+"""Regression: legacy auth-source YAML formats still resolve after source extraction.
 
 The split moved CredentialSource/AnyAuthSource out of config.py and into a
-discriminated union under ccproxy.oauth.sources. parse_auth_source must
+discriminated union under ccproxy.auth.sources. parse_auth_source must
 continue to accept:
 
 1. Bare command strings (most common form in user configs).
@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import pytest
 
-from ccproxy.oauth.sources import (
+from ccproxy.auth.sources import (
     AnthropicAuthSource,
     CommandAuthSource,
     FileAuthSource,

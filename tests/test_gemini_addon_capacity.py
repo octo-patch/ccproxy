@@ -78,7 +78,7 @@ def _make_flow(
         request_data={},
         is_streaming=is_streaming,
     )
-    flow.metadata = {InspectorMeta.RECORD: record, "ccproxy.oauth_provider": "gemini"}
+    flow.metadata = {InspectorMeta.RECORD: record, "ccproxy.auth_provider": "gemini"}
     return flow
 
 
@@ -708,7 +708,7 @@ class TestResponseHeadersDeferEntrypoint:
             request_data={},
             is_streaming=True,
         )
-        flow.metadata = {InspectorMeta.RECORD: record, "ccproxy.oauth_provider": "gemini"}
+        flow.metadata = {InspectorMeta.RECORD: record, "ccproxy.auth_provider": "gemini"}
 
         addon = GeminiAddon()
         await addon.responseheaders(flow)

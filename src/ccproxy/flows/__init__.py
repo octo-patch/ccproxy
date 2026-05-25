@@ -10,7 +10,6 @@ CLI subcommands:
     ccproxy flows dump              [--jq FILTER]...
     ccproxy flows diff              [--jq FILTER]...
     ccproxy flows compare           [--jq FILTER]...
-    ccproxy flows shape PROVIDER [--mflow] [--jq FILTER]...
     ccproxy flows clear    [--all]  [--jq FILTER]...
 
 HAR output from ``dump`` is built server-side by the ``ccproxy.dump`` mitmproxy
@@ -198,24 +197,6 @@ class FlowsCompare(_FlowsBase):
     """
 
 
-class FlowsShape(_FlowsBase):
-    """Generate a provider shape patch from the resolved flow set.
-
-    By default, writes a quilt-style patch queue under
-    ``$CCPROXY_CONFIG_DIR/shapes/{provider}/``. Use ``--mflow`` to write
-    an explicit request-only ``{provider}.mflow`` override.
-
-        ccproxy flows shape anthropic
-        ccproxy flows shape anthropic --mflow
-    """
-
-    provider: Annotated[str, tyro.conf.Positional, tyro.conf.arg(metavar="PROVIDER")]
-    """Target provider name (e.g., 'anthropic', 'gemini')."""
-
-    mflow: bool = False
-    """Write a sanitized request-only .mflow override instead of a patch."""
-
-
 class FlowsRepl(_FlowsBase):
     """Open an interactive Python REPL over the resolved flow set."""
 
@@ -232,7 +213,6 @@ Flows = Annotated[
     | Annotated[FlowsDump, tyro.conf.subcommand(name="dump")]
     | Annotated[FlowsDiff, tyro.conf.subcommand(name="diff")]
     | Annotated[FlowsCompare, tyro.conf.subcommand(name="compare")]
-    | Annotated[FlowsShape, tyro.conf.subcommand(name="shape")]
     | Annotated[FlowsRepl, tyro.conf.subcommand(name="repl")]
     | Annotated[FlowsClear, tyro.conf.subcommand(name="clear")],
     tyro.conf.subcommand(
@@ -639,39 +619,6 @@ def _do_compare(
         _git_diff(fwd_response, cli_response, f"provider:{flow_id[:8]}", f"client:{flow_id[:8]}")
 
 
-def _do_shape(
-    console: Console,
-    client: MitmwebClient,
-    flow_set: list[dict[str, Any]],
-    *,
-    provider: str,
-    mflow: bool,
-) -> None:
-    """Save a shape artifact from the flow set."""
-    if not flow_set:
-        console.print("[red]No flows in set.[/red]")
-        sys.exit(1)
-    if not mflow and len(flow_set) != 1:
-        console.print("[red]Patch shape generation requires exactly one flow in the set.[/red]")
-        sys.exit(1)
-    flow_ids = [f["id"] for f in flow_set]
-    mode = "mflow" if mflow else "patch"
-    result = client.save_shape(flow_ids, provider, mode=mode)
-    if mode == "patch":
-        status = str(result.get("status", "ok"))
-        patch = result.get("patch")
-        if status == "unchanged":
-            console.print(f"Shape patch for [bold]{result['provider']}[/bold] is unchanged.")
-            return
-        console.print(f"Saved shape patch for [bold]{result['provider']}[/bold]: {patch}")
-        return
-    console.print(
-        f"Saved .mflow shape for [bold]{result['provider']}[/bold]: "
-        f"{result['flows_saved']} flow(s) saved"
-        + (f", {len(result.get('missing', []))} missing" if result.get("missing") else "")
-    )
-
-
 def _do_clear(
     console: Console,
     client: MitmwebClient,
@@ -781,7 +728,7 @@ def _do_repl(
 
 
 def handle_flows(
-    cmd: FlowsList | FlowsDump | FlowsDiff | FlowsCompare | FlowsShape | FlowsRepl | FlowsClear,
+    cmd: FlowsList | FlowsDump | FlowsDiff | FlowsCompare | FlowsRepl | FlowsClear,
     _config_dir: Path,
 ) -> None:
     """Dispatch flows subcommand actions by isinstance."""
@@ -800,8 +747,6 @@ def handle_flows(
                 _do_diff(client, flow_set)
             elif isinstance(cmd, FlowsCompare):
                 _do_compare(client, flow_set)
-            elif isinstance(cmd, FlowsShape):
-                _do_shape(err, client, flow_set, provider=cmd.provider, mflow=cmd.mflow)
             elif isinstance(cmd, FlowsRepl):
                 _do_repl(client, flow_set, flows_cfg=config.flows, jq_filter=cmd.jq_filter)
             elif isinstance(cmd, FlowsClear):

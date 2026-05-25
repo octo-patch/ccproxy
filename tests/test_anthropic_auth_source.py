@@ -19,7 +19,7 @@ from typing import Any
 import httpx
 import pytest
 
-from ccproxy.oauth.sources import AnthropicAuthSource
+from ccproxy.auth.sources import AnthropicAuthSource
 
 _TEST_CLIENT_ID = "test-client-id"
 _TEST_ENDPOINT = "https://oauth.test.example/v1/oauth/token"

@@ -37,7 +37,7 @@ def _make_gemini_flow(
     status_code: int = 200,
     content: bytes | None = None,
     content_type: str = "text/event-stream",
-    oauth_provider: str | None = "gemini",
+    auth_provider: str | None = "gemini",
     transform_provider_type: str = "gemini",
     include_transform: bool = True,
 ) -> MagicMock:
@@ -45,8 +45,8 @@ def _make_gemini_flow(
     flow = MagicMock()
     flow.id = "flow-test-1"
     metadata: dict[str, object] = {}
-    if oauth_provider is not None:
-        metadata["ccproxy.oauth_provider"] = oauth_provider
+    if auth_provider is not None:
+        metadata["ccproxy.auth_provider"] = auth_provider
 
     if include_transform:
         record = FlowRecord(direction="inbound")
@@ -146,10 +146,10 @@ class TestResponseHeadersStreamingInstall:
         assert flow.response.stream is None
 
     @pytest.mark.asyncio
-    async def test_no_install_for_non_gemini_oauth_flow(self) -> None:
-        """A flow without ``ccproxy.oauth_provider == "gemini"`` is left alone."""
+    async def test_no_install_for_non_gemini_auth_flow(self) -> None:
+        """A flow without ``ccproxy.auth_provider == "gemini"`` is left alone."""
         _set_capacity(enabled=False)
-        flow = _make_gemini_flow(is_streaming=True, mode="redirect", oauth_provider="anthropic")
+        flow = _make_gemini_flow(is_streaming=True, mode="redirect", auth_provider="anthropic")
         addon = GeminiAddon()
 
         await addon.responseheaders(flow)
@@ -171,7 +171,7 @@ class TestResponseHeadersStreamingInstall:
     async def test_no_install_when_no_response(self) -> None:
         """A flow without ``flow.response`` is a no-op."""
         flow = MagicMock()
-        flow.metadata = {"ccproxy.oauth_provider": "gemini"}
+        flow.metadata = {"ccproxy.auth_provider": "gemini"}
         flow.response = None
         addon = GeminiAddon()
 
@@ -194,7 +194,7 @@ class TestResponseHeadersStreamingInstall:
         record = FlowRecord(direction="inbound")
         record.transform = None
         flow = MagicMock()
-        flow.metadata = {InspectorMeta.RECORD: record, "ccproxy.oauth_provider": "gemini"}
+        flow.metadata = {InspectorMeta.RECORD: record, "ccproxy.auth_provider": "gemini"}
         flow.response = MagicMock()
         flow.response.status_code = 200
         flow.response.headers = {"content-type": "text/event-stream"}
@@ -270,7 +270,7 @@ class TestResponseBufferedUnwrap:
 
     @pytest.mark.asyncio
     async def test_skips_non_gemini_flow(self) -> None:
-        """A flow with a non-gemini ``ccproxy.oauth_provider`` is left alone."""
+        """A flow with a non-gemini ``ccproxy.auth_provider`` is left alone."""
         _set_capacity(enabled=False)
         original = json.dumps({"response": {"inner": True}}).encode()
         flow = _make_gemini_flow(
@@ -279,7 +279,7 @@ class TestResponseBufferedUnwrap:
             status_code=200,
             content=original,
             content_type="application/json",
-            oauth_provider="anthropic",
+            auth_provider="anthropic",
         )
         addon = GeminiAddon()
 
@@ -327,7 +327,7 @@ class TestResponseBufferedUnwrap:
     async def test_no_op_when_no_response(self) -> None:
         """A flow without ``flow.response`` is a no-op."""
         flow = MagicMock()
-        flow.metadata = {"ccproxy.oauth_provider": "gemini"}
+        flow.metadata = {"ccproxy.auth_provider": "gemini"}
         flow.response = None
         addon = GeminiAddon()
 

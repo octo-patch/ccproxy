@@ -21,10 +21,10 @@ class TestBuildExecutor:
         assert executor.get_execution_order() == []
 
     def test_valid_hook_module_registered(self) -> None:
-        # forward_oauth is already imported and registered by other tests
-        executor = build_executor(["ccproxy.hooks.forward_oauth"])
+        # inject_auth is already imported and registered by other tests
+        executor = build_executor(["ccproxy.hooks.inject_auth"])
         assert isinstance(executor, PipelineExecutor)
-        assert "forward_oauth" in executor.get_execution_order()
+        assert "inject_auth" in executor.get_execution_order()
 
     def test_invalid_module_handled_gracefully(self, caplog: pytest.LogCaptureFixture) -> None:
         with caplog.at_level(logging.ERROR, logger="ccproxy.pipeline.loader"):
@@ -33,13 +33,13 @@ class TestBuildExecutor:
         assert "nonexistent_xyz_module" in caplog.text
 
     def test_dict_entry_params_dropped_without_model(self, caplog: pytest.LogCaptureFixture) -> None:
-        # forward_oauth declares no model=, so YAML params are discarded with a warning
-        entry = {"hook": "ccproxy.hooks.forward_oauth", "params": {"timeout": 10, "strict": True}}
+        # inject_auth declares no model=, so YAML params are discarded with a warning
+        entry = {"hook": "ccproxy.hooks.inject_auth", "params": {"timeout": 10, "strict": True}}
         with caplog.at_level(logging.WARNING, logger="ccproxy.pipeline.loader"):
             executor = build_executor([entry])
         assert isinstance(executor, PipelineExecutor)
-        assert "forward_oauth" in executor.get_execution_order()
-        spec = executor.dag.get_hook("forward_oauth")
+        assert "inject_auth" in executor.get_execution_order()
+        spec = executor.dag.get_hook("inject_auth")
         assert spec is not None
         assert spec.params == {}
         assert "no model=" in caplog.text
@@ -53,15 +53,15 @@ class TestBuildExecutor:
     def test_multiple_hooks_priority_order(self) -> None:
         executor = build_executor(
             [
-                "ccproxy.hooks.forward_oauth",
+                "ccproxy.hooks.inject_auth",
                 "ccproxy.hooks.verbose_mode",
             ]
         )
         order = executor.get_execution_order()
-        assert "forward_oauth" in order
+        assert "inject_auth" in order
         assert "verbose_mode" in order
-        # forward_oauth has lower index (idx=0) → lower priority number → executes first
-        assert order.index("forward_oauth") < order.index("verbose_mode")
+        # inject_auth has lower index (idx=0) → lower priority number → executes first
+        assert order.index("inject_auth") < order.index("verbose_mode")
 
 
 class TestRegisterPipelineRoutes:

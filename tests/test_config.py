@@ -10,6 +10,12 @@ from unittest import mock
 
 import pytest
 
+from ccproxy.auth.sources import (
+    CommandAuthSource,
+    FileAuthSource,
+    _read_credential_file,
+    _run_credential_command,
+)
 from ccproxy.config import (
     CCProxyConfig,
     GeminiCapacityFallbackConfig,
@@ -17,12 +23,6 @@ from ccproxy.config import (
     clear_config_instance,
     get_config,
     get_config_dir,
-)
-from ccproxy.oauth.sources import (
-    CommandAuthSource,
-    FileAuthSource,
-    _read_credential_file,
-    _run_credential_command,
 )
 
 
@@ -392,21 +392,21 @@ class TestRunCredentialCommand:
         assert "Failed to execute TestCmd command" in caplog.text
 
 
-class TestResolveOAuthToken:
+class TestResolveAuthToken:
     def test_resolves_via_provider_auth(self, monkeypatch: pytest.MonkeyPatch) -> None:
         config = CCProxyConfig(providers={"prov": _make_provider(command="echo fresh-tok")})
         mock_result = mock.MagicMock(returncode=0, stdout="fresh-tok")
         monkeypatch.setattr(subprocess, "run", mock.Mock(return_value=mock_result))
 
-        assert config.resolve_oauth_token("prov") == "fresh-tok"
+        assert config.resolve_auth_token("prov") == "fresh-tok"
 
     def test_provider_not_configured_returns_none(self) -> None:
         config = CCProxyConfig()
-        assert config.resolve_oauth_token("missing-provider") is None
+        assert config.resolve_auth_token("missing-provider") is None
 
     def test_provider_without_auth_returns_none(self) -> None:
         config = CCProxyConfig(providers={"prov": _make_provider(command="")})
-        assert config.resolve_oauth_token("prov") is None
+        assert config.resolve_auth_token("prov") is None
 
     def test_resolves_through_file_source(self, tmp_path: Path) -> None:
         f = tmp_path / "tok.txt"
@@ -421,7 +421,7 @@ class TestResolveOAuthToken:
                 ),
             }
         )
-        assert config.resolve_oauth_token("prov") == "file-tok"
+        assert config.resolve_auth_token("prov") == "file-tok"
 
 
 class TestGetAuthHeader:
@@ -438,7 +438,7 @@ class TestGetAuthHeader:
         assert config.get_auth_header("unknown") is None
 
 
-class TestResolveOAuthTokenConcurrency:
+class TestResolveAuthTokenConcurrency:
     """Per-provider lock isolates concurrent resolves across providers."""
 
     def test_cross_provider_resolves_do_not_block_each_other(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -466,12 +466,12 @@ class TestResolveOAuthTokenConcurrency:
         monkeypatch.setattr(subprocess, "run", routed_run)
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
-            slow_future = pool.submit(config.resolve_oauth_token, slow_provider)
+            slow_future = pool.submit(config.resolve_auth_token, slow_provider)
 
             assert slow_started.wait(timeout=2.0), "slow provider resolve did not start in time"
 
             fast_start = time.monotonic()
-            fast_future = pool.submit(config.resolve_oauth_token, fast_provider)
+            fast_future = pool.submit(config.resolve_auth_token, fast_provider)
 
             fast_token = fast_future.result(timeout=2.0)
             fast_elapsed = time.monotonic() - fast_start

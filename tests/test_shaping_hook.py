@@ -13,8 +13,9 @@ from mitmproxy import http
 from mitmproxy.test import tflow
 
 from ccproxy.flows.store import InspectorMeta
-from ccproxy.hooks.shape import _parse_strategy, shape, shape_guard
+from ccproxy.hooks.shape import shape, shape_guard
 from ccproxy.pipeline.context import Context
+from ccproxy.shaping.apply import parse_strategy
 from ccproxy.shaping.executor import clear_shape_hook_cache
 from ccproxy.shaping.store import ShapeStore, clear_store_instance
 
@@ -70,7 +71,7 @@ def _make_flow(
     has_transform: bool = True,
     provider: str = "anthropic",
     body: dict[str, Any] | None = None,
-    oauth_injected: bool = False,
+    auth_injected: bool = False,
 ) -> http.HTTPFlow:
     from mitmproxy.proxy.mode_specs import ReverseMode
 
@@ -91,8 +92,8 @@ def _make_flow(
         transform=_MockTransformMeta(provider_type=provider) if has_transform else None,
     )
     flow.metadata[InspectorMeta.RECORD] = record
-    if oauth_injected:
-        flow.metadata["ccproxy.oauth_injected"] = True
+    if auth_injected:
+        flow.metadata["ccproxy.auth_injected"] = True
     return flow
 
 
@@ -117,12 +118,12 @@ class TestShapeGuard:
         ctx = Context.from_flow(_make_flow(reverse=True))
         assert shape_guard(ctx) is True
 
-    def test_wireguard_without_oauth_rejected(self) -> None:
+    def test_wireguard_without_auth_rejected(self) -> None:
         ctx = Context.from_flow(_make_flow(reverse=False))
         assert shape_guard(ctx) is False
 
-    def test_wireguard_with_oauth_passes(self) -> None:
-        ctx = Context.from_flow(_make_flow(reverse=False, oauth_injected=True))
+    def test_wireguard_with_auth_passes(self) -> None:
+        ctx = Context.from_flow(_make_flow(reverse=False, auth_injected=True))
         assert shape_guard(ctx) is True
 
     def test_no_transform_rejected(self) -> None:
@@ -435,13 +436,13 @@ class TestUaFamilySkip:
 
 class TestParseStrategy:
     def test_plain_strategy(self) -> None:
-        assert _parse_strategy("replace") == ("replace", None)
+        assert parse_strategy("replace") == ("replace", None)
 
     def test_strategy_with_slice(self) -> None:
-        assert _parse_strategy("prepend_shape:2") == ("prepend_shape", 2)
+        assert parse_strategy("prepend_shape:2") == ("prepend_shape", 2)
 
     def test_strategy_with_zero_slice(self) -> None:
-        assert _parse_strategy("append_shape:0") == ("append_shape", 0)
+        assert parse_strategy("append_shape:0") == ("append_shape", 0)
 
     def test_drop_strategy(self) -> None:
-        assert _parse_strategy("drop") == ("drop", None)
+        assert parse_strategy("drop") == ("drop", None)

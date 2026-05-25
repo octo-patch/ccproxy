@@ -13,7 +13,7 @@ subscription chain, then attached as S3 object URLs in
 The non-text parts are stripped from ``ctx.messages`` after extraction so
 ``_flatten_messages`` builds a clean ``query_str``.
 
-This hook runs in the inbound DAG after ``forward_oauth`` and before
+This hook runs in the inbound DAG after ``inject_auth`` and before
 ``pplx_thread_inject``. Failures raise structured ``pplx_file_*`` errors
 that surface as 4xx to the OpenAI client.
 """
@@ -69,8 +69,8 @@ class FileInfo:
 
 
 def extract_pplx_files_guard(ctx: Context) -> bool:
-    """Run only when forward_oauth resolved the Perplexity sentinel."""
-    return ctx.metadata.oauth_provider == PERPLEXITY_PROVIDER_NAME
+    """Run only when inject_auth resolved the Perplexity sentinel."""
+    return ctx.metadata.auth_provider == PERPLEXITY_PROVIDER_NAME
 
 
 def _collect_parts(messages: list[Any]) -> list[tuple[int, int, dict[str, Any]]]:
@@ -346,7 +346,7 @@ def extract_pplx_files(ctx: Context, _: dict[str, Any]) -> Context:
     if not parts:
         return ctx
 
-    token = get_config().resolve_oauth_token(PERPLEXITY_PROVIDER_NAME)
+    token = get_config().resolve_auth_token(PERPLEXITY_PROVIDER_NAME)
     if not token:
         logger.warning(
             "extract_pplx_files: %d multimodal parts present but no session token; dropping",

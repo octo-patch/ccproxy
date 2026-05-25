@@ -57,8 +57,8 @@ def parse_overrides(header_value: str | None) -> OverrideSet:
     - hook_name → Normal (same as not specifying)
 
     Examples:
-        >>> parse_overrides("+forward_oauth,-rule_evaluator")
-        OverrideSet(overrides={'forward_oauth': FORCE_RUN, 'rule_evaluator': FORCE_SKIP}, ...)
+        >>> parse_overrides("+inject_auth,-rule_evaluator")
+        OverrideSet(overrides={'inject_auth': FORCE_RUN, 'rule_evaluator': FORCE_SKIP}, ...)
         >>> parse_overrides(None)
         OverrideSet(overrides={}, raw_header='')
     """

@@ -239,13 +239,13 @@ class TestPipelineExecutorBasic:
         """Hook metadata mutations are stored in the ccproxy flow namespace."""
 
         def touch_metadata(ctx, params):
-            ctx.metadata.oauth_injected = True
+            ctx.metadata.auth_injected = True
             return ctx
 
         flow = _make_flow()
         executor = PipelineExecutor(hooks=[make_spec("touch", handler=touch_metadata)])
         executor.execute(flow)
-        assert flow.metadata["ccproxy.oauth_injected"] is True
+        assert flow.metadata["ccproxy.auth_injected"] is True
 
     def test_hook_mutates_headers_live(self):
         """Hook header mutations are applied to flow.request.headers immediately."""

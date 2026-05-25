@@ -18,7 +18,7 @@ class _RateLimitParams(BaseModel):
 
 
 _PRODUCTION_HOOK_MODULES = [
-    "ccproxy.hooks.forward_oauth",
+    "ccproxy.hooks.inject_auth",
     "ccproxy.hooks.extract_session_id",
     "ccproxy.hooks.inject_mcp_notifications",
     "ccproxy.hooks.verbose_mode",
@@ -62,9 +62,9 @@ class TestLoadHooks:
         assert "nonexistent_xyz" in caplog.text
 
     def test_string_entry_no_params(self) -> None:
-        result = load_hooks(["ccproxy.hooks.forward_oauth"])
+        result = load_hooks(["ccproxy.hooks.inject_auth"])
         assert len(result) == 1
-        assert result[0].name == "forward_oauth"
+        assert result[0].name == "inject_auth"
         assert result[0].params == {}
 
     def test_valid_params_with_model(self) -> None:
@@ -87,19 +87,19 @@ class TestLoadHooks:
         # registered — we already did it above, so call load_hooks with the
         # hook name mapped by injecting the priority directly.
         # Since load_hooks imports by module path, we need it findable.
-        # Use ccproxy.hooks.forward_oauth as a known importable module that
-        # registers forward_oauth, then exercise the model path via the
+        # Use ccproxy.hooks.inject_auth as a known importable module that
+        # registers inject_auth, then exercise the model path via the
         # directly-registered fake spec by driving load_hooks' second pass.
         #
-        # Simpler: call load_hooks with a string entry for forward_oauth (which
+        # Simpler: call load_hooks with a string entry for inject_auth (which
         # has no model) is case (3). For model validation, register and exercise
         # via the registry directly using a dict entry on a real importable hook.
-        # forward_oauth doesn't have a model, so use a custom spec + hack:
+        # inject_auth doesn't have a model, so use a custom spec + hack:
         # patch load_hooks to avoid the import step and drive the validation path.
         # Instead: use monkeypatching of importlib.import_module is complex.
         #
         # Cleanest approach: register the spec, then call load_hooks with a
-        # string entry for a module that will be found (forward_oauth) but
+        # string entry for a module that will be found (inject_auth) but
         # also trigger the model validation path via the registry loop.
         # This requires that the spec is already in the registry, which it is.
         #
@@ -152,12 +152,12 @@ class TestLoadHooks:
             del sys.modules["ccproxy_test_fake_ratelimit_mod2"]
 
     def test_params_without_model_warns_and_drops(self, caplog: pytest.LogCaptureFixture) -> None:
-        # forward_oauth declares no model=; params should be dropped with warning
-        entry = {"hook": "ccproxy.hooks.forward_oauth", "params": {"timeout": 10}}
+        # inject_auth declares no model=; params should be dropped with warning
+        entry = {"hook": "ccproxy.hooks.inject_auth", "params": {"timeout": 10}}
         with caplog.at_level(logging.WARNING, logger="ccproxy.pipeline.loader"):
             result = load_hooks([entry])
         assert len(result) == 1
-        assert result[0].name == "forward_oauth"
+        assert result[0].name == "inject_auth"
         assert result[0].params == {}
         assert "no model=" in caplog.text
 
@@ -168,15 +168,15 @@ class TestLoadHooks:
     def test_priority_assignment_preserved(self) -> None:
         result = load_hooks(
             [
-                "ccproxy.hooks.forward_oauth",
+                "ccproxy.hooks.inject_auth",
                 "ccproxy.hooks.verbose_mode",
             ]
         )
         names = [s.name for s in result]
-        assert "forward_oauth" in names
+        assert "inject_auth" in names
         assert "verbose_mode" in names
-        fo = next(s for s in result if s.name == "forward_oauth")
+        fo = next(s for s in result if s.name == "inject_auth")
         vm = next(s for s in result if s.name == "verbose_mode")
-        # forward_oauth is index 0 → priority 0; verbose_mode is index 1 → priority 1
+        # inject_auth is index 0 → priority 0; verbose_mode is index 1 → priority 1
         assert fo.priority == 0
         assert vm.priority == 1

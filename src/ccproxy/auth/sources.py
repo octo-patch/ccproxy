@@ -48,11 +48,11 @@ _REFRESH_TIMEOUT_SEC = 15.0
 _REFRESH_HEADROOM_SECONDS = 60.0
 
 
-def _oauth_runtime_value(name: str, fallback: float) -> float:
+def _auth_runtime_value(name: str, fallback: float) -> float:
     try:
         from ccproxy.config import get_config
 
-        value = getattr(get_config().oauth, name)
+        value = getattr(get_config().auth, name)
     except Exception:
         return fallback
     return float(value)
@@ -77,7 +77,7 @@ def _read_credential_file(path_str: str, label: str) -> str | None:
 
 def _run_credential_command(cmd: str, label: str) -> str | None:
     """Run a shell command and return its stdout. Returns None on failure."""
-    timeout = _oauth_runtime_value("command_timeout_seconds", _COMMAND_TIMEOUT_SEC)
+    timeout = _auth_runtime_value("command_timeout_seconds", _COMMAND_TIMEOUT_SEC)
     try:
         result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout)  # noqa: S602
         if result.returncode != 0:
@@ -267,7 +267,7 @@ class AuthSource(AuthFields):
         body = self._build_refresh_body(refresh_token)
         try:
             client_kwargs: dict[str, Any] = {
-                "timeout": _oauth_runtime_value("refresh_timeout_seconds", _REFRESH_TIMEOUT_SEC)
+                "timeout": _auth_runtime_value("refresh_timeout_seconds", _REFRESH_TIMEOUT_SEC)
             }
             if transport is not None:
                 client_kwargs["transport"] = transport
@@ -431,5 +431,5 @@ def needs_refresh(expiry_ms: float, now_ms: float | None = None) -> bool:
     """True when the cached access_token is within the configured expiry headroom."""
     if now_ms is None:
         now_ms = time.time() * 1000
-    headroom_ms = _oauth_runtime_value("refresh_headroom_seconds", _REFRESH_HEADROOM_SECONDS) * 1000
+    headroom_ms = _auth_runtime_value("refresh_headroom_seconds", _REFRESH_HEADROOM_SECONDS) * 1000
     return (expiry_ms - now_ms) <= headroom_ms

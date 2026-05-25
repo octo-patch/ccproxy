@@ -1,4 +1,4 @@
-"""Tests for the forward_oauth hook."""
+"""Tests for the inject_auth hook."""
 
 from __future__ import annotations
 
@@ -7,14 +7,14 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from ccproxy.auth.sources import CommandAuthSource
 from ccproxy.config import CCProxyConfig, Provider, set_config_instance
-from ccproxy.constants import OAUTH_SENTINEL_PREFIX, OAuthConfigError
-from ccproxy.hooks.forward_oauth import (
+from ccproxy.constants import AUTH_SENTINEL_PREFIX, AuthConfigError
+from ccproxy.hooks.inject_auth import (
     _inject_token,
-    forward_oauth,
-    forward_oauth_guard,
+    inject_auth,
+    inject_auth_guard,
 )
-from ccproxy.oauth.sources import CommandAuthSource
 from ccproxy.pipeline.context import Context
 
 
@@ -45,70 +45,70 @@ def clean_config():
     return config
 
 
-class TestForwardOAuthGuard:
+class TestInjectAuthGuard:
     def test_true_when_x_api_key_set(self, clean_config: CCProxyConfig) -> None:
         ctx = _make_ctx({"x-api-key": "some-key"})
-        assert forward_oauth_guard(ctx) is True
+        assert inject_auth_guard(ctx) is True
 
     def test_true_when_authorization_set(self, clean_config: CCProxyConfig) -> None:
         ctx = _make_ctx({"authorization": "Bearer token"})
-        assert forward_oauth_guard(ctx) is True
+        assert inject_auth_guard(ctx) is True
 
     def test_true_when_x_goog_api_key_set(self, clean_config: CCProxyConfig) -> None:
         ctx = _make_ctx({"x-goog-api-key": "google-key"})
-        assert forward_oauth_guard(ctx) is True
+        assert inject_auth_guard(ctx) is True
 
     def test_false_when_all_empty(self, clean_config: CCProxyConfig) -> None:
         ctx = _make_ctx()
-        assert forward_oauth_guard(ctx) is False
+        assert inject_auth_guard(ctx) is False
 
     def test_true_when_multiple_headers_set(self, clean_config: CCProxyConfig) -> None:
         ctx = _make_ctx({"x-api-key": "key", "authorization": "Bearer tok"})
-        assert forward_oauth_guard(ctx) is True
+        assert inject_auth_guard(ctx) is True
 
 
-class TestForwardOAuthSentinelPath:
+class TestInjectAuthSentinelPath:
     def test_sentinel_injects_bearer_and_sets_metadata(self, clean_config: CCProxyConfig) -> None:
         clean_config.providers = {"anthropic": _make_provider(value="real-token-xyz")}
-        ctx = _make_ctx({"x-api-key": f"{OAUTH_SENTINEL_PREFIX}anthropic"})
+        ctx = _make_ctx({"x-api-key": f"{AUTH_SENTINEL_PREFIX}anthropic"})
 
-        result = forward_oauth(ctx, {})
+        result = inject_auth(ctx, {})
 
         assert result is ctx
         assert ctx.get_header("authorization") == "Bearer real-token-xyz"
-        assert ctx.flow.metadata["ccproxy.oauth_injected"] is True
-        assert ctx.flow.metadata["ccproxy.oauth_provider"] == "anthropic"
+        assert ctx.flow.metadata["ccproxy.auth_injected"] is True
+        assert ctx.flow.metadata["ccproxy.auth_provider"] == "anthropic"
 
     def test_sentinel_clears_x_api_key(self, clean_config: CCProxyConfig) -> None:
         clean_config.providers = {"anthropic": _make_provider(value="real-token")}
-        ctx = _make_ctx({"x-api-key": f"{OAUTH_SENTINEL_PREFIX}anthropic"})
+        ctx = _make_ctx({"x-api-key": f"{AUTH_SENTINEL_PREFIX}anthropic"})
 
-        forward_oauth(ctx, {})
+        inject_auth(ctx, {})
 
         # x-api-key must be cleared since default target is authorization
         assert ctx.get_header("x-api-key") == ""
 
     def test_sentinel_via_goog_api_key_header(self, clean_config: CCProxyConfig) -> None:
         clean_config.providers = {"google": _make_provider(value="goog-token")}
-        ctx = _make_ctx({"x-goog-api-key": f"{OAUTH_SENTINEL_PREFIX}google"})
+        ctx = _make_ctx({"x-goog-api-key": f"{AUTH_SENTINEL_PREFIX}google"})
 
-        result = forward_oauth(ctx, {})
+        result = inject_auth(ctx, {})
 
         assert result is ctx
         assert ctx.get_header("authorization") == "Bearer goog-token"
-        assert ctx.flow.metadata["ccproxy.oauth_provider"] == "google"
+        assert ctx.flow.metadata["ccproxy.auth_provider"] == "google"
 
     def test_sentinel_via_authorization_bearer(self, clean_config: CCProxyConfig) -> None:
         """OpenAI clients send the sentinel as ``Authorization: Bearer <key>``."""
         clean_config.providers = {"anthropic": _make_provider(value="real-bearer-token")}
-        ctx = _make_ctx({"authorization": f"Bearer {OAUTH_SENTINEL_PREFIX}anthropic"})
+        ctx = _make_ctx({"authorization": f"Bearer {AUTH_SENTINEL_PREFIX}anthropic"})
 
-        result = forward_oauth(ctx, {})
+        result = inject_auth(ctx, {})
 
         assert result is ctx
         # The Bearer-token sentinel was peeled, the real token re-injected with Bearer
         assert ctx.get_header("authorization") == "Bearer real-bearer-token"
-        assert ctx.flow.metadata["ccproxy.oauth_provider"] == "anthropic"
+        assert ctx.flow.metadata["ccproxy.auth_provider"] == "anthropic"
 
     def test_sentinel_via_authorization_bearer_with_custom_target(
         self,
@@ -116,50 +116,50 @@ class TestForwardOAuthSentinelPath:
     ) -> None:
         """Inbound Authorization can route to a different outbound header."""
         clean_config.providers = {"deepseek": _make_provider(value="ds-token", header="x-api-key")}
-        ctx = _make_ctx({"authorization": f"Bearer {OAUTH_SENTINEL_PREFIX}deepseek"})
+        ctx = _make_ctx({"authorization": f"Bearer {AUTH_SENTINEL_PREFIX}deepseek"})
 
-        forward_oauth(ctx, {})
+        inject_auth(ctx, {})
 
         assert ctx.get_header("x-api-key") == "ds-token"
         # Source authorization header cleared so the sentinel doesn't leak.
         assert ctx.get_header("authorization") == ""
-        assert ctx.flow.metadata["ccproxy.oauth_provider"] == "deepseek"
+        assert ctx.flow.metadata["ccproxy.auth_provider"] == "deepseek"
 
-    def test_sentinel_no_token_raises_oauth_config_error(self, clean_config: CCProxyConfig) -> None:
-        ctx = _make_ctx({"x-api-key": f"{OAUTH_SENTINEL_PREFIX}missing-provider"})
+    def test_sentinel_no_token_raises_auth_config_error(self, clean_config: CCProxyConfig) -> None:
+        ctx = _make_ctx({"x-api-key": f"{AUTH_SENTINEL_PREFIX}missing-provider"})
 
-        with pytest.raises(OAuthConfigError, match="missing-provider"):
-            forward_oauth(ctx, {})
+        with pytest.raises(AuthConfigError, match="missing-provider"):
+            inject_auth(ctx, {})
 
-    def test_sentinel_get_config_exception_raises_oauth_config_error(self) -> None:
-        ctx = _make_ctx({"x-api-key": f"{OAUTH_SENTINEL_PREFIX}err-provider"})
+    def test_sentinel_get_config_exception_raises_auth_config_error(self) -> None:
+        ctx = _make_ctx({"x-api-key": f"{AUTH_SENTINEL_PREFIX}err-provider"})
 
         with (
-            patch("ccproxy.hooks.forward_oauth.get_config", side_effect=RuntimeError("config exploded")),
-            pytest.raises(OAuthConfigError, match="err-provider"),
+            patch("ccproxy.hooks.inject_auth.get_config", side_effect=RuntimeError("config exploded")),
+            pytest.raises(AuthConfigError, match="err-provider"),
         ):
-            forward_oauth(ctx, {})
+            inject_auth(ctx, {})
 
 
-class TestForwardOAuthPassthrough:
+class TestInjectAuthPassthrough:
     def test_non_sentinel_api_key_no_injection(self, clean_config: CCProxyConfig) -> None:
         ctx = _make_ctx({"x-api-key": "sk-real-key-not-a-sentinel"})
 
-        result = forward_oauth(ctx, {})
+        result = inject_auth(ctx, {})
 
         assert result is ctx
-        assert "ccproxy.oauth_injected" not in ctx.flow.metadata
-        assert "ccproxy.oauth_provider" not in ctx.flow.metadata
+        assert "ccproxy.auth_injected" not in ctx.flow.metadata
+        assert "ccproxy.auth_provider" not in ctx.flow.metadata
 
     def test_real_auth_header_passes_through(self, clean_config: CCProxyConfig) -> None:
         clean_config.providers = {"anthropic": _make_provider(value="some-tok")}
         ctx = _make_ctx({"authorization": "Bearer real-existing-token"})
 
-        result = forward_oauth(ctx, {})
+        result = inject_auth(ctx, {})
 
         assert result is ctx
         assert ctx.get_header("authorization") == "Bearer real-existing-token"
-        assert "ccproxy.oauth_injected" not in ctx.flow.metadata
+        assert "ccproxy.auth_injected" not in ctx.flow.metadata
 
 
 class TestInjectToken:
@@ -169,7 +169,7 @@ class TestInjectToken:
         _inject_token(ctx, "anthropic", "my-token")
 
         assert ctx.get_header("authorization") == "Bearer my-token"
-        assert ctx.flow.metadata["ccproxy.oauth_injected"] is True
+        assert ctx.flow.metadata["ccproxy.auth_injected"] is True
         assert ctx.get_header("x-api-key") == ""
         assert ctx.get_header("x-goog-api-key") == ""
 
@@ -180,7 +180,7 @@ class TestInjectToken:
         _inject_token(ctx, "google", "goog-token")
 
         assert ctx.get_header("x-goog-api-key") == "goog-token"
-        assert ctx.flow.metadata["ccproxy.oauth_injected"] is True
+        assert ctx.flow.metadata["ccproxy.auth_injected"] is True
         # x-api-key cleared (not the target)
         assert ctx.get_header("x-api-key") == ""
         # authorization not touched
@@ -194,12 +194,12 @@ class TestInjectToken:
 
         assert ctx.get_header("x-api-key") == "my-secret"
         assert ctx.get_header("x-goog-api-key") == ""
-        assert ctx.flow.metadata["ccproxy.oauth_injected"] is True
+        assert ctx.flow.metadata["ccproxy.auth_injected"] is True
 
     def test_always_sets_injected_flag(self, clean_config: CCProxyConfig) -> None:
         ctx = _make_ctx()
         _inject_token(ctx, "any", "any-token")
-        assert ctx.flow.metadata["ccproxy.oauth_injected"] is True
+        assert ctx.flow.metadata["ccproxy.auth_injected"] is True
 
     def test_inject_preserves_other_headers(self, clean_config: CCProxyConfig) -> None:
         ctx = _make_ctx({"content-type": "application/json", "anthropic-version": "2023-06-01"})

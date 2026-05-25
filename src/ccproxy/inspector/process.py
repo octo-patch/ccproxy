@@ -136,12 +136,12 @@ def _build_addons(
     sidecar_port: int,
 ) -> list[Any]:
     """Final addon chain: ``InspectorAddon → MultiHARSaver → ShapeCaptureAddon →
-    inbound pipeline → transform (lightllm) → outbound pipeline → OAuthAddon →
+    inbound pipeline → transform (lightllm) → outbound pipeline → AuthAddon →
     GeminiAddon``.
 
-    mitmproxy dispatches addons in registration order. ``OAuthAddon`` and
+    mitmproxy dispatches addons in registration order. ``AuthAddon`` and
     ``GeminiAddon`` both sit AFTER the outbound pipeline so they see
-    ccproxy-finalized requests/responses. ``OAuthAddon.response`` runs before
+    ccproxy-finalized requests/responses. ``AuthAddon.response`` runs before
     ``GeminiAddon.response``, so a 401 → refresh → replay → 429 sequence
     naturally cascades into ``GeminiAddon``'s capacity fallback.
     """
@@ -149,6 +149,7 @@ def _build_addons(
     from mitmproxy import contentviews
 
     from ccproxy.inspector.addon import InspectorAddon
+    from ccproxy.inspector.auth_addon import AuthAddon
     from ccproxy.inspector.contentview import (
         ClientRequestContentview,
         ForwardedRequestContentview,
@@ -158,7 +159,6 @@ def _build_addons(
     from ccproxy.inspector.fingerprint_capture import FingerprintCaptureAddon
     from ccproxy.inspector.gemini_addon import GeminiAddon
     from ccproxy.inspector.multi_har_saver import MultiHARSaver
-    from ccproxy.inspector.oauth_addon import OAuthAddon
     from ccproxy.inspector.pplx_addon import PerplexityAddon
     from ccproxy.inspector.shape_capturer import ShapeCaptureAddon
     from ccproxy.inspector.transport_override_addon import TransportOverrideAddon
@@ -218,7 +218,7 @@ def _build_addons(
         addons.append(_make_pipeline_router("ccproxy_outbound", outbound_hooks))
 
     addons.append(TransportOverrideAddon(sidecar_port=sidecar_port))
-    addons.append(OAuthAddon())
+    addons.append(AuthAddon())
     addons.append(GeminiAddon())
     addons.append(PerplexityAddon())
     # Last addon in the chain: drops ccproxy-internal x-ccproxy-* headers

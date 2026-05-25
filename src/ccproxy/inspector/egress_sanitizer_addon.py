@@ -1,7 +1,7 @@
 """Final-stage mitmproxy addon that scrubs ccproxy-internal correlation headers.
 
 ccproxy uses ``x-ccproxy-flow-id`` (and ``x-ccproxy-hooks``,
-``x-ccproxy-oauth-injected``) as cross-addon correlation keys on
+``x-ccproxy-auth-injected``) as cross-addon correlation keys on
 :class:`mitmproxy.http.HTTPFlow.request`. These are infrastructure-only
 — they have no purpose beyond the inspector pipeline and would otherwise
 leak ccproxy's presence on every request (``x-ccproxy-*`` is a trivial
@@ -32,7 +32,7 @@ _DROP_HEADERS = frozenset(
     {
         "x-ccproxy-flow-id",
         "x-ccproxy-hooks",
-        "x-ccproxy-oauth-injected",
+        "x-ccproxy-auth-injected",
     }
 )
 """ccproxy-internal correlation headers that must never reach the next hop.

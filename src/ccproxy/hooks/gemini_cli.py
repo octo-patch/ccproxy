@@ -1,6 +1,6 @@
 """Convert Gemini-bound traffic into the v1internal envelope cloudcode-pa speaks.
 
-Triggered when ``forward_oauth`` resolved the Gemini sentinel key. Single hook,
+Triggered when ``inject_auth`` resolved the Gemini sentinel key. Single hook,
 three responsibilities:
 
     1. Header masquerade  ── user-agent + x-goog-api-client → Gemini CLI fingerprint
@@ -67,7 +67,7 @@ def prewarm_project() -> None:
     if "gemini" not in config.providers:
         return
 
-    token = config.resolve_oauth_token("gemini")
+    token = config.resolve_auth_token("gemini")
     if not token:
         logger.warning("gemini_cli: providers.gemini configured but token is empty; project resolution skipped")
         return
@@ -111,8 +111,8 @@ def _build_session_id(flow: http.HTTPFlow, model: str, conversation_id: str) -> 
 
 
 def gemini_cli_guard(ctx: Context) -> bool:
-    """Run when forward_oauth resolved the Gemini sentinel key."""
-    return ctx.metadata.oauth_provider == "gemini"
+    """Run when inject_auth resolved the Gemini sentinel key."""
+    return ctx.metadata.auth_provider == "gemini"
 
 
 @hook(

@@ -84,7 +84,7 @@ def register_pplx_routes(router: InspectorRouter) -> None:
             )
             return
 
-        token = session_cfg.resolve_oauth_token(PERPLEXITY_PROVIDER_NAME)
+        token = session_cfg.resolve_auth_token(PERPLEXITY_PROVIDER_NAME)
         if not token:
             flow.response = Response.make(
                 503,

@@ -62,7 +62,7 @@
     };
     hooks = {
       inbound = [
-        "ccproxy.hooks.forward_oauth"
+        "ccproxy.hooks.inject_auth"
         "ccproxy.hooks.extract_session_id"
         "ccproxy.hooks.extract_pplx_files"
         "ccproxy.hooks.pplx_thread_inject"
@@ -132,7 +132,7 @@
         ttl_seconds = 600;
       };
     };
-    oauth = {
+    auth = {
       command_timeout_seconds = 5;
       refresh_timeout_seconds = 15;
       refresh_headroom_seconds = 60;
@@ -145,7 +145,7 @@
           content_fields = [
             "model" "messages" "tools" "tool_choice" "system" "thinking" "context_management"
             "stream" "max_tokens" "temperature" "top_p" "top_k" "stop_sequences"
-            "diagnostics"
+            "diagnostics" "metadata"
           ];
           merge_strategies = { system = "prepend_shape:2"; };
           shape_hooks = [
@@ -175,7 +175,7 @@
           capture = { path_pattern = "^/v1/messages"; };
         };
         gemini = {
-          content_fields = [ "model" "project" ];
+          content_fields = [ "model" "project" "user_prompt_id" ];
           shape_hooks = [
             "ccproxy.shaping.regenerate"
             "ccproxy.shaping.gemini"
@@ -186,6 +186,22 @@
             "transfer-encoding" "connection" "accept-encoding"
           ];
           capture = { path_pattern = "^/v1internal:"; };
+        };
+        openai_responses = {
+          content_fields = [];
+          shape_hooks = [
+            "ccproxy.shaping.regenerate"
+            "ccproxy.shaping.responses"
+          ];
+          preserve_headers = [ "authorization" "host" ];
+          strip_headers = [
+            "authorization" "cookie"
+            "chatgpt-account-id" "x-codex-turn-metadata"
+            "x-codex-window-id" "session-id" "thread-id"
+            "content-length" "host" "transfer-encoding" "connection"
+            "accept-encoding"
+          ];
+          capture = { path_pattern = "^/(v1/|backend-api/codex/)?responses"; };
         };
       };
     };

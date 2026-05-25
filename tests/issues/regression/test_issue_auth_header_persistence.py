@@ -1,12 +1,12 @@
-"""Regression: OAuthAddon must persist refreshed token onto flow.request.headers.
+"""Regression: AuthAddon must persist refreshed token onto flow.request.headers.
 
 Background — production flow ``ca32b740`` was a 401-storm against a real 429
 capacity exhaustion on ``gemini-3.1-pro-preview``:
 
 1. Original request returned 401 (stale token).
-2. ``OAuthAddon._retry_with_refreshed_token`` refreshed the token and replayed;
+2. ``AuthAddon._retry_with_refreshed_token`` refreshed the token and replayed;
    the replay returned 429 (genuine capacity).
-3. ``OAuthAddon`` stamped ``flow.response`` with the 429 but never updated
+3. ``AuthAddon`` stamped ``flow.response`` with the 429 but never updated
    ``flow.request.headers["authorization"]`` — it still carried the pre-refresh
    stale token.
 4. ``GeminiAddon`` saw the 429, fired its capacity fallback. The fallback's
@@ -24,7 +24,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from ccproxy.inspector.oauth_addon import OAuthAddon
+from ccproxy.inspector.auth_addon import AuthAddon
 
 
 def _make_mock_client(mock_response: MagicMock) -> AsyncMock:
@@ -37,8 +37,8 @@ def _make_mock_client(mock_response: MagicMock) -> AsyncMock:
 def _make_401_flow(*, provider: str, headers: dict[str, str]) -> MagicMock:
     flow = MagicMock()
     flow.metadata = {
-        "ccproxy.oauth_provider": provider,
-        "ccproxy.oauth_injected": True,
+        "ccproxy.auth_provider": provider,
+        "ccproxy.auth_injected": True,
     }
     flow.request.method = "POST"
     flow.request.pretty_url = "https://api.anthropic.com/v1/messages"
@@ -76,17 +76,17 @@ async def test_default_authorization_header_is_rewritten_on_flow_request() -> No
         headers={"authorization": "Bearer stale-token"},
     )
     mock_config = MagicMock()
-    mock_config.resolve_oauth_token.return_value = "refreshed-token"
+    mock_config.resolve_auth_token.return_value = "refreshed-token"
     mock_config.get_auth_header.return_value = None
     mock_config.provider_timeout = None
 
     mock_get_client = _make_mock_client(_make_200_response())
 
     with (
-        patch("ccproxy.inspector.oauth_addon.get_config", return_value=mock_config),
-        patch("ccproxy.inspector.oauth_addon.transport.get_client", new=mock_get_client),
+        patch("ccproxy.inspector.auth_addon.get_config", return_value=mock_config),
+        patch("ccproxy.inspector.auth_addon.transport.get_client", new=mock_get_client),
     ):
-        await OAuthAddon().response(flow)
+        await AuthAddon().response(flow)
 
     assert flow.request.headers["authorization"] == "Bearer refreshed-token"
 
@@ -100,16 +100,16 @@ async def test_custom_auth_header_is_rewritten_raw_on_flow_request() -> None:
         headers={"x-api-key": "stale-key"},
     )
     mock_config = MagicMock()
-    mock_config.resolve_oauth_token.return_value = "refreshed-token"
+    mock_config.resolve_auth_token.return_value = "refreshed-token"
     mock_config.get_auth_header.return_value = "x-api-key"
     mock_config.provider_timeout = None
 
     mock_get_client = _make_mock_client(_make_200_response())
 
     with (
-        patch("ccproxy.inspector.oauth_addon.get_config", return_value=mock_config),
-        patch("ccproxy.inspector.oauth_addon.transport.get_client", new=mock_get_client),
+        patch("ccproxy.inspector.auth_addon.get_config", return_value=mock_config),
+        patch("ccproxy.inspector.auth_addon.transport.get_client", new=mock_get_client),
     ):
-        await OAuthAddon().response(flow)
+        await AuthAddon().response(flow)
 
     assert flow.request.headers["x-api-key"] == "refreshed-token"

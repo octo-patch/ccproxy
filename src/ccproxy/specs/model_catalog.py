@@ -141,7 +141,7 @@ def build_catalog(
 
     With ``refresh=False`` (default), returns the static floor only. With
     ``refresh=True``, additionally fetches each provider's upstream
-    ``/v1/models`` (using cached OAuth tokens) and unions the results
+    ``/v1/models`` (using configured provider auth tokens) and unions the results
     deduplicated by ``(owned_by, id)``. Any provider failure silently
     falls back to its static floor for that provider.
     """
@@ -157,7 +157,7 @@ def build_catalog(
 
         config = get_config()
         for provider, endpoint in _PROVIDER_ENDPOINTS.items():
-            token = config.resolve_oauth_token(provider)
+            token = config.resolve_auth_token(provider)
             live = _fetch_provider_models(provider, endpoint, token=token, transport=transport)
             if live is None:
                 continue

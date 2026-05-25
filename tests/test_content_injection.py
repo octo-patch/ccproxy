@@ -8,8 +8,8 @@ from typing import Any
 from mitmproxy import http
 
 from ccproxy.config import ProviderShapingConfig
-from ccproxy.hooks.shape import _inject_content
 from ccproxy.pipeline.context import Context
+from ccproxy.shaping.apply import inject_content
 from ccproxy.shaping.models import apply_shape
 
 
@@ -39,7 +39,7 @@ class TestContentInjection:
         incoming = _incoming_ctx({"model": "incoming-model", "messages": [{"role": "user", "content": "hi"}]})
         profile = ProviderShapingConfig(content_fields=["model", "messages"])
 
-        _inject_content(shape, incoming, profile)
+        inject_content(shape, incoming, profile)
         assert shape._body["model"] == "incoming-model"
         assert shape._body["messages"] == [{"role": "user", "content": "hi"}]
 
@@ -54,7 +54,7 @@ class TestContentInjection:
         incoming = _incoming_ctx({"model": "incoming-model"})
         profile = ProviderShapingConfig(content_fields=["model"])
 
-        _inject_content(shape, incoming, profile)
+        inject_content(shape, incoming, profile)
         assert shape._body["model"] == "incoming-model"
         assert shape._body["thinking"] == {"budget_tokens": 31999, "type": "enabled"}
         assert shape._body["context_management"] == {"edits": []}
@@ -64,7 +64,7 @@ class TestContentInjection:
         incoming = _incoming_ctx({})
         profile = ProviderShapingConfig(content_fields=["model", "temperature"])
 
-        _inject_content(shape, incoming, profile)
+        inject_content(shape, incoming, profile)
         assert "model" not in shape._body
         assert "temperature" not in shape._body
         assert shape._body["thinking"] == {"type": "enabled"}
@@ -86,7 +86,7 @@ class TestContentInjection:
             merge_strategies={"system": "prepend_shape"},
         )
 
-        _inject_content(shape, incoming, profile)
+        inject_content(shape, incoming, profile)
         assert len(shape._body["system"]) == 2
         assert shape._body["system"][0]["text"] == "shape-system"
         assert shape._body["system"][1]["text"] == "user-system"
@@ -99,7 +99,7 @@ class TestContentInjection:
             merge_strategies={"system": "prepend_shape"},
         )
 
-        _inject_content(shape, incoming, profile)
+        inject_content(shape, incoming, profile)
         assert len(shape._body["system"]) == 2
         assert shape._body["system"][0] == {"type": "text", "text": "shape-prompt"}
         assert shape._body["system"][1] == {"type": "text", "text": "user-prompt"}
@@ -120,7 +120,7 @@ class TestContentInjection:
             merge_strategies={"system": "append_shape"},
         )
 
-        _inject_content(shape, incoming, profile)
+        inject_content(shape, incoming, profile)
         assert shape._body["system"][0]["text"] == "user-system"
         assert shape._body["system"][1]["text"] == "shape-suffix"
 
@@ -132,7 +132,7 @@ class TestContentInjection:
             merge_strategies={"user_prompt_id": "drop"},
         )
 
-        _inject_content(shape, incoming, profile)
+        inject_content(shape, incoming, profile)
         assert "user_prompt_id" not in shape._body
         assert shape._body["model"] == "y"
 
@@ -150,7 +150,7 @@ class TestContentInjection:
             content_fields=["model", "max_tokens", "temperature", "top_p"],
         )
 
-        _inject_content(shape, incoming, profile)
+        inject_content(shape, incoming, profile)
         assert shape._body["model"] == "incoming"
         assert shape._body["max_tokens"] == 8192
         assert shape._body["temperature"] == 0.3

@@ -28,7 +28,7 @@ def _make_ctx(
     body: dict | None = None,
     path: str = "/v1beta/models/gemini-3.1-pro-preview:generateContent",
     headers: dict[str, str] | None = None,
-    oauth_provider: str | None = "gemini",
+    auth_provider: str | None = "gemini",
     conversation_id: str | None = None,
 ) -> Context:
     flow = MagicMock()
@@ -39,8 +39,8 @@ def _make_ctx(
     flow.request.headers = default_headers
     flow.request.path = path
     flow.metadata = {}
-    if oauth_provider:
-        flow.metadata["ccproxy.oauth_provider"] = oauth_provider
+    if auth_provider:
+        flow.metadata["ccproxy.auth_provider"] = auth_provider
     if conversation_id is not None:
         flow.metadata["ccproxy.conversation_id"] = conversation_id
     flow.metadata[InspectorMeta.RECORD] = FlowRecord(direction="inbound")
@@ -60,11 +60,11 @@ class TestGuard:
         assert gemini_cli_guard(ctx) is True
 
     def test_skipped_when_provider_is_not_gemini(self) -> None:
-        ctx = _make_ctx(oauth_provider="anthropic")
+        ctx = _make_ctx(auth_provider="anthropic")
         assert gemini_cli_guard(ctx) is False
 
     def test_skipped_when_no_provider(self) -> None:
-        ctx = _make_ctx(oauth_provider=None)
+        ctx = _make_ctx(auth_provider=None)
         assert gemini_cli_guard(ctx) is False
 
 
@@ -368,7 +368,7 @@ class TestPrewarmProject:
 
         mock_config = MagicMock()
         mock_config.providers = {"gemini": object()}
-        mock_config.resolve_oauth_token.return_value = "tok"
+        mock_config.resolve_auth_token.return_value = "tok"
 
         with (
             patch("ccproxy.hooks.gemini_cli.get_config", return_value=mock_config),
@@ -396,7 +396,7 @@ class TestPrewarmProject:
     def test_prewarm_skips_when_token_missing(self) -> None:
         mock_config = MagicMock()
         mock_config.providers = {"gemini": object()}
-        mock_config.resolve_oauth_token.return_value = ""
+        mock_config.resolve_auth_token.return_value = ""
 
         with (
             patch("ccproxy.hooks.gemini_cli.get_config", return_value=mock_config),
@@ -413,7 +413,7 @@ class TestPrewarmProject:
 
         mock_config = MagicMock()
         mock_config.providers = {"gemini": object()}
-        mock_config.resolve_oauth_token.return_value = "tok"
+        mock_config.resolve_auth_token.return_value = "tok"
 
         with (
             patch("ccproxy.hooks.gemini_cli.get_config", return_value=mock_config),

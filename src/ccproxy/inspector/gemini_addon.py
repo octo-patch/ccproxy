@@ -111,7 +111,7 @@ class GeminiAddon:
 
     @staticmethod
     def _is_gemini_flow(flow: http.HTTPFlow) -> bool:
-        return metadata_from_flow(flow).oauth_provider == "gemini"
+        return metadata_from_flow(flow).auth_provider == "gemini"
 
     @staticmethod
     def _capacity_enabled() -> bool:

@@ -32,9 +32,9 @@ from ccproxy.flows import (
     FlowsDump,
     FlowsList,
     FlowsRepl,
-    FlowsShape,
     handle_flows,
 )
+from ccproxy.shapes import ShapeAudit, Shapes, ShapeSave, handle_shapes
 from ccproxy.utils import get_templates_dir
 
 logger = logging.getLogger(__name__)
@@ -113,6 +113,7 @@ Command = (
     | Annotated[Logs, tyro.conf.subcommand(name="logs")]
     | Annotated[Status, tyro.conf.subcommand(name="status")]
     | Flows
+    | Shapes
 )
 
 
@@ -868,7 +869,7 @@ def main(
 ) -> None:
     """ccproxy - Intercept and route Claude Code requests to LLM providers.
 
-    Transparent mitmproxy-based pipeline with DAG-driven hooks for OAuth
+    Transparent mitmproxy-based pipeline with DAG-driven hooks for auth
     injection, model transformation, and identity management.
     """
     # deferred: CLI entry point, avoid eager config loading
@@ -955,8 +956,10 @@ def main(
             mermaid=cmd.mermaid,
         )
 
-    elif isinstance(cmd, FlowsList | FlowsDump | FlowsDiff | FlowsCompare | FlowsShape | FlowsRepl | FlowsClear):
+    elif isinstance(cmd, FlowsList | FlowsDump | FlowsDiff | FlowsCompare | FlowsRepl | FlowsClear):
         handle_flows(cmd, config_dir)
+    elif isinstance(cmd, ShapeSave | ShapeAudit):
+        handle_shapes(cmd, config_dir)
 
 
 def entry_point() -> None:
@@ -971,6 +974,7 @@ def entry_point() -> None:
         "status",
         "run",
         "flows",
+        "shapes",
     }
 
     run_idx = None

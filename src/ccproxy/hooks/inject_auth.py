@@ -1,4 +1,4 @@
-"""Forward OAuth hook — sentinel key substitution and token injection.
+"""Inject auth hook — sentinel key substitution and token injection.
 
 Detects ``sk-ant-oat-ccproxy-{provider}`` sentinel keys on any inbound
 auth header (``x-api-key``, ``x-goog-api-key``, or ``Authorization: Bearer``),
@@ -14,7 +14,7 @@ import logging
 from typing import TYPE_CHECKING, Any
 
 from ccproxy.config import get_config
-from ccproxy.constants import OAUTH_SENTINEL_PREFIX, OAuthConfigError
+from ccproxy.constants import AUTH_SENTINEL_PREFIX, AuthConfigError
 from ccproxy.pipeline.hook import hook
 
 if TYPE_CHECKING:
@@ -28,7 +28,7 @@ _INBOUND_AUTH_HEADERS: tuple[str, ...] = ("x-api-key", "x-goog-api-key", "author
 is matched against its bare token after stripping a ``Bearer `` prefix."""
 
 
-def forward_oauth_guard(ctx: Context) -> bool:
+def inject_auth_guard(ctx: Context) -> bool:
     """Guard: run if any inbound auth header carries a value."""
     return bool(ctx.x_api_key or ctx.authorization or ctx.get_header("x-goog-api-key") or ctx.get_header("api-key"))
 
@@ -45,7 +45,7 @@ def _extract_sentinel(ctx: Context) -> str | None:
     for header in _INBOUND_AUTH_HEADERS:
         raw = ctx.get_header(header, "")
         candidate = _bearer_token(raw) if header == "authorization" else raw
-        if candidate.startswith(OAUTH_SENTINEL_PREFIX):
+        if candidate.startswith(AUTH_SENTINEL_PREFIX):
             return candidate
     return None
 
@@ -54,33 +54,33 @@ def _extract_sentinel(ctx: Context) -> str | None:
     reads=["authorization", "x-api-key", "x-goog-api-key"],
     writes=["authorization", "x-api-key", "x-goog-api-key"],
 )
-def forward_oauth(ctx: Context, _: dict[str, Any]) -> Context:
+def inject_auth(ctx: Context, _: dict[str, Any]) -> Context:
     """Forward an auth token to the provider, substituting a sentinel key."""
     sentinel = _extract_sentinel(ctx)
     if sentinel is None:
         return ctx
 
-    provider = sentinel[len(OAUTH_SENTINEL_PREFIX) :]
-    token = _get_oauth_token(provider)
+    provider = sentinel[len(AUTH_SENTINEL_PREFIX) :]
+    token = _get_auth_token(provider)
 
     if not token:
-        raise OAuthConfigError(
+        raise AuthConfigError(
             f"Sentinel key for provider '{provider}' but no matching providers entry. "
             f"Add 'providers.{provider}' to ccproxy.yaml."
         )
 
     _inject_token(ctx, provider, token)
-    ctx.metadata.oauth_provider = provider
-    logger.info("OAuth token injected for provider '%s' (sentinel)", provider)
+    ctx.metadata.auth_provider = provider
+    logger.info("Auth token injected for provider '%s' (sentinel)", provider)
     return ctx
 
 
-def _get_oauth_token(provider: str) -> str | None:
+def _get_auth_token(provider: str) -> str | None:
     try:
         config = get_config()
-        return config.resolve_oauth_token(provider)
+        return config.resolve_auth_token(provider)
     except Exception:
-        logger.exception("Failed to load OAuth config")
+        logger.exception("Failed to load auth config")
         return None
 
 
@@ -103,4 +103,4 @@ def _inject_token(ctx: Context, provider: str, token: str) -> None:
         if header != target_header:
             ctx.set_header(header, "")
 
-    ctx.metadata.oauth_injected = True
+    ctx.metadata.auth_injected = True

@@ -1,27 +1,27 @@
-"""Tests for OAuthAddon — response-side 401 detect/refresh/replay loop."""
+"""Tests for AuthAddon — response-side 401 detect/refresh/replay loop."""
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from ccproxy import transport
-from ccproxy.inspector.oauth_addon import OAuthAddon
+from ccproxy.inspector.auth_addon import AuthAddon
 
 
-def _make_oauth_flow(
+def _make_auth_flow(
     *,
     provider: str = "anthropic",
     method: str = "POST",
     url: str = "https://api.anthropic.com/v1/messages",
     content: bytes = b'{"model": "claude-3"}',
     status_code: int = 401,
-    oauth_injected: bool = True,
+    auth_injected: bool = True,
 ) -> MagicMock:
-    """Build a minimal mock flow that mimics a forward_oauth-stamped 401 response."""
+    """Build a minimal mock flow that mimics an inject_auth-stamped 401 response."""
     flow = MagicMock()
-    metadata: dict[str, object] = {"ccproxy.oauth_provider": provider}
-    if oauth_injected:
-        metadata["ccproxy.oauth_injected"] = True
+    metadata: dict[str, object] = {"ccproxy.auth_provider": provider}
+    if auth_injected:
+        metadata["ccproxy.auth_injected"] = True
     flow.metadata = metadata
     flow.request.method = method
     flow.request.pretty_url = url
@@ -45,12 +45,12 @@ def _make_mock_client(mock_response: MagicMock) -> tuple[AsyncMock, AsyncMock]:
 
 
 class TestResponseEntryPoint:
-    """Tests for OAuthAddon.response — the gate that decides whether to retry."""
+    """Tests for AuthAddon.response — the gate that decides whether to retry."""
 
     @pytest.mark.asyncio
     async def test_noop_when_no_response(self) -> None:
         """Flow with no response object is a no-op."""
-        addon = OAuthAddon()
+        addon = AuthAddon()
         flow = MagicMock()
         flow.response = None
 
@@ -58,9 +58,9 @@ class TestResponseEntryPoint:
 
     @pytest.mark.asyncio
     async def test_noop_when_status_is_not_401(self) -> None:
-        """200 responses do not trigger a retry, even when oauth_injected is set."""
-        addon = OAuthAddon()
-        flow = _make_oauth_flow(status_code=200)
+        """200 responses do not trigger a retry, even when auth_injected is set."""
+        addon = AuthAddon()
+        flow = _make_auth_flow(status_code=200)
 
         with patch.object(addon, "_retry_with_refreshed_token", new_callable=AsyncMock) as retry:
             await addon.response(flow)
@@ -68,10 +68,10 @@ class TestResponseEntryPoint:
         retry.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_noop_when_oauth_not_injected(self) -> None:
+    async def test_noop_when_auth_not_injected(self) -> None:
         """A 401 on a flow ccproxy did not inject into is left alone."""
-        addon = OAuthAddon()
-        flow = _make_oauth_flow(status_code=401, oauth_injected=False)
+        addon = AuthAddon()
+        flow = _make_auth_flow(status_code=401, auth_injected=False)
 
         with patch.object(addon, "_retry_with_refreshed_token", new_callable=AsyncMock) as retry:
             await addon.response(flow)
@@ -79,10 +79,10 @@ class TestResponseEntryPoint:
         retry.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_triggers_retry_on_401_with_oauth_injected(self) -> None:
-        """A 401 on a forward_oauth-injected flow triggers _retry_with_refreshed_token."""
-        addon = OAuthAddon()
-        flow = _make_oauth_flow(status_code=401, oauth_injected=True)
+    async def test_triggers_retry_on_401_with_auth_injected(self) -> None:
+        """A 401 on an inject_auth-injected flow triggers _retry_with_refreshed_token."""
+        addon = AuthAddon()
+        flow = _make_auth_flow(status_code=401, auth_injected=True)
 
         with patch.object(addon, "_retry_with_refreshed_token", new_callable=AsyncMock) as retry:
             await addon.response(flow)
@@ -92,8 +92,8 @@ class TestResponseEntryPoint:
     @pytest.mark.asyncio
     async def test_swallows_unexpected_retry_exception(self) -> None:
         """Unexpected exceptions raised during retry are caught and logged."""
-        addon = OAuthAddon()
-        flow = _make_oauth_flow()
+        addon = AuthAddon()
+        flow = _make_auth_flow()
 
         with patch.object(
             addon,
@@ -106,15 +106,15 @@ class TestResponseEntryPoint:
 
 
 class TestRetryWithRefreshedToken:
-    """Tests for OAuthAddon._retry_with_refreshed_token."""
+    """Tests for AuthAddon._retry_with_refreshed_token."""
 
     @pytest.mark.asyncio
     async def test_returns_false_when_no_provider(self) -> None:
-        """Flow without ccproxy.oauth_provider metadata returns False immediately."""
+        """Flow without ccproxy.auth_provider metadata returns False immediately."""
         flow = MagicMock()
         flow.metadata = {}
 
-        addon = OAuthAddon()
+        addon = AuthAddon()
         result = await addon._retry_with_refreshed_token(flow)
         assert result is False
 
@@ -122,21 +122,21 @@ class TestRetryWithRefreshedToken:
     async def test_returns_false_when_empty_provider(self) -> None:
         """Empty provider string returns False without touching the config."""
         flow = MagicMock()
-        flow.metadata = {"ccproxy.oauth_provider": ""}
+        flow.metadata = {"ccproxy.auth_provider": ""}
 
-        addon = OAuthAddon()
+        addon = AuthAddon()
         result = await addon._retry_with_refreshed_token(flow)
         assert result is False
 
     @pytest.mark.asyncio
     async def test_returns_false_when_no_token_available(self) -> None:
-        """If resolve_oauth_token returns None — token resolution failed — returns False."""
-        flow = _make_oauth_flow(provider="anthropic")
+        """If resolve_auth_token returns None — token resolution failed — returns False."""
+        flow = _make_auth_flow(provider="anthropic")
         mock_config = MagicMock()
-        mock_config.resolve_oauth_token.return_value = None
+        mock_config.resolve_auth_token.return_value = None
 
-        with patch("ccproxy.inspector.oauth_addon.get_config", return_value=mock_config):
-            addon = OAuthAddon()
+        with patch("ccproxy.inspector.auth_addon.get_config", return_value=mock_config):
+            addon = AuthAddon()
             result = await addon._retry_with_refreshed_token(flow)
 
         assert result is False
@@ -144,9 +144,9 @@ class TestRetryWithRefreshedToken:
     @pytest.mark.asyncio
     async def test_retries_with_new_token_and_returns_true(self) -> None:
         """401 with a refreshed token issues an httpx retry and returns True."""
-        flow = _make_oauth_flow(provider="anthropic")
+        flow = _make_auth_flow(provider="anthropic")
         mock_config = MagicMock()
-        mock_config.resolve_oauth_token.return_value = "new-token"
+        mock_config.resolve_auth_token.return_value = "new-token"
         mock_config.get_auth_header.return_value = None
         mock_config.provider_timeout = None
 
@@ -157,10 +157,10 @@ class TestRetryWithRefreshedToken:
         mock_client, mock_request = _make_mock_client(mock_response)
 
         with (
-            patch("ccproxy.inspector.oauth_addon.get_config", return_value=mock_config),
-            patch("ccproxy.inspector.oauth_addon.transport.get_client", new=AsyncMock(return_value=mock_client)),
+            patch("ccproxy.inspector.auth_addon.get_config", return_value=mock_config),
+            patch("ccproxy.inspector.auth_addon.transport.get_client", new=AsyncMock(return_value=mock_client)),
         ):
-            addon = OAuthAddon()
+            addon = AuthAddon()
             result = await addon._retry_with_refreshed_token(flow)
 
         assert result is True
@@ -172,13 +172,13 @@ class TestRetryWithRefreshedToken:
     @pytest.mark.asyncio
     async def test_retry_preserves_request_body_and_method(self) -> None:
         """Retry forwards the original method and body verbatim."""
-        flow = _make_oauth_flow(
+        flow = _make_auth_flow(
             provider="anthropic",
             method="PUT",
             content=b'{"model": "claude-3", "messages": [{"role": "user", "content": "hi"}]}',
         )
         mock_config = MagicMock()
-        mock_config.resolve_oauth_token.return_value = "new-token"
+        mock_config.resolve_auth_token.return_value = "new-token"
         mock_config.get_auth_header.return_value = None
         mock_config.provider_timeout = None
 
@@ -189,10 +189,10 @@ class TestRetryWithRefreshedToken:
         mock_client, mock_request = _make_mock_client(mock_response)
 
         with (
-            patch("ccproxy.inspector.oauth_addon.get_config", return_value=mock_config),
-            patch("ccproxy.inspector.oauth_addon.transport.get_client", new=AsyncMock(return_value=mock_client)),
+            patch("ccproxy.inspector.auth_addon.get_config", return_value=mock_config),
+            patch("ccproxy.inspector.auth_addon.transport.get_client", new=AsyncMock(return_value=mock_client)),
         ):
-            addon = OAuthAddon()
+            addon = AuthAddon()
             await addon._retry_with_refreshed_token(flow)
 
         call_kwargs = mock_request.call_args.kwargs
@@ -202,10 +202,10 @@ class TestRetryWithRefreshedToken:
     @pytest.mark.asyncio
     async def test_retry_uses_custom_auth_header(self) -> None:
         """When get_auth_header returns a custom header name, it is used for the new token."""
-        flow = _make_oauth_flow(provider="gemini")
+        flow = _make_auth_flow(provider="gemini")
         flow.request.pretty_host = "gemini.googleapis.com"
         mock_config = MagicMock()
-        mock_config.resolve_oauth_token.return_value = "new-gemini-token"
+        mock_config.resolve_auth_token.return_value = "new-gemini-token"
         mock_config.get_auth_header.return_value = "x-api-key"
         mock_config.provider_timeout = None
 
@@ -216,10 +216,10 @@ class TestRetryWithRefreshedToken:
         mock_client, mock_request = _make_mock_client(mock_response)
 
         with (
-            patch("ccproxy.inspector.oauth_addon.get_config", return_value=mock_config),
-            patch("ccproxy.inspector.oauth_addon.transport.get_client", new=AsyncMock(return_value=mock_client)),
+            patch("ccproxy.inspector.auth_addon.get_config", return_value=mock_config),
+            patch("ccproxy.inspector.auth_addon.transport.get_client", new=AsyncMock(return_value=mock_client)),
         ):
-            addon = OAuthAddon()
+            addon = AuthAddon()
             result = await addon._retry_with_refreshed_token(flow)
 
         assert result is True
@@ -231,13 +231,13 @@ class TestRetryWithRefreshedToken:
     @pytest.mark.asyncio
     async def test_retry_does_not_send_internal_headers(self) -> None:
         """Internal ccproxy headers are not forwarded on retry."""
-        flow = _make_oauth_flow(provider="anthropic")
+        flow = _make_auth_flow(provider="anthropic")
         flow.request.headers = {
             "authorization": "Bearer old-token",
-            "x-ccproxy-oauth-injected": "1",
+            "x-ccproxy-auth-injected": "1",
         }
         mock_config = MagicMock()
-        mock_config.resolve_oauth_token.return_value = "new-token"
+        mock_config.resolve_auth_token.return_value = "new-token"
         mock_config.get_auth_header.return_value = None
         mock_config.provider_timeout = None
 
@@ -248,21 +248,21 @@ class TestRetryWithRefreshedToken:
         mock_client, mock_request = _make_mock_client(mock_response)
 
         with (
-            patch("ccproxy.inspector.oauth_addon.get_config", return_value=mock_config),
-            patch("ccproxy.inspector.oauth_addon.transport.get_client", new=AsyncMock(return_value=mock_client)),
+            patch("ccproxy.inspector.auth_addon.get_config", return_value=mock_config),
+            patch("ccproxy.inspector.auth_addon.transport.get_client", new=AsyncMock(return_value=mock_client)),
         ):
-            addon = OAuthAddon()
+            addon = AuthAddon()
             await addon._retry_with_refreshed_token(flow)
 
         sent_headers = mock_request.call_args.kwargs["headers"]
-        assert "x-ccproxy-oauth-injected" not in sent_headers
+        assert "x-ccproxy-auth-injected" not in sent_headers
 
     @pytest.mark.asyncio
     async def test_retry_updates_flow_response_in_place(self) -> None:
         """Successful retry updates flow.response status_code and content in place."""
-        flow = _make_oauth_flow(provider="anthropic")
+        flow = _make_auth_flow(provider="anthropic")
         mock_config = MagicMock()
-        mock_config.resolve_oauth_token.return_value = "new-token"
+        mock_config.resolve_auth_token.return_value = "new-token"
         mock_config.get_auth_header.return_value = None
         mock_config.provider_timeout = None
 
@@ -273,10 +273,10 @@ class TestRetryWithRefreshedToken:
         mock_client, _ = _make_mock_client(mock_response)
 
         with (
-            patch("ccproxy.inspector.oauth_addon.get_config", return_value=mock_config),
-            patch("ccproxy.inspector.oauth_addon.transport.get_client", new=AsyncMock(return_value=mock_client)),
+            patch("ccproxy.inspector.auth_addon.get_config", return_value=mock_config),
+            patch("ccproxy.inspector.auth_addon.transport.get_client", new=AsyncMock(return_value=mock_client)),
         ):
-            addon = OAuthAddon()
+            addon = AuthAddon()
             await addon._retry_with_refreshed_token(flow)
 
         assert flow.response.status_code == 200
@@ -290,11 +290,11 @@ class TestRetryWithRefreshedToken:
         flow.request.headers directly. If we only update flow.response, the
         replay-from-flow path sends the stale token.
         """
-        flow = _make_oauth_flow(provider="anthropic")
+        flow = _make_auth_flow(provider="anthropic")
         # Use a real dict so writes are observable.
         flow.request.headers = {"authorization": "Bearer old-token"}
         mock_config = MagicMock()
-        mock_config.resolve_oauth_token.return_value = "fresh-token"
+        mock_config.resolve_auth_token.return_value = "fresh-token"
         mock_config.get_auth_header.return_value = None
         mock_config.provider_timeout = None
 
@@ -305,10 +305,10 @@ class TestRetryWithRefreshedToken:
         mock_client, _ = _make_mock_client(mock_response)
 
         with (
-            patch("ccproxy.inspector.oauth_addon.get_config", return_value=mock_config),
-            patch("ccproxy.inspector.oauth_addon.transport.get_client", new=AsyncMock(return_value=mock_client)),
+            patch("ccproxy.inspector.auth_addon.get_config", return_value=mock_config),
+            patch("ccproxy.inspector.auth_addon.transport.get_client", new=AsyncMock(return_value=mock_client)),
         ):
-            addon = OAuthAddon()
+            addon = AuthAddon()
             await addon._retry_with_refreshed_token(flow)
 
         assert flow.request.headers["authorization"] == "Bearer fresh-token"
@@ -316,10 +316,10 @@ class TestRetryWithRefreshedToken:
     @pytest.mark.asyncio
     async def test_retry_updates_flow_request_headers_with_custom_header(self) -> None:
         """Regression: custom auth header (e.g. x-api-key) is also written back to flow.request.headers."""
-        flow = _make_oauth_flow(provider="gemini")
+        flow = _make_auth_flow(provider="gemini")
         flow.request.headers = {"x-api-key": "old-key"}
         mock_config = MagicMock()
-        mock_config.resolve_oauth_token.return_value = "fresh-key"
+        mock_config.resolve_auth_token.return_value = "fresh-key"
         mock_config.get_auth_header.return_value = "x-api-key"
         mock_config.provider_timeout = None
 
@@ -330,10 +330,10 @@ class TestRetryWithRefreshedToken:
         mock_client, _ = _make_mock_client(mock_response)
 
         with (
-            patch("ccproxy.inspector.oauth_addon.get_config", return_value=mock_config),
-            patch("ccproxy.inspector.oauth_addon.transport.get_client", new=AsyncMock(return_value=mock_client)),
+            patch("ccproxy.inspector.auth_addon.get_config", return_value=mock_config),
+            patch("ccproxy.inspector.auth_addon.transport.get_client", new=AsyncMock(return_value=mock_client)),
         ):
-            addon = OAuthAddon()
+            addon = AuthAddon()
             await addon._retry_with_refreshed_token(flow)
 
         assert flow.request.headers["x-api-key"] == "fresh-key"
@@ -341,9 +341,9 @@ class TestRetryWithRefreshedToken:
     @pytest.mark.asyncio
     async def test_retry_uses_configured_provider_timeout(self) -> None:
         """Opt-in path: provider_timeout is passed as timeout= to client.request()."""
-        flow = _make_oauth_flow(provider="anthropic")
+        flow = _make_auth_flow(provider="anthropic")
         mock_config = MagicMock()
-        mock_config.resolve_oauth_token.return_value = "new-token"
+        mock_config.resolve_auth_token.return_value = "new-token"
         mock_config.get_auth_header.return_value = None
         mock_config.provider_timeout = 120.0
 
@@ -354,10 +354,10 @@ class TestRetryWithRefreshedToken:
         mock_client, mock_request = _make_mock_client(mock_response)
 
         with (
-            patch("ccproxy.inspector.oauth_addon.get_config", return_value=mock_config),
-            patch("ccproxy.inspector.oauth_addon.transport.get_client", new=AsyncMock(return_value=mock_client)),
+            patch("ccproxy.inspector.auth_addon.get_config", return_value=mock_config),
+            patch("ccproxy.inspector.auth_addon.transport.get_client", new=AsyncMock(return_value=mock_client)),
         ):
-            addon = OAuthAddon()
+            addon = AuthAddon()
             await addon._retry_with_refreshed_token(flow)
 
         assert mock_request.call_args.kwargs["timeout"] == 120.0
@@ -365,9 +365,9 @@ class TestRetryWithRefreshedToken:
     @pytest.mark.asyncio
     async def test_retry_honors_disabled_timeout(self) -> None:
         """Default path: provider_timeout=None passes timeout=None to client.request()."""
-        flow = _make_oauth_flow(provider="anthropic")
+        flow = _make_auth_flow(provider="anthropic")
         mock_config = MagicMock()
-        mock_config.resolve_oauth_token.return_value = "new-token"
+        mock_config.resolve_auth_token.return_value = "new-token"
         mock_config.get_auth_header.return_value = None
         mock_config.provider_timeout = None
 
@@ -378,10 +378,10 @@ class TestRetryWithRefreshedToken:
         mock_client, mock_request = _make_mock_client(mock_response)
 
         with (
-            patch("ccproxy.inspector.oauth_addon.get_config", return_value=mock_config),
-            patch("ccproxy.inspector.oauth_addon.transport.get_client", new=AsyncMock(return_value=mock_client)),
+            patch("ccproxy.inspector.auth_addon.get_config", return_value=mock_config),
+            patch("ccproxy.inspector.auth_addon.transport.get_client", new=AsyncMock(return_value=mock_client)),
         ):
-            addon = OAuthAddon()
+            addon = AuthAddon()
             await addon._retry_with_refreshed_token(flow)
 
         assert mock_request.call_args.kwargs["timeout"] is None
@@ -393,9 +393,9 @@ class TestRetryWithRefreshedToken:
         is exercised end-to-end via the addon entry point."""
         import httpx
 
-        flow = _make_oauth_flow(provider="anthropic")
+        flow = _make_auth_flow(provider="anthropic")
         mock_config = MagicMock()
-        mock_config.resolve_oauth_token.return_value = "new-token"
+        mock_config.resolve_auth_token.return_value = "new-token"
         mock_config.get_auth_header.return_value = None
         mock_config.provider_timeout = None
 
@@ -403,10 +403,10 @@ class TestRetryWithRefreshedToken:
         mock_client.request = AsyncMock(side_effect=httpx.ConnectError("network down"))
 
         with (
-            patch("ccproxy.inspector.oauth_addon.get_config", return_value=mock_config),
-            patch("ccproxy.inspector.oauth_addon.transport.get_client", new=AsyncMock(return_value=mock_client)),
+            patch("ccproxy.inspector.auth_addon.get_config", return_value=mock_config),
+            patch("ccproxy.inspector.auth_addon.transport.get_client", new=AsyncMock(return_value=mock_client)),
         ):
-            addon = OAuthAddon()
+            addon = AuthAddon()
             # response() must swallow the exception and not propagate
             await addon.response(flow)
 
@@ -417,9 +417,9 @@ class TestTransportDispatchIntegration:
     @pytest.mark.asyncio
     async def test_retry_stamps_transport_and_profile_metadata(self) -> None:
         """After a successful retry, flow.metadata records transport and profile used."""
-        flow = _make_oauth_flow(provider="anthropic")
+        flow = _make_auth_flow(provider="anthropic")
         mock_config = MagicMock()
-        mock_config.resolve_oauth_token.return_value = "new-token"
+        mock_config.resolve_auth_token.return_value = "new-token"
         mock_config.get_auth_header.return_value = None
         mock_config.provider_timeout = None
 
@@ -430,10 +430,10 @@ class TestTransportDispatchIntegration:
         mock_client, _ = _make_mock_client(mock_response)
 
         with (
-            patch("ccproxy.inspector.oauth_addon.get_config", return_value=mock_config),
-            patch("ccproxy.inspector.oauth_addon.transport.get_client", new=AsyncMock(return_value=mock_client)),
+            patch("ccproxy.inspector.auth_addon.get_config", return_value=mock_config),
+            patch("ccproxy.inspector.auth_addon.transport.get_client", new=AsyncMock(return_value=mock_client)),
         ):
-            addon = OAuthAddon()
+            addon = AuthAddon()
             await addon._retry_with_refreshed_token(flow)
 
         assert flow.metadata["ccproxy.retry_transport"] == "curl_cffi"
@@ -442,10 +442,10 @@ class TestTransportDispatchIntegration:
     @pytest.mark.asyncio
     async def test_retry_uses_fingerprint_profile_from_flow_metadata(self) -> None:
         """When flow.metadata carries a fingerprint_profile, get_client is called with it."""
-        flow = _make_oauth_flow(provider="anthropic")
+        flow = _make_auth_flow(provider="anthropic")
         flow.metadata["ccproxy.fingerprint_profile"] = "firefox133"
         mock_config = MagicMock()
-        mock_config.resolve_oauth_token.return_value = "new-token"
+        mock_config.resolve_auth_token.return_value = "new-token"
         mock_config.get_auth_header.return_value = None
         mock_config.provider_timeout = None
 
@@ -457,10 +457,10 @@ class TestTransportDispatchIntegration:
 
         mock_get_client = AsyncMock(return_value=mock_client)
         with (
-            patch("ccproxy.inspector.oauth_addon.get_config", return_value=mock_config),
-            patch("ccproxy.inspector.oauth_addon.transport.get_client", new=mock_get_client),
+            patch("ccproxy.inspector.auth_addon.get_config", return_value=mock_config),
+            patch("ccproxy.inspector.auth_addon.transport.get_client", new=mock_get_client),
         ):
-            addon = OAuthAddon()
+            addon = AuthAddon()
             await addon._retry_with_refreshed_token(flow)
 
         mock_get_client.assert_awaited_once_with(host="api.anthropic.com", profile="firefox133")

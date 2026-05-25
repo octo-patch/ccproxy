@@ -40,8 +40,8 @@ __all__ = ["pplx_preflight", "pplx_preflight_guard"]
 
 
 def pplx_preflight_guard(ctx: Context) -> bool:
-    """Run only when forward_oauth resolved the Perplexity sentinel."""
-    return ctx.metadata.oauth_provider == PERPLEXITY_PROVIDER_NAME
+    """Run only when inject_auth resolved the Perplexity sentinel."""
+    return ctx.metadata.auth_provider == PERPLEXITY_PROVIDER_NAME
 
 
 @hook(reads=["query_str"], writes=[])
@@ -59,7 +59,7 @@ def pplx_preflight(ctx: Context, _: dict[str, Any]) -> Context:
         return ctx
 
     config = get_config()
-    token = config.resolve_oauth_token(PERPLEXITY_PROVIDER_NAME)
+    token = config.resolve_auth_token(PERPLEXITY_PROVIDER_NAME)
     if not token:
         logger.debug("pplx_preflight: no session token available; skipping")
         return ctx

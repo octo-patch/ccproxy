@@ -117,7 +117,7 @@ class TestRenderPipeline:
     def test_full_5_hook_production_shape(self) -> None:
         inbound = [
             _spec("extract_session_id", reads=["metadata"], writes=[]),
-            _spec("forward_oauth", reads=["authorization"], writes=["authorization"]),
+            _spec("inject_auth", reads=["authorization"], writes=["authorization"]),
         ]
         outbound = [
             _spec("inject_mcp_notifications", reads=["messages"], writes=["messages"]),
@@ -132,7 +132,7 @@ class TestRenderPipeline:
         assert "→ provider API" in text
         hook_names = (
             "extract_session_id",
-            "forward_oauth",
+            "inject_auth",
             "inject_mcp_notifications",
             "verbose_mode",
             "stamp_compliance",

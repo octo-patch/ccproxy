@@ -3,7 +3,7 @@
 Routing precedence on every inbound request:
 
     1. ``inspector.transforms`` — first regex-matched override wins.
-    2. ccproxy metadata ``oauth_provider`` — set by ``forward_oauth`` when a
+    2. ccproxy metadata ``auth_provider`` — set by ``inject_auth`` when a
        sentinel key resolved. Looks up :class:`CCProxyConfig.providers`.
     3. None — :class:`mitmproxy.proxy.mode_specs.ReverseMode` flows return
        OpenAI-shape 501; WireGuard flows pass through unchanged.
@@ -133,9 +133,9 @@ def _resolve_transform_target(
             continue
         return rule
 
-    oauth_provider = metadata_from_flow(flow).oauth_provider
-    if oauth_provider:
-        return config.providers.get(oauth_provider)
+    auth_provider = metadata_from_flow(flow).auth_provider
+    if auth_provider:
+        return config.providers.get(auth_provider)
 
     return None
 
@@ -198,7 +198,7 @@ def _handle_redirect(
         model = _model_for_routing(body, flow.request.path)
         host = target.host
         path = _apply_path_template(target.path, model=model, action=action)
-        api_key: str | None = None  # auth already stamped by forward_oauth
+        api_key: str | None = None  # auth already stamped by inject_auth
     else:
         bound = config.providers.get(target.dest_provider) if target.dest_provider else None
         resolved_host = target.dest_host or (bound.host if bound else None)
@@ -216,7 +216,7 @@ def _handle_redirect(
             path = _apply_path_template(bound.path, model=model, action=action)
         else:
             path = flow.request.path
-        api_key = config.resolve_oauth_token(target.dest_provider) if target.dest_provider else None
+        api_key = config.resolve_auth_token(target.dest_provider) if target.dest_provider else None
 
     _record_transform_meta(
         flow,
@@ -261,7 +261,7 @@ def _build_upstream_url_and_headers(
     Pulls host/path from the resolved target (``Provider`` or
     ``TransformOverride`` with optional ``dest_host`` / ``dest_path`` overrides
     falling back to the bound Provider). Auth headers are already stamped by
-    the ``forward_oauth`` inbound hook — this builder only adds the
+    the ``inject_auth`` inbound hook — this builder only adds the
     Anthropic-compat ``anthropic-version`` floor.
     """
     action = _action_for_transform(provider_type, is_streaming=is_streaming)
@@ -286,7 +286,7 @@ def _build_upstream_url_and_headers(
     headers: dict[str, str] = {}
     if provider_type in _ANTHROPIC_COMPATIBLE:
         # Defensive floor for cross-format flows targeting an Anthropic upstream
-        # where no Anthropic shape replay runs. forward_oauth has already stamped
+        # where no Anthropic shape replay runs. inject_auth has already stamped
         # auth; the shape hook adds the canonical Claude headers when present.
         headers["anthropic-version"] = "2023-06-01"
     return url, headers

@@ -40,7 +40,7 @@ class TransportOverrideAddon:
 
     async def request(self, flow: http.HTTPFlow) -> None:
         metadata = metadata_from_flow(flow)
-        provider_name = metadata.oauth_provider
+        provider_name = metadata.auth_provider
         if not provider_name:
             return
 

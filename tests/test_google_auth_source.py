@@ -21,7 +21,7 @@ from typing import Any
 import httpx
 import pytest
 
-from ccproxy.oauth.sources import GoogleAuthSource
+from ccproxy.auth.sources import GoogleAuthSource
 
 _TEST_CLIENT_ID = "681255809395-test.apps.googleusercontent.com"
 _TEST_CLIENT_SECRET = "GOCSPX-test"

@@ -20,7 +20,7 @@ import yaml
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from ccproxy.oauth.sources import (
+from ccproxy.auth.sources import (
     AnyAuthSource,
     AuthFields,
     parse_auth_source,
@@ -37,13 +37,13 @@ def _default_pplx_sources() -> list[PplxSource]:
 __all__ = [
     "AnthropicShapingConfig",
     "AnyAuthSource",
+    "AuthRuntimeConfig",
     "BillingConfig",
     "CCProxyConfig",
     "GeminiCapacityFallbackConfig",
     "McpBufferConfig",
     "McpConfig",
     "McpHttpConfig",
-    "OAuthRuntimeConfig",
     "PplxConfig",
     "PplxSearchConfig",
     "PplxUploadConfig",
@@ -133,7 +133,7 @@ class ProviderShapingConfig(BaseModel):
     )
     """Headers on the target flow that apply_shape must NOT overwrite.
 
-    These are owned by the pipeline (auth injected by forward_oauth,
+    These are owned by the pipeline (auth injected by inject_auth,
     host set by redirect handler). The shape's values for these headers
     are discarded; the target's values are restored after stamping.
     """
@@ -273,7 +273,7 @@ class GeminiCapacityFallbackConfig(BaseModel):
     """Wall-clock budget for the entire retry chain across all candidates."""
 
 
-class OAuthRuntimeConfig(BaseModel):
+class AuthRuntimeConfig(BaseModel):
     """Runtime knobs for credential command execution and OAuth refreshes."""
 
     model_config = ConfigDict(extra="ignore")
@@ -582,7 +582,7 @@ class InspectorConfig(BaseModel):
     transforms: list[TransformOverride] = Field(default_factory=list)
     """Optional regex-matched override rules layered on top of the
     sentinel-driven Provider routing. Default is empty: most routing comes
-    from :class:`CCProxyConfig.providers` via ``forward_oauth``'s sentinel
+    from :class:`CCProxyConfig.providers` via ``inject_auth``'s sentinel
     detection. Override rules force a specific destination for a
     path/model/host combination."""
 
@@ -651,7 +651,7 @@ class McpConfig(BaseModel):
 def _default_hooks() -> dict[str, list[str | dict[str, Any]]]:
     return {
         "inbound": [
-            "ccproxy.hooks.forward_oauth",
+            "ccproxy.hooks.inject_auth",
             "ccproxy.hooks.extract_session_id",
         ],
         "outbound": [
@@ -694,7 +694,7 @@ class CCProxyConfig(BaseSettings):
 
     provider_timeout: float | None = None
     """Timeout budget (seconds) for httpx-based upstream calls inside ccproxy
-    (OAuth 401 retry). ``None`` (default) disables the timeout entirely,
+    (auth 401 retry). ``None`` (default) disables the timeout entirely,
     matching Portkey AI's upstream behavior and mitmproxy's default main-
     forward path. Set to a positive float to opt into a total request
     budget applied uniformly across connect/read/write/pool phases."""
@@ -726,7 +726,7 @@ class CCProxyConfig(BaseSettings):
     """Total timeout budget for the startup readiness probe. Short by
     design — the probe is trivial and slow responses indicate a problem."""
 
-    oauth: OAuthRuntimeConfig = Field(default_factory=OAuthRuntimeConfig)
+    auth: AuthRuntimeConfig = Field(default_factory=AuthRuntimeConfig)
 
     inspector: InspectorConfig = Field(default_factory=InspectorConfig)
 
@@ -752,12 +752,7 @@ class CCProxyConfig(BaseSettings):
     transport ccproxy ships."""
 
     providers: dict[str, Provider] = Field(default_factory=dict)
-    """Provider entries keyed by sentinel suffix.
-
-    Iteration order is load-bearing: ``forward_oauth._try_cached_token``
-    walks this dict in insertion order to pick a fallback when no auth
-    header is present. ``nix/defaults.nix`` and ``ccproxy.yaml`` should
-    preserve the intended priority (anthropic, gemini, deepseek, …)."""
+    """Provider entries keyed by sentinel suffix."""
 
     # Hook configurations — either a flat list (all inbound) or a dict
     # with ``inbound`` and ``outbound`` keys for two-stage pipeline.
@@ -778,7 +773,7 @@ class CCProxyConfig(BaseSettings):
             return self.log_file
         return self.ccproxy_config_path.parent / self.log_file
 
-    def resolve_oauth_token(self, provider: str) -> str | None:
+    def resolve_auth_token(self, provider: str) -> str | None:
         """Resolve auth token for a provider via its ``Provider.auth`` source.
 
         Disk-as-truth: every call goes through ``Provider.auth.resolve()``,
@@ -794,7 +789,7 @@ class CCProxyConfig(BaseSettings):
             logger.warning("No auth configured for provider '%s'", provider)
             return None
         with _get_provider_lock(provider):
-            return provider_entry.auth.resolve(f"OAuth/{provider}")
+            return provider_entry.auth.resolve(f"Auth/{provider}")
 
     def get_auth_header(self, provider: str) -> str | None:
         """Get target auth header name for a specific provider.
@@ -864,9 +859,9 @@ class CCProxyConfig(BaseSettings):
                 if pplx_data:
                     instance.pplx = PplxConfig(**cast(dict[str, Any], pplx_data))
 
-                oauth_data = ccproxy_data.get("oauth")
-                if oauth_data:
-                    instance.oauth = OAuthRuntimeConfig(**cast(dict[str, Any], oauth_data))
+                auth_data = ccproxy_data.get("auth")
+                if auth_data:
+                    instance.auth = AuthRuntimeConfig(**cast(dict[str, Any], auth_data))
 
                 mcp_data = ccproxy_data.get("mcp")
                 if mcp_data:

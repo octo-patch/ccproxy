@@ -694,7 +694,7 @@ class TestGetClientRequestCommand:
 
 
 class TestProviderTimeoutDefault:
-    """Locked-in default for the provider-timeout knob used by OAuthAddon retries."""
+    """Locked-in default for the provider-timeout knob used by AuthAddon retries."""
 
     def test_default_config_has_no_provider_timeout(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Portkey parity locked in at the config layer: default provider_timeout is None."""

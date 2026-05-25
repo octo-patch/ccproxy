@@ -42,6 +42,11 @@ _CCH_RE = re.compile(r"cch=[0-9a-f]+")
 # user message content can never spuriously match.
 _CCH_BYTES_RE = re.compile(rb'(x-anthropic-billing-header:[^"]*?\bcch=)(00000)(;)')
 
+_UUID_HEADERS = (
+    "x-claude-code-session-id",
+    "x-client-request-id",
+)
+
 
 @hook(reads=["user_prompt_id"], writes=["user_prompt_id"])
 def regenerate_user_prompt_id(ctx: Context, params: dict[str, Any]) -> Context:
@@ -69,6 +74,15 @@ def regenerate_session_id(ctx: Context, params: dict[str, Any]) -> Context:
     if "device_id" in identity or "account_uuid" in identity:
         identity["session_id"] = str(uuid.uuid4())
         metadata["user_id"] = json.dumps(identity)
+    return ctx
+
+
+@hook(reads=[*_UUID_HEADERS], writes=[*_UUID_HEADERS])
+def regenerate_request_ids(ctx: Context, params: dict[str, Any]) -> Context:
+    """Re-roll captured UUID-shaped request/session headers."""
+    for name in _UUID_HEADERS:
+        if ctx.get_header(name):
+            ctx.set_header(name, str(uuid.uuid4()))
     return ctx
 
 

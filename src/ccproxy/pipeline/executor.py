@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 
-from ccproxy.constants import OAuthConfigError
+from ccproxy.constants import AuthConfigError
 from ccproxy.lightllm import LightLLMError
 from ccproxy.pipeline.context import Context
 from ccproxy.pipeline.dag import HookDAG
@@ -122,7 +122,7 @@ class PipelineExecutor:
             HookResult indicating success, skip, or error.
 
         Raises:
-            OAuthConfigError: Fatal error that should propagate.
+            AuthConfigError: Fatal error that should propagate.
             LightLLMError: Client-visible transform or provider-surface error.
             httpx.HTTPStatusError: Upstream HTTP response that should be forwarded intact.
         """
@@ -143,7 +143,7 @@ class PipelineExecutor:
             spec.execute(ctx, params)
             return _HookSuccess()
 
-        except (OAuthConfigError, LightLLMError, httpx.HTTPStatusError):
+        except (AuthConfigError, LightLLMError, httpx.HTTPStatusError):
             raise
         except Exception as e:
             logger.error(

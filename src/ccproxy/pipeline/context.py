@@ -283,8 +283,8 @@ class CcproxyMetadata(MetadataSection):
     sse_transformer: Any | None = metadata_field(default=None)
     otel_span: Any | None = metadata_field(default=None)
     otel_span_ended: bool = metadata_field(default=False)
-    oauth_provider: str = metadata_field(default="")
-    oauth_injected: bool = metadata_field(default=False)
+    auth_provider: str = metadata_field(default="")
+    auth_injected: bool = metadata_field(default=False)
     session_id: str = metadata_field(default="")
     inbound_format: str = metadata_field(default="unknown")
     request_parameters: ModelRequestParameters | None = metadata_field(key="parsed_request_parameters", default=None)
@@ -342,8 +342,8 @@ def _replace_system_parts(
 def _select_inbound_format(req: http.Request | None) -> InboundFormat:
     """Determine the listener-side wire format from path + headers.
 
-    The choice is independent of upstream OAuth provider resolution
-    (which happens later in the pipeline via ``forward_oauth``) — wire
+    The choice is independent of upstream auth provider resolution
+    (which happens later in the pipeline via ``inject_auth``) — wire
     format is dictated by what the client SENT, not what we route to.
     """
     if req is None:
@@ -671,12 +671,12 @@ class Context:
     # --- Metadata convenience properties ---
 
     @property
-    def oauth_provider(self) -> str:
-        return self.metadata.oauth_provider
+    def auth_provider(self) -> str:
+        return self.metadata.auth_provider
 
-    @oauth_provider.setter
-    def oauth_provider(self, value: str) -> None:
-        self.metadata.oauth_provider = value
+    @auth_provider.setter
+    def auth_provider(self, value: str) -> None:
+        self.metadata.auth_provider = value
 
     # --- Commit ---
 

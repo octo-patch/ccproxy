@@ -14,14 +14,12 @@ from ccproxy.flows import (
     FlowsDump,
     FlowsList,
     FlowsRepl,
-    FlowsShape,
     MitmwebClient,
     _do_compare,
     _do_diff,
     _do_dump,
     _do_list,
     _do_repl,
-    _do_shape,
     _format_body,
     _git_diff,
     _header_value,
@@ -644,37 +642,6 @@ class TestDoDump:
             _do_dump(client, [])
 
 
-class TestDoShape:
-    def test_patch_mode_requires_single_flow(self) -> None:
-        console = MagicMock()
-        client = MagicMock()
-
-        with pytest.raises(SystemExit):
-            _do_shape(console, client, [{"id": "a"}, {"id": "b"}], provider="anthropic", mflow=False)
-
-        client.save_shape.assert_not_called()
-
-    def test_patch_mode_calls_client(self) -> None:
-        console = MagicMock()
-        client = MagicMock()
-        client.save_shape.return_value = {"provider": "anthropic", "status": "ok", "patch": "shape.patch"}
-
-        _do_shape(console, client, [{"id": "a"}], provider="anthropic", mflow=False)
-
-        client.save_shape.assert_called_once_with(["a"], "anthropic", mode="patch")
-        assert "Saved shape patch" in str(console.print.call_args)
-
-    def test_mflow_mode_accepts_multiple_flows(self) -> None:
-        console = MagicMock()
-        client = MagicMock()
-        client.save_shape.return_value = {"provider": "anthropic", "flows_saved": 2, "missing": []}
-
-        _do_shape(console, client, [{"id": "a"}, {"id": "b"}], provider="anthropic", mflow=True)
-
-        client.save_shape.assert_called_once_with(["a", "b"], "anthropic", mode="mflow")
-        assert "Saved .mflow shape" in str(console.print.call_args)
-
-
 class TestDoDiff:
     """Tests for _do_diff — sliding window over the flow set."""
 
@@ -976,29 +943,6 @@ class TestHandleFlows:
     @patch("ccproxy.config.get_config")
     @patch("ccproxy.flows._make_client")
     @patch("ccproxy.flows._resolve_flow_set")
-    @patch("ccproxy.flows._do_shape")
-    def test_shape_subcommand(
-        self,
-        mock_shape: MagicMock,
-        mock_resolve: MagicMock,
-        mock_client: MagicMock,
-        mock_config: MagicMock,
-    ) -> None:
-        mock_ctx = MagicMock()
-        mock_client.return_value.__enter__ = MagicMock(return_value=mock_ctx)
-        mock_client.return_value.__exit__ = MagicMock(return_value=False)
-        flow_set = [{"id": "a"}]
-        mock_resolve.return_value = flow_set
-
-        handle_flows(FlowsShape(provider="anthropic"), Path("/tmp"))  # noqa: S108
-
-        mock_shape.assert_called_once()
-        assert mock_shape.call_args.kwargs["provider"] == "anthropic"
-        assert mock_shape.call_args.kwargs["mflow"] is False
-
-    @patch("ccproxy.config.get_config")
-    @patch("ccproxy.flows._make_client")
-    @patch("ccproxy.flows._resolve_flow_set")
     @patch("ccproxy.flows._do_clear")
     def test_clear_subcommand(
         self,
@@ -1069,7 +1013,7 @@ class TestMakeClientWebPassword:
     """Tests for _make_client with AnyAuthSource web_password."""
 
     def test_dict_form_web_password(self, tmp_path: Path) -> None:
-        from ccproxy.oauth.sources import parse_auth_source
+        from ccproxy.auth.sources import parse_auth_source
 
         mock_config = MagicMock()
         mock_config.inspector.mitmproxy.web_host = "127.0.0.1"
@@ -1086,7 +1030,7 @@ class TestMakeClientWebPassword:
         assert client._base == "http://127.0.0.1:8084"
 
     def test_credential_source_object(self) -> None:
-        from ccproxy.oauth.sources import CommandAuthSource
+        from ccproxy.auth.sources import CommandAuthSource
 
         mock_config = MagicMock()
         mock_config.inspector.mitmproxy.web_host = "127.0.0.1"

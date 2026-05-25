@@ -47,7 +47,7 @@ class PerplexityAddon:
 
     @staticmethod
     def _is_pplx_flow(flow: http.HTTPFlow) -> bool:
-        return metadata_from_flow(flow).oauth_provider == PERPLEXITY_PROVIDER_NAME
+        return metadata_from_flow(flow).auth_provider == PERPLEXITY_PROVIDER_NAME
 
     async def response(self, flow: http.HTTPFlow) -> None:
         """Parse the upstream Perplexity SSE body and save IDs to the L1 cache.

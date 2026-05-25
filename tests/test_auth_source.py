@@ -21,7 +21,7 @@ from typing import Any, Literal
 import httpx
 import pytest
 
-from ccproxy.oauth.sources import AuthSource
+from ccproxy.auth.sources import AuthSource
 
 
 class _TestableAuthSource(AuthSource):

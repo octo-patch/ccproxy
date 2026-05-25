@@ -78,7 +78,7 @@ def _make_captured_fingerprint(provider: str = "anthropic") -> CapturedFingerpri
 
 def _make_flow(
     *,
-    oauth_provider: str | None = None,
+    auth_provider: str | None = None,
     pretty_url: str = "https://api.anthropic.com/v1/messages",
     host: str = "api.anthropic.com",
     port: int = 443,
@@ -96,8 +96,8 @@ def _make_flow(
     flow = MagicMock()
     flow.id = "test-flow-id"
     flow.metadata = {}
-    if oauth_provider is not None:
-        flow.metadata["ccproxy.oauth_provider"] = oauth_provider
+    if auth_provider is not None:
+        flow.metadata["ccproxy.auth_provider"] = auth_provider
 
     flow.request.pretty_url = pretty_url
     flow.request.host = host
@@ -130,9 +130,9 @@ def _set_provider(name: str, *, fingerprint_profile: str | None) -> None:
 
 
 class TestNoopPaths:
-    async def test_noop_when_oauth_provider_absent(self) -> None:
-        """Flow with no ccproxy.oauth_provider metadata is left completely untouched."""
-        flow = _make_flow(oauth_provider=None)
+    async def test_noop_when_auth_provider_absent(self) -> None:
+        """Flow with no ccproxy.auth_provider metadata is left completely untouched."""
+        flow = _make_flow(auth_provider=None)
         original_host = flow.request.host
         original_port = flow.request.port
         original_scheme = flow.request.scheme
@@ -147,10 +147,10 @@ class TestNoopPaths:
         assert TARGET_URL_HEADER not in flow.request.headers
         assert IMPERSONATE_HEADER not in flow.request.headers
 
-    async def test_noop_when_oauth_provider_empty_string(self) -> None:
-        """An empty string for oauth_provider is falsy — treated as absent."""
+    async def test_noop_when_auth_provider_empty_string(self) -> None:
+        """An empty string for auth_provider is falsy — treated as absent."""
         flow = _make_flow()
-        flow.metadata["ccproxy.oauth_provider"] = ""
+        flow.metadata["ccproxy.auth_provider"] = ""
         original_host = flow.request.host
 
         addon = TransportOverrideAddon(sidecar_port=_SIDECAR_PORT)
@@ -160,8 +160,8 @@ class TestNoopPaths:
         assert "ccproxy.transport_override" not in flow.metadata
 
     async def test_noop_when_provider_unknown_to_config(self) -> None:
-        """oauth_provider set to a name not in config.providers — untouched."""
-        flow = _make_flow(oauth_provider="doesnotexist")
+        """auth_provider set to a name not in config.providers — untouched."""
+        flow = _make_flow(auth_provider="doesnotexist")
         # Leave config empty (autouse cleanup already cleared it)
         original_host = flow.request.host
 
@@ -175,7 +175,7 @@ class TestNoopPaths:
         """Provider exists, fingerprint_profile=None, no shape fingerprint — flow is untouched."""
         _set_provider("anthropic", fingerprint_profile=None)
         shape_fingerprint(None)
-        flow = _make_flow(oauth_provider="anthropic")
+        flow = _make_flow(auth_provider="anthropic")
         original_host = flow.request.host
         original_port = flow.request.port
 
@@ -189,7 +189,7 @@ class TestNoopPaths:
     async def test_noop_leaves_headers_clean_when_no_profile_and_no_shape(self, shape_fingerprint) -> None:
         _set_provider("anthropic", fingerprint_profile=None)
         shape_fingerprint(None)
-        flow = _make_flow(oauth_provider="anthropic")
+        flow = _make_flow(auth_provider="anthropic")
 
         addon = TransportOverrideAddon(sidecar_port=_SIDECAR_PORT)
         await addon.request(flow)
@@ -207,7 +207,7 @@ class TestRewritePath:
     async def test_target_url_header_set_to_original_pretty_url(self) -> None:
         _set_provider("anthropic", fingerprint_profile="chrome131")
         pretty_url = "https://api.anthropic.com/v1/messages"
-        flow = _make_flow(oauth_provider="anthropic", pretty_url=pretty_url)
+        flow = _make_flow(auth_provider="anthropic", pretty_url=pretty_url)
 
         addon = TransportOverrideAddon(sidecar_port=_SIDECAR_PORT)
         await addon.request(flow)
@@ -216,7 +216,7 @@ class TestRewritePath:
 
     async def test_impersonate_header_set_to_profile(self) -> None:
         _set_provider("anthropic", fingerprint_profile="chrome131")
-        flow = _make_flow(oauth_provider="anthropic")
+        flow = _make_flow(auth_provider="anthropic")
 
         addon = TransportOverrideAddon(sidecar_port=_SIDECAR_PORT)
         await addon.request(flow)
@@ -225,7 +225,7 @@ class TestRewritePath:
 
     async def test_host_rewritten_to_loopback(self) -> None:
         _set_provider("anthropic", fingerprint_profile="chrome131")
-        flow = _make_flow(oauth_provider="anthropic")
+        flow = _make_flow(auth_provider="anthropic")
 
         addon = TransportOverrideAddon(sidecar_port=_SIDECAR_PORT)
         await addon.request(flow)
@@ -234,7 +234,7 @@ class TestRewritePath:
 
     async def test_port_rewritten_to_sidecar_port(self) -> None:
         _set_provider("anthropic", fingerprint_profile="chrome131")
-        flow = _make_flow(oauth_provider="anthropic")
+        flow = _make_flow(auth_provider="anthropic")
 
         addon = TransportOverrideAddon(sidecar_port=_SIDECAR_PORT)
         await addon.request(flow)
@@ -243,7 +243,7 @@ class TestRewritePath:
 
     async def test_scheme_rewritten_to_http(self) -> None:
         _set_provider("anthropic", fingerprint_profile="chrome131")
-        flow = _make_flow(oauth_provider="anthropic", scheme="https")
+        flow = _make_flow(auth_provider="anthropic", scheme="https")
 
         addon = TransportOverrideAddon(sidecar_port=_SIDECAR_PORT)
         await addon.request(flow)
@@ -252,7 +252,7 @@ class TestRewritePath:
 
     async def test_host_header_set_to_loopback_with_port(self) -> None:
         _set_provider("anthropic", fingerprint_profile="chrome131")
-        flow = _make_flow(oauth_provider="anthropic")
+        flow = _make_flow(auth_provider="anthropic")
 
         addon = TransportOverrideAddon(sidecar_port=_SIDECAR_PORT)
         await addon.request(flow)
@@ -261,7 +261,7 @@ class TestRewritePath:
 
     async def test_transport_override_flag_set_in_metadata(self) -> None:
         _set_provider("anthropic", fingerprint_profile="chrome131")
-        flow = _make_flow(oauth_provider="anthropic")
+        flow = _make_flow(auth_provider="anthropic")
 
         addon = TransportOverrideAddon(sidecar_port=_SIDECAR_PORT)
         await addon.request(flow)
@@ -270,7 +270,7 @@ class TestRewritePath:
 
     async def test_fingerprint_profile_recorded_in_metadata(self) -> None:
         _set_provider("anthropic", fingerprint_profile="chrome131")
-        flow = _make_flow(oauth_provider="anthropic")
+        flow = _make_flow(auth_provider="anthropic")
 
         addon = TransportOverrideAddon(sidecar_port=_SIDECAR_PORT)
         await addon.request(flow)
@@ -283,7 +283,7 @@ class TestRewritePath:
         pretty_url = "https://api.anthropic.com/v1/messages"
         _set_provider("myanthropic", fingerprint_profile=profile)
         flow = _make_flow(
-            oauth_provider="myanthropic",
+            auth_provider="myanthropic",
             pretty_url=pretty_url,
             host="api.anthropic.com",
             port=443,
@@ -314,7 +314,7 @@ class TestSidecarPortPropagation:
         _set_provider("anthropic", fingerprint_profile="chrome131")
 
         for port in (12345, 54321, 9999):
-            flow = _make_flow(oauth_provider="anthropic")
+            flow = _make_flow(auth_provider="anthropic")
             addon = TransportOverrideAddon(sidecar_port=port)
             await addon.request(flow)
             assert flow.request.port == port
@@ -333,7 +333,7 @@ class TestForwardedRequestCapture:
         """forwarded_request is populated when a FlowRecord is on the flow."""
         _set_provider("anthropic", fingerprint_profile="chrome131")
         flow = _make_flow(
-            oauth_provider="anthropic",
+            auth_provider="anthropic",
             pretty_url="https://api.anthropic.com/v1/messages",
             method="POST",
             content=b'{"model": "claude-sonnet"}',
@@ -349,7 +349,7 @@ class TestForwardedRequestCapture:
     async def test_snapshot_method_matches_original(self) -> None:
         """Snapshot preserves the original HTTP method."""
         _set_provider("anthropic", fingerprint_profile="chrome131")
-        flow = _make_flow(oauth_provider="anthropic", method="POST")
+        flow = _make_flow(auth_provider="anthropic", method="POST")
         record = FlowRecord(direction="inbound")
         flow.metadata[InspectorMeta.RECORD] = record
 
@@ -363,7 +363,7 @@ class TestForwardedRequestCapture:
         """Snapshot URL is the real upstream URL, not the rewritten sidecar URL."""
         _set_provider("anthropic", fingerprint_profile="chrome131")
         original_url = "https://api.anthropic.com/v1/messages"
-        flow = _make_flow(oauth_provider="anthropic", pretty_url=original_url)
+        flow = _make_flow(auth_provider="anthropic", pretty_url=original_url)
         record = FlowRecord(direction="inbound")
         flow.metadata[InspectorMeta.RECORD] = record
 
@@ -378,7 +378,7 @@ class TestForwardedRequestCapture:
         """Snapshot URL is the original pretty_url, not the localhost sidecar URL."""
         _set_provider("anthropic", fingerprint_profile="chrome131")
         original_url = "https://api.openai.com/v1/chat/completions"
-        flow = _make_flow(oauth_provider="anthropic", pretty_url=original_url)
+        flow = _make_flow(auth_provider="anthropic", pretty_url=original_url)
         record = FlowRecord(direction="inbound")
         flow.metadata[InspectorMeta.RECORD] = record
 
@@ -392,7 +392,7 @@ class TestForwardedRequestCapture:
     async def test_snapshot_headers_are_pre_rewrite(self) -> None:
         """Snapshot headers contain original headers, not sidecar-injected ones."""
         _set_provider("anthropic", fingerprint_profile="chrome131")
-        flow = _make_flow(oauth_provider="anthropic")
+        flow = _make_flow(auth_provider="anthropic")
         flow.request.headers = {"authorization": "Bearer tok", "content-type": "application/json"}
         record = FlowRecord(direction="inbound")
         flow.metadata[InspectorMeta.RECORD] = record
@@ -413,7 +413,7 @@ class TestForwardedRequestCapture:
         """Snapshot body equals flow.request.content at capture time."""
         _set_provider("anthropic", fingerprint_profile="chrome131")
         original_body = b'{"messages": [{"role": "user", "content": "hello"}]}'
-        flow = _make_flow(oauth_provider="anthropic", content=original_body)
+        flow = _make_flow(auth_provider="anthropic", content=original_body)
         record = FlowRecord(direction="inbound")
         flow.metadata[InspectorMeta.RECORD] = record
 
@@ -426,7 +426,7 @@ class TestForwardedRequestCapture:
     async def test_no_record_on_flow_no_crash(self) -> None:
         """Missing FlowRecord — addon still rewrites normally without raising."""
         _set_provider("anthropic", fingerprint_profile="chrome131")
-        flow = _make_flow(oauth_provider="anthropic")
+        flow = _make_flow(auth_provider="anthropic")
         # No InspectorMeta.RECORD in metadata
 
         addon = TransportOverrideAddon(sidecar_port=_SIDECAR_PORT)
@@ -443,7 +443,7 @@ class TestForwardedRequestCapture:
         """Provider with fingerprint_profile=None AND no shape — forwarded_request stays None."""
         _set_provider("anthropic", fingerprint_profile=None)
         shape_fingerprint(None)
-        flow = _make_flow(oauth_provider="anthropic")
+        flow = _make_flow(auth_provider="anthropic")
         record = FlowRecord(direction="inbound")
         flow.metadata[InspectorMeta.RECORD] = record
 
@@ -465,7 +465,7 @@ class TestShapeImplicitPath:
     async def test_shape_fingerprint_engages_sidecar(self, shape_fingerprint) -> None:
         _set_provider("anthropic", fingerprint_profile=None)
         shape_fingerprint(_make_captured_fingerprint())
-        flow = _make_flow(oauth_provider="anthropic")
+        flow = _make_flow(auth_provider="anthropic")
 
         addon = TransportOverrideAddon(sidecar_port=_SIDECAR_PORT)
         await addon.request(flow)
@@ -486,7 +486,7 @@ class TestShapeImplicitPath:
         cfg = CCProxyConfig(providers={"some-alias": provider})
         set_config_instance(cfg)
         shape_fingerprint(_make_captured_fingerprint())
-        flow = _make_flow(oauth_provider="some-alias")
+        flow = _make_flow(auth_provider="some-alias")
 
         addon = TransportOverrideAddon(sidecar_port=_SIDECAR_PORT)
         await addon.request(flow)
@@ -499,7 +499,7 @@ class TestShapeImplicitPath:
         _set_provider("anthropic", fingerprint_profile="chrome131")
         shape_fingerprint(_make_captured_fingerprint())
 
-        flow = _make_flow(oauth_provider="anthropic")
+        flow = _make_flow(auth_provider="anthropic")
 
         addon = TransportOverrideAddon(sidecar_port=_SIDECAR_PORT)
         await addon.request(flow)
@@ -511,7 +511,7 @@ class TestShapeImplicitPath:
         _set_provider("anthropic", fingerprint_profile=None)
         shape_fingerprint(_make_captured_fingerprint())
         pretty_url = "https://api.anthropic.com/v1/messages"
-        flow = _make_flow(oauth_provider="anthropic", pretty_url=pretty_url)
+        flow = _make_flow(auth_provider="anthropic", pretty_url=pretty_url)
 
         addon = TransportOverrideAddon(sidecar_port=_SIDECAR_PORT)
         await addon.request(flow)
@@ -521,7 +521,7 @@ class TestShapeImplicitPath:
     async def test_forwarded_request_captured_in_implicit_path(self, shape_fingerprint) -> None:
         _set_provider("anthropic", fingerprint_profile=None)
         shape_fingerprint(_make_captured_fingerprint())
-        flow = _make_flow(oauth_provider="anthropic")
+        flow = _make_flow(auth_provider="anthropic")
         record = FlowRecord(direction="inbound")
         flow.metadata[InspectorMeta.RECORD] = record
 
@@ -580,7 +580,7 @@ PROVIDER_REWRITE_CASES: list[ProviderRewriteCase] = [
 )
 async def test_provider_rewrite_profile_applied(case: ProviderRewriteCase) -> None:
     _set_provider(case.provider_name, fingerprint_profile=case.fingerprint_profile)
-    flow = _make_flow(oauth_provider=case.provider_name)
+    flow = _make_flow(auth_provider=case.provider_name)
 
     addon = TransportOverrideAddon(sidecar_port=case.sidecar_port)
     await addon.request(flow)

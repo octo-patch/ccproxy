@@ -2,7 +2,7 @@
 
 Perplexity's ``/rest/sse/perplexity_ask`` authenticates via a
 ``__Secure-next-auth.session-token`` cookie (Pro subscription), not via the
-default ``Authorization: Bearer`` header that :mod:`forward_oauth` injects.
+default ``Authorization: Bearer`` header that :mod:`inject_auth` injects.
 Pre-refactor, ``PerplexityProConfig.validate_environment`` (a litellm
 ``BaseConfig`` hook) stamped the cookie and the Chrome-shape sibling
 headers (``User-Agent``, ``Origin``, ``Referer``, ``x-perplexity-*``,
@@ -10,10 +10,10 @@ headers (``User-Agent``, ``Origin``, ``Referer``, ``x-perplexity-*``,
 migration removed litellm and with it that step — this hook re-implements
 it as an outbound DAG entry.
 
-Runs after :mod:`forward_oauth` (which stamps ``ctx.metadata.oauth_provider``
+Runs after :mod:`inject_auth` (which stamps ``ctx.metadata.auth_provider``
 and writes the placeholder ``Authorization`` header) and before
 :mod:`pplx_preflight`. The ``Authorization`` header is cleared
-once the Cookie equivalent is in place — leaking the OAuth-shape header
+once the Cookie equivalent is in place — leaking the sentinel-resolved header
 to Perplexity would expose the sentinel-resolution surface and risks
 Cloudflare scrutiny.
 
@@ -48,19 +48,19 @@ __all__ = ["pplx_stamp_headers", "pplx_stamp_headers_guard"]
 
 
 def pplx_stamp_headers_guard(ctx: Context) -> bool:
-    """Run only when forward_oauth resolved the Perplexity sentinel."""
-    return ctx.metadata.oauth_provider == PERPLEXITY_PROVIDER_NAME
+    """Run only when inject_auth resolved the Perplexity sentinel."""
+    return ctx.metadata.auth_provider == PERPLEXITY_PROVIDER_NAME
 
 
 @hook(reads=[], writes=[])
 def pplx_stamp_headers(ctx: Context, _: dict[str, Any]) -> Context:
     """Replace ``Authorization: Bearer`` with the Perplexity Pro browser-shape headers.
 
-    Drops the ``Authorization`` header set by :mod:`forward_oauth` and
+    Drops the ``Authorization`` header set by :mod:`inject_auth` and
     stamps the Chrome-shape cookie-auth bundle Perplexity's WebUI expects.
     """
     config = get_config()
-    token = config.resolve_oauth_token(PERPLEXITY_PROVIDER_NAME)
+    token = config.resolve_auth_token(PERPLEXITY_PROVIDER_NAME)
     if not token:
         logger.debug("pplx_stamp_headers: no session token resolved; skipping")
         return ctx
@@ -79,7 +79,7 @@ def pplx_stamp_headers(ctx: Context, _: dict[str, Any]) -> Context:
     ctx.set_header("sec-fetch-mode", "cors")
     ctx.set_header("sec-fetch-site", "same-origin")
     # Drop the placeholder Authorization header so Perplexity sees a clean
-    # browser-shape request — leaking the OAuth sentinel-resolution
+    # browser-shape request — leaking the sentinel-resolution
     # surface risks Cloudflare scrutiny.
     ctx.set_header("Authorization", "")
     return ctx

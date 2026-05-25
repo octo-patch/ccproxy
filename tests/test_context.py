@@ -133,9 +133,9 @@ class TestBodyProperties:
 
     def test_metadata_writes_to_ccproxy_flow_namespace(self):
         ctx = Context.from_flow(_make_flow())
-        ctx.metadata.oauth_provider = "anthropic"
-        assert ctx.metadata.oauth_provider == "anthropic"
-        assert ctx.flow_metadata["ccproxy.oauth_provider"] == "anthropic"
+        ctx.metadata.auth_provider = "anthropic"
+        assert ctx.metadata.auth_provider == "anthropic"
+        assert ctx.flow_metadata["ccproxy.auth_provider"] == "anthropic"
 
     def test_metadata_mapping_writes_dynamic_keys(self):
         ctx = Context.from_flow(_make_flow())
@@ -201,11 +201,11 @@ class TestHeaderMethods:
 
 
 class TestMetadataConvenienceProperties:
-    def test_oauth_provider_getter(self):
+    def test_auth_provider_getter(self):
         flow = _make_flow(body={"model": "m", "messages": []})
-        flow.metadata["ccproxy.oauth_provider"] = "anthropic"
+        flow.metadata["ccproxy.auth_provider"] = "anthropic"
         ctx = Context.from_flow(flow)
-        assert ctx.oauth_provider == "anthropic"
+        assert ctx.auth_provider == "anthropic"
 
 
 class TestCommit:

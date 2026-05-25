@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 
 from mitmproxy.proxy.mode_specs import ProxyMode
 
+from ccproxy.auth.sources import CommandAuthSource
 from ccproxy.config import (
     CCProxyConfig,
     InspectorConfig,
@@ -21,7 +22,6 @@ from ccproxy.inspector.routes.transform import (
     _resolve_transform_target,
     register_transform_routes,
 )
-from ccproxy.oauth.sources import CommandAuthSource
 
 
 def _make_flow(
@@ -223,14 +223,14 @@ class TestResolveTransformTarget:
 
 
 class TestSentinelResolvedProvider:
-    """Resolve target via flow.metadata['ccproxy.oauth_provider'] when no override matches."""
+    """Resolve target via flow.metadata['ccproxy.auth_provider'] when no override matches."""
 
     def test_returns_provider_for_known_sentinel(self) -> None:
         provider = _make_provider(host="api.anthropic.com", path="/v1/messages", type="anthropic")
         _make_config_with_providers({"anthropic": provider})
 
         flow = _make_flow(host="proxy.local", path="/v1/chat/completions")
-        flow.metadata["ccproxy.oauth_provider"] = "anthropic"
+        flow.metadata["ccproxy.auth_provider"] = "anthropic"
 
         target = _resolve_transform_target(flow)
         assert isinstance(target, Provider)
@@ -244,7 +244,7 @@ class TestSentinelResolvedProvider:
     def test_returns_none_when_sentinel_provider_not_registered(self) -> None:
         _make_config_with_providers({})
         flow = _make_flow(host="proxy.local", path="/v1/chat/completions")
-        flow.metadata["ccproxy.oauth_provider"] = "anthropic"
+        flow.metadata["ccproxy.auth_provider"] = "anthropic"
         assert _resolve_transform_target(flow) is None
 
     def test_override_wins_over_sentinel(self) -> None:
@@ -265,7 +265,7 @@ class TestSentinelResolvedProvider:
         set_config_instance(config)
 
         flow = _make_flow(host="proxy.local", path="/v1/chat/completions")
-        flow.metadata["ccproxy.oauth_provider"] = "anthropic"
+        flow.metadata["ccproxy.auth_provider"] = "anthropic"
 
         target = _resolve_transform_target(flow)
         assert isinstance(target, TransformOverride)

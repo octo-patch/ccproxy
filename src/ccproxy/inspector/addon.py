@@ -3,7 +3,7 @@
 Captures all HTTP traffic flowing through reverse and WireGuard proxy
 listeners. All flows are treated as inbound — there is no outbound
 direction concept. The three-stage addon chain (inbound → transform →
-outbound) handles OAuth injection, lightllm routing, and last-mile
+outbound) handles auth injection, lightllm routing, and last-mile
 fixups respectively.
 """
 

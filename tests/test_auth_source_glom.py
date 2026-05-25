@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from ccproxy.oauth.sources import AuthSource
+from ccproxy.auth.sources import AuthSource
 
 
 class _TestableAuthSource(AuthSource):

@@ -47,6 +47,8 @@ def inject_gemini_content(ctx: Context, params: dict[str, Any]) -> Context:
 
     if "contents" in incoming_request:
         shape_request["contents"] = incoming_request["contents"]
+    if "session_id" in incoming_request:
+        shape_request["session_id"] = incoming_request["session_id"]
 
     shape_gen = shape_request.get("generationConfig", {})
     incoming_gen = incoming_request.get("generationConfig", {})

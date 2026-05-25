@@ -53,8 +53,8 @@ __all__ = ["pplx_thread_inject", "pplx_thread_inject_guard"]
 
 
 def pplx_thread_inject_guard(ctx: Context) -> bool:
-    """Run only when forward_oauth resolved the Perplexity sentinel."""
-    return ctx.metadata.oauth_provider == PERPLEXITY_PROVIDER_NAME
+    """Run only when inject_auth resolved the Perplexity sentinel."""
+    return ctx.metadata.auth_provider == PERPLEXITY_PROVIDER_NAME
 
 
 def _thread_fetch_params(*, limit: int, cursor: str | None) -> list[tuple[str, str]]:
@@ -204,7 +204,7 @@ def pplx_thread_inject(ctx: Context, _: dict[str, Any]) -> Context:
 
     if isinstance(slug, str) and slug:
         config = get_config()
-        token = config.resolve_oauth_token(PERPLEXITY_PROVIDER_NAME)
+        token = config.resolve_auth_token(PERPLEXITY_PROVIDER_NAME)
         if not token:
             raise PerplexityError(
                 status_code=503,

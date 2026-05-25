@@ -35,7 +35,7 @@ class AuthMeta:
     """HTTP header name used for authentication."""
 
     injected: bool = False
-    """Whether the credential was injected by the OAuth hook."""
+    """Whether the credential was injected by the auth hook."""
 
     original_key: str = ""
     """Original API key before sentinel substitution."""
@@ -118,7 +118,7 @@ class FlowRecord:
     """Traffic direction (always inbound)."""
 
     auth: AuthMeta | None = None
-    """Auth decision from the OAuth hook, if any."""
+    """Auth decision from the auth hook, if any."""
 
     otel: OtelMeta | None = None
     """OTel span lifecycle state."""

@@ -1,6 +1,6 @@
 """Shape hook — pick a saved shape, inject content, apply it.
 
-Runs last in the outbound pipeline. For reverse proxy or OAuth-injected
+Runs last in the outbound pipeline. For reverse proxy or auth-injected
 flows with a completed transform, loads the most recent shape for the
 destination provider, strips auth/transport headers, injects content
 fields from the incoming request per the provider's shaping profile,
@@ -12,27 +12,25 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from glom import assign, delete
 from mitmproxy import http
 from mitmproxy.proxy.mode_specs import ReverseMode
 
-from ccproxy.config import ProviderShapingConfig, get_config
+from ccproxy.config import get_config
 from ccproxy.pipeline.context import Context
 from ccproxy.pipeline.hook import hook
-from ccproxy.shaping.executor import execute_shape_hooks
+from ccproxy.shaping.apply import prepare_shape
 from ccproxy.shaping.models import Shape, apply_shape
-from ccproxy.shaping.prepare import strip_headers
 from ccproxy.shaping.store import get_store
 
 logger = logging.getLogger(__name__)
 
 
 def shape_guard(ctx: Context) -> bool:
-    """Run on reverse proxy or OAuth-injected flows with a completed transform."""
+    """Run on reverse proxy or auth-injected flows with a completed transform."""
     assert ctx.flow is not None
     is_reverse = isinstance(ctx.flow.client_conn.proxy_mode, ReverseMode)
-    is_oauth = ctx.metadata.oauth_injected
-    if not (is_reverse or is_oauth):
+    is_auth = ctx.metadata.auth_injected
+    if not (is_reverse or is_auth):
         return False
 
     record = ctx.metadata.record
@@ -71,13 +69,7 @@ def shape(ctx: Context, params: dict[str, Any]) -> Context:
     working: Shape = http.Request.from_state(captured.request.get_state())  # type: ignore[no-untyped-call]
     shape_ctx = Context.from_request(working)
 
-    strip_headers(shape_ctx, profile.strip_headers)
-
-    _inject_content(shape_ctx, ctx, profile)
-
-    shape_ctx = execute_shape_hooks(shape_ctx, ctx, profile.shape_hooks)
-
-    shape_ctx.commit()
+    prepare_shape(shape_ctx, ctx, profile)
     apply_shape(working, ctx, profile.preserve_headers)
     logger.info("Applied shape from %s for provider_type %s", captured.id, provider_type)
     return ctx
@@ -95,55 +87,3 @@ def _ua_matches(ctx: Context, shape_request: http.Request) -> bool:
     if not incoming_ua or not shape_ua:
         return False
     return _ua_family(incoming_ua) == _ua_family(shape_ua)
-
-
-def _parse_strategy(raw: str) -> tuple[str, int | None]:
-    """Parse ``"prepend_shape:2"`` into ``("prepend_shape", 2)``."""
-    if ":" in raw:
-        name, _, param = raw.partition(":")
-        return name, int(param)
-    return raw, None
-
-
-def _inject_content(
-    shape_ctx: Context,
-    incoming_ctx: Context,
-    profile: ProviderShapingConfig,
-) -> None:
-    """Strip content fields from shape, then fill from incoming per merge strategy."""
-    # Snapshot shape values needed for non-replace strategies before stripping
-    shape_originals: dict[str, Any] = {}
-    for key in profile.content_fields:
-        strategy, _ = _parse_strategy(profile.merge_strategies.get(key, "replace"))
-        if strategy in ("prepend_shape", "append_shape") and key in shape_ctx._body:
-            shape_originals[key] = shape_ctx._body[key]
-        delete(shape_ctx._body, key, ignore_missing=True)
-
-    # Fill from incoming with merge strategy
-    for key in profile.content_fields:
-        strategy, slice_n = _parse_strategy(profile.merge_strategies.get(key, "replace"))
-        if strategy == "replace":
-            if key in incoming_ctx._body:
-                assign(shape_ctx._body, key, incoming_ctx._body[key])
-        elif strategy == "prepend_shape":
-            incoming_val = incoming_ctx._body.get(key) or []
-            shape_val = shape_originals.get(key) or []
-            if isinstance(shape_val, str):
-                shape_val = [{"type": "text", "text": shape_val}]
-            if isinstance(incoming_val, str):
-                incoming_val = [{"type": "text", "text": incoming_val}]
-            if slice_n is not None:
-                shape_val = shape_val[:slice_n]
-            assign(shape_ctx._body, key, [*shape_val, *incoming_val])
-        elif strategy == "append_shape":
-            incoming_val = incoming_ctx._body.get(key) or []
-            shape_val = shape_originals.get(key) or []
-            if isinstance(shape_val, str):
-                shape_val = [{"type": "text", "text": shape_val}]
-            if isinstance(incoming_val, str):
-                incoming_val = [{"type": "text", "text": incoming_val}]
-            if slice_n is not None:
-                shape_val = shape_val[:slice_n]
-            assign(shape_ctx._body, key, [*incoming_val, *shape_val])
-        elif strategy == "drop":
-            pass  # already popped

@@ -23,8 +23,8 @@ class TestParseOverrides:
         assert result.overrides == {}
 
     def test_force_run(self):
-        result = parse_overrides("+forward_oauth")
-        assert result.overrides["forward_oauth"] == HookOverride.FORCE_RUN
+        result = parse_overrides("+inject_auth")
+        assert result.overrides["inject_auth"] == HookOverride.FORCE_RUN
 
     def test_force_skip(self):
         result = parse_overrides("-rule_evaluator")
@@ -35,14 +35,14 @@ class TestParseOverrides:
         assert result.overrides["some_hook"] == HookOverride.NORMAL
 
     def test_multiple_overrides(self):
-        result = parse_overrides("+forward_oauth,-rule_evaluator,normal_hook")
-        assert result.overrides["forward_oauth"] == HookOverride.FORCE_RUN
+        result = parse_overrides("+inject_auth,-rule_evaluator,normal_hook")
+        assert result.overrides["inject_auth"] == HookOverride.FORCE_RUN
         assert result.overrides["rule_evaluator"] == HookOverride.FORCE_SKIP
         assert result.overrides["normal_hook"] == HookOverride.NORMAL
 
     def test_whitespace_stripped(self):
-        result = parse_overrides(" +forward_oauth , -rule_evaluator ")
-        assert result.overrides["forward_oauth"] == HookOverride.FORCE_RUN
+        result = parse_overrides(" +inject_auth , -rule_evaluator ")
+        assert result.overrides["inject_auth"] == HookOverride.FORCE_RUN
         assert result.overrides["rule_evaluator"] == HookOverride.FORCE_SKIP
 
     def test_empty_parts_ignored(self):
@@ -51,8 +51,8 @@ class TestParseOverrides:
         assert "-other_hook" not in result.overrides  # bare '-' would strip to ''
 
     def test_raw_header_preserved(self):
-        result = parse_overrides("+forward_oauth")
-        assert result.raw_header == "+forward_oauth"
+        result = parse_overrides("+inject_auth")
+        assert result.raw_header == "+inject_auth"
 
     def test_plus_with_empty_name_ignored(self):
         result = parse_overrides("+")
@@ -64,7 +64,7 @@ class TestParseOverrides:
 
     def test_debug_log_emitted(self, caplog):
         with caplog.at_level(logging.DEBUG, logger="ccproxy.pipeline.overrides"):
-            parse_overrides("+forward_oauth")
+            parse_overrides("+inject_auth")
         assert any("override" in rec.message.lower() for rec in caplog.records)
 
 
@@ -98,9 +98,9 @@ class TestOverrideSetShouldRun:
 
 class TestExtractOverridesFromContext:
     def test_lowercase_key(self):
-        headers = {"x-ccproxy-hooks": "+forward_oauth"}
+        headers = {"x-ccproxy-hooks": "+inject_auth"}
         result = extract_overrides_from_context(headers)
-        assert result.overrides["forward_oauth"] == HookOverride.FORCE_RUN
+        assert result.overrides["inject_auth"] == HookOverride.FORCE_RUN
 
     def test_mixed_case_key(self):
         headers = {"X-CCProxy-Hooks": "-rule_evaluator"}

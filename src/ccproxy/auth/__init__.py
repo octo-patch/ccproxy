@@ -1,6 +1,6 @@
 """Auth credential sources and provider-specific refresh logic."""
 
-from ccproxy.oauth.sources import (
+from ccproxy.auth.sources import (
     AnthropicAuthSource,
     AnyAuthSource,
     AuthFields,
