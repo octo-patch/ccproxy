@@ -77,15 +77,17 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
-from mitmproxy import http
+from mitmproxy import connection, http
 from mitmproxy.io import FlowReader, FlowWriter
 
-ZERO_UUID = "00000000-0000-0000-0000-000000000000"
-
-ZERO_USER_ID = json.dumps(
-    {"account_uuid": ZERO_UUID, "device_id": ZERO_UUID, "session_id": ZERO_UUID},
+SCRUB_BODY_KEYS = (
+    ("metadata", "user_id"),
+    ("diagnostics", "previous_message_id"),
 )
-"""Placeholder ``metadata.user_id`` value for bundled shapes."""
+"""Body paths whose final key is deleted entirely (no placeholder).
+
+The parent dict survives even if it becomes empty, so the body keeps the
+same overall shape — only the identifying leaf is gone."""
 
 SCRUB_HEADERS = frozenset(
     {
@@ -123,13 +125,10 @@ DEFAULT_VERIFY_DIR = Path("src/ccproxy/templates/shapes")
 
 def _scrub_body(body: dict[str, Any]) -> dict[str, Any]:
     """Apply bundled-template policy to a parsed request body in-place."""
-    md = body.get("metadata")
-    if isinstance(md, dict) and "user_id" in md:
-        md["user_id"] = ZERO_USER_ID
-
-    diag = body.get("diagnostics")
-    if isinstance(diag, dict) and "previous_message_id" in diag:
-        diag["previous_message_id"] = None
+    for parent_key, leaf_key in SCRUB_BODY_KEYS:
+        parent = body.get(parent_key)
+        if isinstance(parent, dict):
+            parent.pop(leaf_key, None)
 
     if "messages" in body:
         body["messages"] = []
@@ -161,6 +160,22 @@ def _scrub_flow(flow: http.HTTPFlow) -> http.HTTPFlow:
     metadata = dict(flow.metadata) if flow.metadata else {}
     flow.metadata = {k: v for k, v in metadata.items() if k in PRESERVE_METADATA}
 
+    # Replace client_conn and server_conn with sanitized stubs. The captured
+    # objects carry the wireguard config path (which contains the local
+    # username), the slirp4netns peer IPs, and the resolved upstream IP —
+    # none of which are load-bearing for shape replay but all of which
+    # identify the capturer or their network. Fresh Connection objects
+    # keep the flow well-formed without any of that state.
+    fp = flow.metadata.get("ccproxy.fingerprint.profile") if flow.metadata else None
+    sni = fp.get("sni") if isinstance(fp, dict) else None
+    upstream_host = sni if isinstance(sni, str) and sni else flow.request.host
+    flow.client_conn = connection.Client(
+        peername=("127.0.0.1", 0),
+        sockname=("127.0.0.1", 0),
+        timestamp_start=0.0,
+    )
+    flow.server_conn = connection.Server(address=(upstream_host or "localhost", flow.request.port or 443))
+
     flow.response = None
     flow.websocket = None
     flow.error = None
@@ -188,14 +203,10 @@ def _verify_flow(flow: http.HTTPFlow) -> list[str]:
         except (json.JSONDecodeError, TypeError):
             body = None
         if isinstance(body, dict):
-            md = body.get("metadata")
-            if isinstance(md, dict):
-                uid = md.get("user_id")
-                if isinstance(uid, str) and uid != ZERO_USER_ID:
-                    violations.append("metadata.user_id is not the zero-UUID placeholder")
-            diag = body.get("diagnostics")
-            if isinstance(diag, dict) and diag.get("previous_message_id") is not None:
-                violations.append(f"diagnostics.previous_message_id = {diag['previous_message_id']!r}")
+            for parent_key, leaf_key in SCRUB_BODY_KEYS:
+                parent = body.get(parent_key)
+                if isinstance(parent, dict) and leaf_key in parent:
+                    violations.append(f"body.{parent_key}.{leaf_key} should be deleted")
             if isinstance(body.get("messages"), list) and len(body["messages"]) > 0:
                 violations.append(f"messages has {len(body['messages'])} entries (should be [])")
             if isinstance(body.get("tools"), list) and len(body["tools"]) > 0:
@@ -207,6 +218,19 @@ def _verify_flow(flow: http.HTTPFlow) -> list[str]:
     for key in flow.metadata or {}:
         if key not in PRESERVE_METADATA:
             violations.append(f"flow metadata key {key!r} should be dropped")
+
+    # client_conn / server_conn sanitization: peername and sockname must be
+    # localhost (not the captured slirp4netns or upstream IPs); proxy_mode
+    # must be the default (no wireguard config path).
+    cc = flow.client_conn
+    if cc is not None:
+        if cc.peername and cc.peername[0] != "127.0.0.1":
+            violations.append(f"client_conn.peername host = {cc.peername[0]!r} (should be 127.0.0.1)")
+        if cc.sockname and cc.sockname[0] != "127.0.0.1":
+            violations.append(f"client_conn.sockname host = {cc.sockname[0]!r} (should be 127.0.0.1)")
+        mode_repr = repr(cc.proxy_mode)
+        if "/" in mode_repr or "wireguard:" in mode_repr.lower():
+            violations.append(f"client_conn.proxy_mode {mode_repr!r} contains a path or wireguard config")
 
     return violations
 
