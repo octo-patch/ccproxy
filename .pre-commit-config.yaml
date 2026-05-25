@@ -29,12 +29,3 @@ repos:
         args: [--strict]
         files: ^src/
 
-  - repo: local
-    hooks:
-      - id: package-mflows-verify
-        name: verify bundled .mflow templates carry no capturer identity
-        entry: uv run python scripts/package-mflows.py --verify
-        language: system
-        pass_filenames: false
-        files: ^src/ccproxy/templates/shapes/.*\.mflow$
-

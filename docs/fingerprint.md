@@ -94,50 +94,6 @@ WireGuard reference traffic also remains useful for comparing against the
 real client, even when not shaped — `tls_clienthello` always populates
 `ccproxy.fingerprint.client` so the inspector and MCP tools can read it.
 
-## Bundled vs personal shapes
-
-There are two on-disk tiers, with deliberately different fidelity:
-
-- **Personal shapes** at `~/.config/ccproxy/shapes/<provider>.mflow` —
-  written by `ccproxy flows shape <provider>` from a real captured
-  request. Capture is **deliberately generous**: every observed header
-  (except actual auth tokens), the full body, and the
-  `ccproxy.fingerprint.profile` metadata all persist. The runtime
-  selectively applies fields per `shaping.providers.<name>` config —
-  saving more on disk costs nothing and gives future apply-time policy
-  changes room to work without recapture.
-- **Bundled shapes** at `src/ccproxy/templates/shapes/<provider>.mflow` —
-  shipped in the public repo as the working baseline. They MUST NOT
-  carry any capturer identity (UUIDs, `metadata.user_id` real values,
-  `diagnostics.previous_message_id`, ccproxy-internal correlation
-  headers). `scripts/package-mflows.py` is the one-way distillation:
-
-  ```bash
-  # capture a fresh shape, then package it for the public bundle:
-  ccproxy flows shape anthropic --mflow            # → ~/.config/...
-  uv run python scripts/package-mflows.py \
-      ~/.config/ccproxy/shapes/anthropic.mflow \
-      --out src/ccproxy/templates/shapes/anthropic.mflow
-
-  # pre-commit gate runs in --verify mode:
-  uv run python scripts/package-mflows.py --verify
-  ```
-
-  The pre-commit hook (`.pre-commit-config.yaml` → `package-mflows-verify`)
-  blocks commits if a bundled `.mflow` contains a header in the scrubber's
-  drop list, a non-placeholder `metadata.user_id`, a non-null
-  `diagnostics.previous_message_id`, a non-empty `tools[]`, or any
-  flow-metadata key other than `ccproxy.fingerprint.profile`.
-
-**Degradation note.** The bundled shape's `metadata.user_id` is an
-all-zero UUID triple. If Anthropic ever turns identity-presence in
-`metadata.user_id` into a detection vector, every install relying on the
-bundled fallback will be flagged uniformly. The cure is per-user
-capture: `ccproxy flows shape anthropic` → personal shape carries your
-real `device_id` / `account_uuid` and survives this class of detection.
-The same applies to any future identity-bearing field that gets added to
-the scrubber's drop list.
-
 ## Tooling
 
 The dev shell includes the packet tools used here:

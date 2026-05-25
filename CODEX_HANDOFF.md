@@ -1,209 +1,186 @@
-# Codex Handoff: bundled-shape scrubber + provider e2e tests
+# Codex Handoff: bundled shapes via the existing apply-time machinery
 
-This document captures the state of `dev` at handoff time, what was done, what
-remains, and the constraints the next session needs to respect. Branch state
-is post-history-rewrite (force-pushed `origin/dev` and `origin/main`).
+## The lesson from this session
 
-## What's in place
+`scripts/package-mflows.py` was built as a "scrubber" that reimplemented
+the existing shaping system at packaging time: it deleted body fields,
+emptied arrays, stripped headers, sanitized connection state. Every
+single one of those operations is **already configurable at apply
+time** via the shaping framework. The packager was redundant and
+wrong-shaped. It has been reverted.
 
-### Runtime changes (apply-time policy)
+The user's repeated direction was: **save it all at capture time,
+selectively apply at runtime.** The bundled `.mflow` should be a
+faithful capture; the existing apply-time machinery handles the rest.
 
-- `src/ccproxy/inspector/shape_capturer.py` — `_STRIP_SHAPE_HEADERS` extended
-  with `x-ccproxy-flow-id` so future captures don't persist the ccproxy
-  correlation header. Pre-existing unused `provider` parameter on
-  `_validate_flow` was removed.
-- `src/ccproxy/inspector/egress_sanitizer_addon.py` (new) — final-stage
-  mitmproxy addon, registered last in `_build_addons`. Explicit deny-list
-  for `x-ccproxy-flow-id`, `x-ccproxy-hooks`, `x-ccproxy-oauth-injected`.
-  Sidecar transport headers (`x-ccproxy-target-url`, `x-ccproxy-impersonate`)
-  are intentionally kept — they're consumed on the mitmproxy → sidecar
-  loopback hop and stripped by the sidecar before reaching upstream.
-- `nix/defaults.nix` + regenerated `src/ccproxy/templates/ccproxy.yaml` —
-  `diagnostics` added to anthropic `content_fields` so the live request's
-  `diagnostics.previous_message_id` wins at apply time; the capturer's
-  value is never replayed on someone else's flow.
+That machinery, all in `nix/defaults.nix → shaping.providers.<name>`:
 
-### Bundled-shape distillation
+- **`content_fields`** — body keys overridden by incoming request at apply
+  time. Anything listed here gets the capturer's value erased and the
+  live request's value injected. This is the canonical answer for any
+  body field that's per-user (`metadata.user_id`, `project`,
+  `user_prompt_id`, `messages`, `tools`, `system`, `diagnostics`, etc).
+- **`merge_strategies`** — per-field merge override (`replace`,
+  `prepend_shape`, `append_shape`, `drop`, with `:N` slice). E.g.
+  `merge_strategies.system = "prepend_shape:2"` keeps the first 2 shape
+  blocks and prepends them onto incoming. Anything past index 2 is dead
+  weight at apply time.
+- **`shape_hooks`** — DAG-ordered inner hooks that mutate the shape
+  working copy before stamping. Already used: `regenerate_user_prompt_id`,
+  `regenerate_session_id` (body-level `metadata.user_id.session_id`),
+  `regenerate_billing_header`, `caching.strip`, `caching.insert`,
+  `inject_gemini_content`, `strip_unset_content`. Add more here for
+  any per-request derivation that can't be expressed as a field
+  injection.
+- **`strip_headers`** — headers removed from the shape working copy at
+  apply time. Auth tokens, transport headers.
+- **`preserve_headers`** — headers from the live target that survive
+  the shape stamping (auth headers set by `forward_oauth`, host set by
+  the transform router).
 
-- `scripts/package-mflows.py` (new) — one-way distillation of personal
-  captures into bundled templates. Two modes:
-  - `package SRC.mflow --out DST.mflow` — apply scrub policy, write
-    sanitized output.
-  - `--verify [PATH …]` — pre-commit gate. Defaults to walking
-    `src/ccproxy/templates/shapes/`. Reports policy violations and
-    exits non-zero.
-- `.pre-commit-config.yaml` has a `package-mflows-verify` local hook
-  triggered by changes under `src/ccproxy/templates/shapes/*.mflow`.
+So a bundled `.mflow` that's a faithful capture from Claude CLI / Gemini
+CLI is fine to ship **provided the shaping config covers every
+identifying field**. Where it doesn't, the answer is to extend the
+shaping config — not to write a custom scrubber script that operates
+out-of-band of the shaping system.
 
-#### Scrub policy
+## What's been kept from this session (apply-time / capture-time fixes)
 
-**Drop from request headers** (the explicit deny-list):
+These are real fixes, aligned with the "selectively apply" principle.
+Leave them in:
 
-- `X-Claude-Code-Session-Id`, `x-client-request-id` — per-session/
-  per-request UUIDs set by Claude CLI. Saving the capturer's would
-  share one identity across every replay.
-- `x-ccproxy-flow-id`, `x-ccproxy-hooks`, `x-ccproxy-oauth-injected` —
-  ccproxy-internal correlation. Defense in depth on top of the
-  capture-time strip and the EgressSanitizerAddon.
+- `src/ccproxy/inspector/shape_capturer.py` — `_STRIP_SHAPE_HEADERS`
+  now includes `x-ccproxy-flow-id` (the ccproxy correlation header has
+  no meaning outside a running process; strip at capture time so it
+  doesn't even land in personal shapes).
+- `src/ccproxy/inspector/egress_sanitizer_addon.py` — new mitmproxy
+  addon registered last in `_build_addons`. Explicit deny-list:
+  `x-ccproxy-flow-id`, `x-ccproxy-hooks`, `x-ccproxy-oauth-injected`.
+  Sidecar transport headers (`x-ccproxy-target-url`,
+  `x-ccproxy-impersonate`) are intentionally kept — they're consumed
+  by the sidecar on the loopback hop and stripped there.
+- `nix/defaults.nix` + regenerated `src/ccproxy/templates/ccproxy.yaml`
+  — `diagnostics` added to anthropic `content_fields` so the live
+  request's `previous_message_id` wins at apply time.
+- `src/ccproxy/inspector/fingerprint.py` +
+  `src/ccproxy/transport/dispatch.py` — `CurlOpt.HTTP_CONTENT_DECODING = 0`
+  in `transport_kwargs` and the browser-impersonate branch. Disables
+  curl-cffi's auto-decompression so the sidecar streams compressed
+  bytes verbatim and mitmproxy's existing decoder handles
+  `Content-Encoding` for both the response to the client and the
+  inspector capture (eliminated the "decode response gzip" errors in
+  the daemon log).
+- `src/ccproxy/config.py` — extracted `_default_hooks()` helper to
+  resolve ty diagnostic on `Field(default_factory=lambda: ...)`
+  invariant mismatch.
 
-**Delete from request body** (key removal, no placeholder):
+## What's been reverted
 
-- `metadata.user_id` — the `{account_uuid, device_id, session_id}`
-  JSON triple. Deleted outright; the parent `metadata` dict survives.
-- `diagnostics.previous_message_id` — the Anthropic message ID that
-  Claude CLI injects when resuming a conversation. Tied to the
-  capturer's history.
-
-**Collapse body fields that apply-time rewrites overwrite anyway**:
-
-- `messages` → `[]`. `content_fields.messages` always injects the
-  live request's value, so persisting the capturer's prompts is dead
-  weight plus a private-content leak risk.
-- `tools` → `[]`. Same logic.
-- `system` → first 2 entries only. The
-  `merge_strategies.system = "prepend_shape:2"` policy means only the
-  first 2 are consulted at apply time; the rest never reaches upstream.
-
-**Replace `client_conn` and `server_conn` with sanitized stubs**:
-
-- The captured `client_conn.proxy_mode` carries the wireguard config
-  path (which contains the local username), and `peername` / `sockname`
-  carry the slirp4netns peer IPs. None of that is load-bearing for
-  shape replay. Fresh `connection.Client(peername=("127.0.0.1", 0), …)`
-  and `connection.Server(address=(<SNI>, 443))` replace them.
-
-**Keep**:
-
-- `flow.metadata["ccproxy.fingerprint.profile"]` — load-bearing for
-  sidecar TLS replay. Everything else under `flow.metadata` is dropped.
-- All other request headers (`User-Agent`, `X-Stainless-*`,
-  `anthropic-beta`, `anthropic-version`, content-type, accept, etc.)
-  — load-bearing for Anthropic's request validation and for matching
-  the captured browser surface.
-- All other body fields (`model`, `max_tokens`, `stream`, `thinking`,
-  `context_management`).
-- `fingerprint.user_agent` and `fingerprint.runtime_version` — these
-  identify the CLI version and were earlier flagged as required for
-  ccproxy to function.
-
-`flow.response`, `flow.websocket`, `flow.error`, `flow.comment` are
-nulled.
-
-### Bundled artifacts
-
-- `src/ccproxy/templates/shapes/anthropic.mflow` — re-derived in this
-  session from a fresh `claude --model haiku -p "…"` capture using the
-  scrubber. 4201 bytes. JA3 `d871d02cecbde59abbf8f4806134addf`, JA4
-  `t13d1714h1_5b57614c22b0_43ade6aba3df`, ALPN `http/1.1`, captured
-  from Claude Code 2.1.150.
-- `src/ccproxy/templates/shapes/gemini.mflow` — **deleted**. The
-  history-rewrite step (see "History scrub" below) corrupted the
-  file's tnetstring binary encoding (text replacement of `eigenmage`
-  → `***` shifted length-prefixed value sizes). I had no intact
-  source to re-derive from. **Codex must re-capture.**
-
-### Tests
-
-- `tests/test_shaping_defaults.py` — **deleted**. Its
-  `BODY_LEAK_MARKERS` list contained literal first-name / username
-  strings, which were doxxing across `origin/dev`. The structural
-  bits of that test (size limits, hostname normalization, placeholder
-  message/max_tokens) were policy I'd invented mid-session and were
-  never authorized — those assertions are gone with the file.
-- Suite is 1783 passing, lint+typecheck clean.
-
-### History scrub (already done)
-
-`git filter-repo --replace-text` was run with the following patterns
-(`/tmp/pii-scrub.txt` — re-create if needed):
-
-```
-kyle==>***
-eigenmage==>***
-principal-canopy-qxpwk==>***
-principal-canopy==>***
-a902418565526e4d5c3e26454bff4dd8fd041dd6f441b6f22948c000f5c30c7b==>***
-a929b7ef-d758-4a98-b88e-07166e6c8537==>***
-```
-
-Two filter-repo passes were run (one with `--replace-text` for blob
-content, a second with `--replace-message` for commit messages).
-Force-pushed `origin/dev` and `origin/main`. Verified zero
-occurrences across all refs.
-
-**Side effect**: the binary `.mflow` files had their tnetstring length
-prefixes mismatched after the substitution, since `eigenmage` (9 bytes)
-became `***` (3 bytes) but the leading length number didn't update.
-That's why `gemini.mflow` is gone — see above.
-
-**Known residual exposure**: 10+ public forks existed on GitHub before
-the force-push. Whether they cloned `dev` or all branches determines
-whether they hold a copy of the pre-rewrite state. Force-push doesn't
-reach forks. The user may want to issue a DMCA / PII removal request
-to GitHub for forks that retain the unscrubbed history.
+- `scripts/package-mflows.py` — deleted. Bundled scrubbing as a
+  pre-packaging step is the wrong design.
+- `.pre-commit-config.yaml` — `package-mflows-verify` hook removed.
+- `docs/fingerprint.md` — "Bundled vs personal shapes" section
+  removed (it described the deleted script's policy).
+- `src/ccproxy/templates/shapes/anthropic.mflow` — deleted. Filter-repo
+  corrupted the original tnetstring encoding. Needs re-capture.
+- `src/ccproxy/templates/shapes/gemini.mflow` — already deleted
+  earlier in the session for the same reason.
 
 ## What Codex needs to do
 
-### 1. Re-capture and re-package `gemini.mflow`
+### 1. Re-capture both bundled shapes
 
-The file is gone from the repo. Without it, the gemini provider falls
-back to mitmproxy's native transport (the runtime handles a missing
-shape gracefully — see `ShapeStore._pick_from`). To restore browser-
-realistic gemini-cli replay:
+`anthropic.mflow` and `gemini.mflow` both need to be re-captured from a
+real CLI session and committed to `src/ccproxy/templates/shapes/`.
+Capture via `ccproxy run --inspect -- <cli> -p "<prompt>"`, identify
+the matching flow, `ccproxy flows shape <provider> --mflow`. Copy the
+resulting `~/.config/ccproxy/<config-dir>/shapes/<provider>.mflow` into
+the source tree.
 
-```bash
-# inside dev shell with CLAUDE_CODE_OAUTH_TOKEN or appropriate creds
-ccproxy run --inspect -- gemini -p "any short prompt"
+**Before committing**, audit the shape for residual PII using the
+existing apply-time strip lists as the spec — anything that *would*
+leak after going through `content_fields` + `strip_headers` + the
+shape hooks at apply time. The captured user_agent / device_id will
+appear in the bundled but apply-time machinery handles them; the
+specific identifiers below need to be either added to that machinery
+or absent from the capture itself.
 
-# identify the captured /v1internal:* flow
-ccproxy flows list --json | jq '.[] | select(
-    .request.pretty_host == "cloudcode-pa.googleapis.com" and
-    (.request.path | startswith("/v1internal:"))
-) | .id'
+### 2. Extend shaping config to cover per-user fields
 
-# capture, then package via the bundled-template scrubber
-ccproxy flows shape gemini --jq 'map(select(.id == "<flow-id>"))' --mflow
-uv run python scripts/package-mflows.py \
-    ~/.config/ccproxy/shapes/gemini.mflow \
-    --out src/ccproxy/templates/shapes/gemini.mflow
-uv run python scripts/package-mflows.py --verify
-```
+The following per-user body / header fields should be added to the
+appropriate `shaping.providers.<name>` config so apply-time wins
+without needing pre-packaging scrub:
 
-Confirm with `git grep -i kyle\|eigenmage\|principal-canopy` that no
-PII slipped into the new gemini bundle. The capture-time strip + the
-new scrubber should handle it, but verify by hand because the user
-will not forgive a second leak.
+**Anthropic** (`nix/defaults.nix:shaping.providers.anthropic`):
 
-### 2. Provider-SDK e2e tests against the dev daemon
+- `content_fields`: add `metadata` (top-level). The current entry
+  doesn't override `metadata.user_id`, so the bundled's value (which
+  has the capturer's `account_uuid` and `device_id`) replays on every
+  request. Adding `metadata` to `content_fields` means the live
+  request's metadata wins. If the live request doesn't carry
+  `metadata` (e.g. raw curl), the apply will inject the bundled
+  capture — for that gap there's already a `regenerate_session_id`
+  shape hook (rolls just the session_id portion), but `account_uuid`
+  and `device_id` will still leak from the bundled. Options:
+  - Extend `regenerate_session_id` to also null the other two fields
+    when the incoming request has no `metadata`.
+  - Add a new shape inner-DAG hook
+    `scrub_persistent_user_id_when_incoming_absent` that wipes the
+    triple unless the live request provides its own.
+  - Per-provider configuration on this is the user's preferred direction.
+
+**Gemini** (`nix/defaults.nix:shaping.providers.gemini`):
+
+- `content_fields`: already lists `model` and `project`, which covers
+  the cloud project ID. But `user_prompt_id`, `request.session_id`,
+  `request.contents`, `request.systemInstruction`, `request.tools` —
+  these aren't expressible as top-level `content_fields` entries
+  because they're nested under `request`. The existing
+  `inject_gemini_content` and `strip_unset_content` hooks handle
+  `contents` / `systemInstruction` / `tools` already. Need a similar
+  approach for `request.session_id` and top-level `user_prompt_id` —
+  either extend an existing hook or add new ones.
+
+**For header-level UUIDs** (`X-Claude-Code-Session-Id`,
+`x-client-request-id`): these come from the captured shape's headers
+and currently replay verbatim. The user previously flagged this as
+the "header session_id + request_id regen" task (originally task #2
+in earlier plans, parked). A shape inner-DAG hook that rolls those
+header values per request is the right fit — analogous to how
+`regenerate_session_id` rolls the body-level session_id.
+
+### 3. Provider-SDK e2e tests against the dev daemon
 
 The user explicitly asked for tests that exercise each provider's
-default bundled shape end-to-end against a live ccproxy instance (the
-dev daemon under `process-compose`). Acceptance criterion: for each
-provider declared in `nix/defaults.nix`, build a minimal SDK request,
-send it through the dev daemon at `http://127.0.0.1:4001`, assert 200
-+ a parseable response.
+bundled default shape end-to-end against the live `process-compose`
+dev daemon. Acceptance: for each provider declared in
+`nix/defaults.nix`, build a minimal SDK request, send it through
+the dev daemon at `http://127.0.0.1:4001`, assert 200 + parseable
+response.
 
-Suggested structure (`tests/e2e/test_bundled_shapes_e2e.py`, marked
-`pytest.mark.e2e` so they stay excluded from the default suite):
+Suggested file: `tests/e2e/test_bundled_shapes_e2e.py`, marked
+`pytest.mark.e2e` (excluded from default suite per pyproject's
+`addopts`).
 
-| Provider | SDK | Endpoint | Sentinel |
+| Provider | SDK | Sentinel | Required env |
 |---|---|---|---|
-| `anthropic` | `anthropic` Python SDK | `/v1/messages` | `sk-ant-oat-ccproxy-anthropic` |
-| `gemini` | `google-genai` SDK | `/v1internal:loadCodeAssist` or similar | requires `google_oauth` block (see prod config) |
-| `deepseek` | `anthropic` SDK (type: anthropic) | `/v1/messages` | `sk-ant-oat-ccproxy-deepseek` |
-| `codex` | `openai` SDK targeting `chatgpt.com/backend-api/codex/responses` | `/v1/responses` | `sk-ant-oat-ccproxy-codex` |
-| `perplexity_pro` | direct HTTP (Perplexity has no SDK) | `/rest/sse/perplexity_ask` | `sk-ant-oat-ccproxy-perplexity_pro` |
+| `anthropic` | `anthropic` Python SDK | `sk-ant-oat-ccproxy-anthropic` | `CLAUDE_CODE_OAUTH_TOKEN` |
+| `gemini` | `google-genai` SDK | `sk-ant-oat-ccproxy-gemini` | `~/.gemini/oauth_creds.json` |
+| `deepseek` | `anthropic` SDK (type: anthropic) | `sk-ant-oat-ccproxy-deepseek` | `DEEPSEEK_API_KEY` |
+| `codex` | `openai` SDK | `sk-ant-oat-ccproxy-codex` | `~/.codex/auth.json` |
+| `perplexity_pro` | direct HTTP | `sk-ant-oat-ccproxy-perplexity_pro` | `~/.opnix/secrets/perplexity-pro-api-key` |
 
-Test scenario shape:
+Skip a test if the required credential isn't available (don't fail).
+Skip the whole module if the dev daemon isn't reachable.
+
+Each test:
 
 ```python
-import pytest, anthropic
-
 @pytest.mark.e2e
 def test_anthropic_default_shape_round_trip(dev_daemon_url):
     client = anthropic.Anthropic(
         api_key="sk-ant-oat-ccproxy-anthropic",
-        base_url=dev_daemon_url,  # http://127.0.0.1:4001
+        base_url=dev_daemon_url,
     )
     resp = client.messages.create(
         model="claude-haiku-4-5-20251001",
@@ -213,103 +190,58 @@ def test_anthropic_default_shape_round_trip(dev_daemon_url):
     assert resp.content[0].text.strip() == "e2e ok"
 ```
 
-Fixture `dev_daemon_url` should `pytest.skip` cleanly when
-`ccproxy status` against `http://127.0.0.1:4001` returns non-200, so
-the tests are no-ops in environments without the daemon running.
+The tests' real job is regression-catching: when someone updates a
+bundled `.mflow` (because a CLI shipped a new version) or changes the
+shaping config, these confirm the apply path still gets a real 200
+from the real upstream for every provider.
 
-Daemon needs the right token for each provider:
+### 4. (Optional, separately scoped) `ccproxy providers init/list/save/load`
 
-- `anthropic` — `CLAUDE_CODE_OAUTH_TOKEN` env var (the dev defaults
-  provider runs `printenv CLAUDE_CODE_OAUTH_TOKEN`).
-- `deepseek` — `DEEPSEEK_API_KEY`.
-- `codex` — `~/.codex/auth.json` populated.
-- `gemini` — `~/.gemini/oauth_creds.json` populated, plus the
-  `google_oauth` client_id / client_secret from defaults.
-- `perplexity_pro` — `~/.opnix/secrets/perplexity-pro-api-key`.
+User-mentioned UX for the "capture all default shapes" workflow:
 
-Skip a test if the required credential isn't available. Don't fail
-the suite for missing creds — that's an environment concern, not a
-code defect.
+- `ccproxy providers list` — configured providers + whether a personal
+  shape exists.
+- `ccproxy providers init [--provider=<name>]` — run the canonical
+  capture command(s) per provider; save personal shape.
+- `ccproxy providers save <name>` — explicit "capture from a running
+  flow you specify" variant.
+- `ccproxy providers load <name>` — bundled re-import.
 
-The tests' real job is regression-catching: when someone updates
-`anthropic.mflow` (because Claude CLI shipped a new version) or
-ships a new bundled shape, these tests validate the apply path still
-gets a 200 from the real upstream.
+Its own design pass. Not blocking on the other work.
 
-### 3. (Optional, separately scoped) `ccproxy providers init|list|save|load`
+## Constraints / things to not redo
 
-User mentioned this as the proper UX for the "capture all default
-shapes" workflow, replacing the rejected `ccproxy shape-collect`
-proposal. Not in scope for the current task. Concrete shape:
+- **Don't reinvent the shaping system.** Capture-time strips (the
+  `_STRIP_SHAPE_HEADERS` set in `inspector/shape_capturer.py`) are
+  fine for unambiguous transport / auth headers. Anything beyond
+  that — body fields, identity headers, per-request derivations —
+  belongs in `nix/defaults.nix:shaping.providers.<name>` so the
+  existing apply-time machinery handles it.
+- **No hand-curated literal-string PII blocklists in tests.** The
+  previous `BODY_LEAK_MARKERS` list in
+  `tests/test_shaping_defaults.py` doxxed the maintainer in their
+  own public test file. That test has been deleted. Any future
+  safety check must be structural, not literal-string-based.
+- **Don't re-introduce `metadata.user_id` zero-UUID placeholders, "seed"
+  message placeholders, or hardcoded `max_tokens` defaults** into a
+  packaging script. The user explicitly rejected each of those.
+- **The bundled `.mflow` is a faithful capture, not a synthesized
+  artifact.** Sanitization belongs in apply-time configuration.
 
-- `ccproxy providers list` — show configured providers + whether
-  a personal shape exists in `~/.config/ccproxy/shapes/`.
-- `ccproxy providers init [--provider=<name>]` — for each provider
-  (or just one), run the canonical capture command, save personal
-  shape.
-- `ccproxy providers save <name>` — explicit "capture from a
-  running flow you specify" variant.
-- `ccproxy providers load <name>` — for bundled re-import.
+## Open follow-ups carried from earlier
 
-That's its own design pass.
-
-## Constraints / things to NOT do
-
-- Do not re-introduce `BODY_LEAK_MARKERS`-style hand-curated literal
-  string blocklists into the test suite or the scrubber. The user
-  pointed out (correctly) that such lists doxx the maintainer in
-  their own repo. Structural assertions only.
-- Do not invent scrub policy beyond what's documented above. If a
-  new identifier surfaces, deletion is preferred over placeholder
-  substitution. Placeholder values (zero-UUIDs, "seed" messages,
-  fixed-token counts) were tried and rejected by the user this
-  session.
-- The pre-existing `tests/test_lightllm_graph_openai_load.py` still
-  contains the string `kyle` — it was not scrubbed because the user
-  hadn't authorized blanket scrubbing of every file. Check that
-  file's content with the user before touching it.
-- The bundled shape's `client_conn` / `server_conn` stubs are
-  `connection.Client/Server` with localhost peers. Don't try to make
-  them "look more realistic" — the connection state isn't load-bearing
-  for shape replay and any realistic value risks re-introducing
-  identifying data.
-- `gemini.mflow` is *deleted*, not *broken*. The pre-commit
-  `--verify` step walks whatever's in
-  `src/ccproxy/templates/shapes/` — adding the file back means it
-  must pass verification.
+- `tests/test_lightllm_graph_openai_load.py` still contains the
+  string `kyle` — flagged but not touched in this session.
+- Public forks of `starbaser/ccproxy` may retain pre-rewrite state
+  with the original PII. GitHub PII removal request is the only way
+  to address those; not a code task.
+- `transport/sidecar.py:_HOP_BY_HOP` set is misnamed (includes
+  `host` / `content-length` which aren't strictly RFC 7230 hop-by-hop).
+  Cosmetic cleanup.
 
 ## Verification ledger at handoff
 
-```
-$ just lint            # ruff: clean
-$ just typecheck       # mypy strict: 110 files, no errors
-$ uv run pytest --no-cov   # 1783 passed, 4 deselected
-$ uv run python scripts/package-mflows.py --verify
-src/ccproxy/templates/shapes/anthropic.mflow: ok
-```
-
-No PII strings in any ref:
-
-```
-$ for s in kyle eigenmage principal-canopy; do
-    git grep -c "$s" origin/dev origin/main 2>/dev/null
-  done
-(empty)
-```
-
-## Open follow-ups (for either Codex or a future session)
-
-- The `tests/test_lightllm_graph_openai_load.py` `kyle` occurrence —
-  needs review.
-- Public forks of `starbaser/ccproxy` may still carry the pre-rewrite
-  state. GitHub PII removal request is the only way to address that;
-  not something a code session can do.
-- Header-level regeneration for `X-Claude-Code-Session-Id` and
-  `x-client-request-id` — earlier discussion (task "#2") about adding
-  shape inner-DAG hooks that re-roll those per request. Currently the
-  body-level `regenerate_session_id` exists but only touches
-  `body.metadata.user_id.session_id`. Header-level regen is a parallel
-  hook waiting to be written.
-- The `_HOP_BY_HOP` set in `transport/sidecar.py` was discussed in
-  this session as misnamed (it includes `host` / `content-length`
-  which aren't strictly RFC 7230 hop-by-hop). Cleanup left for later.
+`just lint` + `just typecheck` clean; `uv run pytest --no-cov`
+passes (will land at 1783 tests with `test_shaping_defaults.py`
+deleted). `origin/dev` and `origin/main` both PII-scrubbed via
+filter-repo + force-push.
