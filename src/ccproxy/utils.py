@@ -120,14 +120,7 @@ def get_templates_dir() -> Path:
     Raises:
         RuntimeError: If templates directory cannot be found
     """
-    module_dir = Path(__file__).parent
-
-    # Development mode: templates at project root
-    dev_templates = module_dir.parent.parent / "templates"
-    if dev_templates.exists() and (dev_templates / "ccproxy.yaml").exists():
-        return dev_templates
-
-    # Installed mode: templates inside the package
+    module_dir = Path(__file__).resolve().parent
     package_templates = module_dir / "templates"
     if package_templates.exists() and (package_templates / "ccproxy.yaml").exists():
         return package_templates

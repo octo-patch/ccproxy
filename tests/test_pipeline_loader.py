@@ -124,6 +124,38 @@ class TestLoadHooks:
         assert result[0].name == "_fake_rate_limit"
         assert result[0].params == {"max_rpm": 120, "burst": 10}
 
+    def test_repeated_load_clears_stale_params(self) -> None:
+        import sys
+        import types
+
+        def _fake_rate_limit3(ctx: Any, params: dict[str, Any]) -> Any:
+            return ctx
+
+        spec = HookSpec(
+            name="_fake_rate_limit3",
+            handler=_fake_rate_limit3,
+            reads=frozenset(),
+            writes=frozenset(),
+            model=_RateLimitParams,
+        )
+        _fake_rate_limit3._hook_spec = spec  # type: ignore[attr-defined]
+        get_registry().register_spec(spec)
+
+        fake_mod = types.ModuleType("ccproxy_test_fake_ratelimit_mod3")
+        fake_mod._fake_rate_limit3 = _fake_rate_limit3  # type: ignore[attr-defined]
+        sys.modules["ccproxy_test_fake_ratelimit_mod3"] = fake_mod
+
+        try:
+            first = load_hooks([{"hook": "ccproxy_test_fake_ratelimit_mod3", "params": {"max_rpm": 120}}])
+            second = load_hooks(["ccproxy_test_fake_ratelimit_mod3"])
+        finally:
+            del sys.modules["ccproxy_test_fake_ratelimit_mod3"]
+
+        assert len(first) == 1
+        assert first[0].params == {"max_rpm": 120, "burst": 10}
+        assert len(second) == 1
+        assert second[0].params == {}
+
     def test_invalid_params_with_model_raises_value_error(self) -> None:
         import sys
         import types

@@ -29,12 +29,6 @@ def load_hooks(entries: list[str | dict[str, Any]]) -> list[HookSpec]:
     - Imports each module, triggering @hook registration.
     - Mutates the singleton HookSpec objects in the global registry
       by assigning their ``params`` and ``priority`` fields per entry.
-
-    NOTE: this function mutates singleton specs in the global registry.
-    Calling it twice (e.g., inbound then outbound) modifies the same
-    objects between calls. Safe when the two entry lists are disjoint
-    (which they are in show_status and production wiring), but be aware
-    if you introduce a case where the same hook appears in both lists.
     """
     hook_priority_map: dict[str, int] = {}
     hook_params_map: dict[str, dict[str, Any]] = {}
@@ -71,6 +65,7 @@ def load_hooks(entries: list[str | dict[str, Any]]) -> list[HookSpec]:
         if name not in hook_priority_map:
             continue
         params = hook_params_map.get(name, {})
+        spec.params = {}
         if params and spec.model is not None:
             try:
                 validated = spec.model(**params)
@@ -82,9 +77,6 @@ def load_hooks(entries: list[str | dict[str, Any]]) -> list[HookSpec]:
                 "Hook %r received YAML params but declares no model=; ignoring",
                 name,
             )
-            spec.params = {}
-        elif params:
-            spec.params = params
         spec.priority = hook_priority_map.get(name, max_priority)
         hook_specs.append(spec)
 

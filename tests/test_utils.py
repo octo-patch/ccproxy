@@ -11,20 +11,17 @@ from ccproxy.utils import calculate_duration_ms, get_template_file, get_template
 
 
 class TestGetTemplatesDir:
-    def test_templates_dir_development_mode(self, tmp_path: Path) -> None:
-        """Test finding templates in development mode."""
-        # Create a fake development structure
+    def test_templates_dir_package_layout(self, tmp_path: Path) -> None:
+        """Test finding templates adjacent to the package module."""
         src_dir = tmp_path / "src" / "ccproxy"
         src_dir.mkdir(parents=True)
         utils_file = src_dir / "utils.py"
         utils_file.touch()
 
-        # Create templates directory two levels up
-        templates_dir = tmp_path / "templates"
+        templates_dir = src_dir / "templates"
         templates_dir.mkdir()
         (templates_dir / "ccproxy.yaml").touch()
 
-        # Mock __file__ to point to our fake utils.py
         with patch("ccproxy.utils.__file__", str(utils_file)):
             result = get_templates_dir()
             assert result == templates_dir
