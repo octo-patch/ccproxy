@@ -1,4 +1,13 @@
 repos:
+  - repo: local
+    hooks:
+      - id: sync-ccproxy-template
+        name: Sync ccproxy template from nix defaults
+        entry: bash -lc 'nix develop -c true && git add src/ccproxy/templates/ccproxy.yaml'
+        language: system
+        pass_filenames: false
+        always_run: true
+
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v5.0.0
     hooks:
@@ -28,4 +37,3 @@ repos:
           - pydantic
         args: [--strict]
         files: ^src/
-

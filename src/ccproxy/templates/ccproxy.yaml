@@ -1,4 +1,8 @@
 ccproxy:
+  auth:
+    command_timeout_seconds: 5
+    refresh_headroom_seconds: 60
+    refresh_timeout_seconds: 15
   gemini_capacity:
     enabled: true
     fallback_models:
@@ -15,7 +19,7 @@ ccproxy:
     total_retry_budget_seconds: 120
   hooks:
     inbound:
-    - ccproxy.hooks.forward_oauth
+    - ccproxy.hooks.inject_auth
     - ccproxy.hooks.extract_session_id
     - ccproxy.hooks.extract_pplx_files
     - ccproxy.hooks.pplx_thread_inject
@@ -42,10 +46,6 @@ ccproxy:
       enabled: true
       host: 127.0.0.1
       port: 4030
-  oauth:
-    command_timeout_seconds: 5
-    refresh_headroom_seconds: 60
-    refresh_timeout_seconds: 15
   otel:
     enabled: false
     endpoint: http://localhost:4317
@@ -137,6 +137,7 @@ ccproxy:
         - top_k
         - stop_sequences
         - diagnostics
+        - metadata
         merge_strategies:
           system: prepend_shape:2
         preserve_headers:
@@ -170,6 +171,7 @@ ccproxy:
         content_fields:
         - model
         - project
+        - user_prompt_id
         preserve_headers:
         - authorization
         - host
@@ -178,6 +180,29 @@ ccproxy:
         - ccproxy.shaping.gemini
         strip_headers:
         - authorization
+        - content-length
+        - host
+        - transfer-encoding
+        - connection
+        - accept-encoding
+      openai_responses:
+        capture:
+          path_pattern: ^/(v1/|backend-api/codex/)?responses
+        content_fields: []
+        preserve_headers:
+        - authorization
+        - host
+        shape_hooks:
+        - ccproxy.shaping.regenerate
+        - ccproxy.shaping.responses
+        strip_headers:
+        - authorization
+        - cookie
+        - chatgpt-account-id
+        - x-codex-turn-metadata
+        - x-codex-window-id
+        - session-id
+        - thread-id
         - content-length
         - host
         - transfer-encoding
