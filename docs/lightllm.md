@@ -14,7 +14,8 @@ The response side uses an FSM idiom built on `pydantic_graph.GraphBuilder`
 `*_intake.py` / `*_render.py` modules per provider/listener-format handle
 streaming SSE transformations. Request-side wire ↔ IR translation lives in
 `src/ccproxy/lightllm/adapters/` as `UIAdapter` subclasses, one per wire
-format. There is no LiteLLM dependency; `rg "litellm" src/` returns empty.
+format. There is no runtime LiteLLM dependency; remaining source mentions are
+historical notes about the pre-adapter implementation.
 
 ---
 
@@ -658,16 +659,12 @@ upstream's SSE shape, drains the existing intake FSM, then renders
 ``parts_manager.get_parts()`` into the ``Response`` envelope JSON
 returned to the listener.
 
-**Streaming intake/render**: Phase 4B work for cross-format streaming
-(e.g. Anthropic upstream emitting SSE that needs translation to
-Responses SSE for a `/v1/responses` listener). ``OPENAI_RESPONSES`` is
-intentionally NOT wired into ``dispatch_render``; the inspector
-catches the resulting ``UnsupportedListenerError`` in
-`addon.py:_install_streaming_transformer` and falls back to
-passthrough (the upstream SSE bytes reach the client unchanged). For
-the same-format Codex case below this is the desired behavior; for
-true cross-format streaming the client receives upstream-shape SSE
-which it may not understand — fix in Phase 4B.
+**Streaming render**: ``InboundFormat.OPENAI_RESPONSES`` is wired into
+``dispatch_render`` via ``OpenAIResponsesRenderFSM``, so a Responses-shaped
+listener can receive rendered Responses SSE when the upstream intake produces
+response IR. ccproxy still does not ship a configured live Codex/OpenAI
+Responses provider by default, and there is no ``openai_responses`` upstream
+intake branch in ``dispatch_intake``.
 
 **Same-format Codex passthrough (the canonical path)**: When a
 listener `/v1/responses` request resolves (via sentinel) to a Provider
@@ -680,7 +677,8 @@ host/path to the upstream (typically
 response straight back to the client. The buffered output arm above is
 ONLY used when a `/v1/responses` request cross-format-transforms to a
 non-Responses upstream (e.g., Anthropic for testing); the codex
-sentinel routing is pure passthrough.
+sentinel routing would be pure passthrough once a real provider entry is
+configured.
 
 `_FORMAT_PATTERNS` in `inspector/routes/transform.py` and
 `_select_inbound_format` in `pipeline/context.py` both recognize

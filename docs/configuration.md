@@ -44,14 +44,15 @@ ccproxy:
         command: "jq -r '.claudeAiOauth.accessToken' ~/.claude/.credentials.json"
       host: api.anthropic.com
       path: /v1/messages
-      provider: anthropic    # adapter-family name (drives wire-format dispatch)
+      type: anthropic        # adapter-family name (drives wire-format dispatch)
 
   hooks:
     inbound:
-      - ccproxy.hooks.forward_oauth
+      - ccproxy.hooks.inject_auth
       - ccproxy.hooks.extract_session_id
     outbound:
       - ccproxy.hooks.gemini_cli
+      - ccproxy.hooks.pplx_stamp_headers
       - ccproxy.hooks.inject_mcp_notifications
       - ccproxy.hooks.verbose_mode
       - ccproxy.hooks.commitbee_compat
@@ -141,7 +142,7 @@ ccproxy:
   provider_timeout: null
 ```
 
-`provider_timeout` sets a timeout budget (seconds) for httpx-based upstream HTTP calls inside ccproxy — specifically OAuth token refresh and the 401-retry path. It applies uniformly across connect, read, write, and pool phases.
+`provider_timeout` sets a timeout budget (seconds) for httpx-based upstream HTTP calls inside ccproxy — specifically auth token refresh and the 401-retry path. It applies uniformly across connect, read, write, and pool phases.
 
 When `null` (default), there is **no enforced timeout**. This matches mitmproxy's default main-forward path and Portkey AI's upstream behavior — requests can take as long as the upstream needs (important for long-running streaming inference). Set to a positive float to opt into a bounded timeout for internal calls.
 
@@ -151,7 +152,7 @@ This does NOT affect the main request/response forwarding path (mitmproxy handle
 
 ### providers
 
-`providers` maps a sentinel suffix to a `Provider` entry: an auth source, a single destination (`host` + `path`), and an adapter-family `provider` identifier that names the wire format the destination speaks (one of `anthropic`, `openai`, `google` / `gemini` / `vertex_ai` / `vertex_ai_beta`, `perplexity_pro`; Anthropic-compatible forks like `deepseek` and `zai` use `provider: anthropic`). When ccproxy sees a sentinel key matching `sk-ant-oat-ccproxy-{name}`, the matching `Provider` drives both token injection (`forward_oauth`) and routing (auto-redirect or cross-format `transform` via lightllm).
+`providers` maps a sentinel suffix to a `Provider` entry: an auth source, a single destination (`host` + `path`), and an adapter-family `type` identifier that names the wire format the destination speaks (one of `anthropic`, `openai`, `google` / `gemini` / `vertex_ai` / `vertex_ai_beta`, `perplexity_pro`; Anthropic-compatible forks like `deepseek` and `zai` use `type: anthropic`). When ccproxy sees a sentinel key matching `sk-ant-oat-ccproxy-{name}`, the matching `Provider` drives both auth injection (`inject_auth`) and routing (auto-redirect or cross-format `transform` via lightllm).
 
 **Simple form** — auth dispatched as a bare shell command:
 
@@ -162,7 +163,7 @@ ccproxy:
       auth: "jq -r '.claudeAiOauth.accessToken' ~/.claude/.credentials.json"
       host: api.anthropic.com
       path: /v1/messages
-      provider: anthropic
+      type: anthropic
 ```
 
 **Full form** — explicit auth discriminator and per-provider auth header:
@@ -176,7 +177,7 @@ ccproxy:
         command: "jq -r '.claudeAiOauth.accessToken' ~/.claude/.credentials.json"
       host: api.anthropic.com
       path: /v1/messages
-      provider: anthropic
+      type: anthropic
 
     gemini:
       auth:
@@ -184,7 +185,7 @@ ccproxy:
         command: "jq -r '.access_token' ~/.gemini/oauth_creds.json"
       host: cloudcode-pa.googleapis.com
       path: "/v1internal:{action}"
-      provider: gemini
+      type: gemini
 
     deepseek:
       auth:
@@ -193,7 +194,7 @@ ccproxy:
         header: x-api-key      # send token as `x-api-key: <token>` (not `Authorization: Bearer …`)
       host: api.deepseek.com
       path: /anthropic/v1/messages
-      provider: anthropic      # DeepSeek's anthropic-compat endpoint speaks the anthropic format
+      type: anthropic          # DeepSeek's anthropic-compat endpoint speaks the anthropic format
 ```
 
 **Provider entry fields:**
@@ -203,7 +204,7 @@ ccproxy:
 | `auth` | Discriminated auth source. Bare strings coerce to `{type: command, command: <str>}`. |
 | `host` | Single destination hostname (e.g. `api.anthropic.com`). |
 | `path` | Destination path. Supports `{model}` and `{action}` templating substituted from the body / URL at routing time. Defaults to `/`. |
-| `provider` | LiteLLM provider identifier (`anthropic`, `gemini`, `deepseek`, `openai`, …). When the incoming format matches `provider`, the routing handler just rewrites the destination; when they differ, the body is rewritten via `lightllm.transform_to_provider`. |
+| `type` | Wire-format identifier (`anthropic`, `gemini`, `openai`, `perplexity_pro`, …). When the incoming format matches `type`, the routing handler just rewrites the destination; when they differ, the body is rewritten via `lightllm`. |
 
 **Auth source types** (the `type:` discriminator inside `auth:`):
 
@@ -238,7 +239,7 @@ AuthFields                                  # base — only `header`
 
 The discriminator literal mirrors the distinction in YAML: bare `command` / `file` for the static loaders, `*_oauth` for the refresh sources. Pick the right one for the credential's lifecycle, not for the brand of the destination — pointing a Gemini destination at `type: command` is legal, but ccproxy will not refresh anything in that case (see "Why Gemini wants `google_oauth`" below).
 
-**Iteration order is load-bearing.** `forward_oauth` walks `providers` in insertion order to pick a fallback when no sentinel key is present on the request — the first provider with a cached token wins. Keep the highest-priority provider (typically `anthropic`) first.
+**Iteration order is load-bearing.** `inject_auth` walks `providers` in insertion order to pick a fallback when no sentinel key is present on the request — the first provider with a cached token wins. Keep the highest-priority provider (typically `anthropic`) first.
 
 ### Sentinel Key Mechanism
 
@@ -248,13 +249,13 @@ SDK clients can use a sentinel API key to trigger token substitution without mod
 client = Anthropic(api_key="sk-ant-oat-ccproxy-anthropic")
 ```
 
-When ccproxy sees a key matching `sk-ant-oat-ccproxy-{name}`, it substitutes the actual token from `providers[name].auth`, sets the auth header (`Authorization: Bearer …` by default, or `providers[name].auth.header` when set), and routes the request to `providers[name].host` / `providers[name].path`. If the incoming wire format doesn't match `providers[name].provider`, lightllm rewrites the body too.
+When ccproxy sees a key matching `sk-ant-oat-ccproxy-{name}`, it substitutes the actual token from `providers[name].auth`, sets the auth header (`Authorization: Bearer …` by default, or `providers[name].auth.header` when set), and routes the request to `providers[name].host` / `providers[name].path`. If the incoming wire format doesn't match `providers[name].type`, lightllm rewrites the body too.
 
 ### Token Refresh
 
 Tokens are loaded at startup via `_load_credentials()` and cached in memory. For OAuth-source providers (`anthropic_oauth`, `google_oauth`), `AuthSource.resolve()` rotates the cached access token in-process whenever its expiry is within 60 seconds (atomic write-back to `file_path` preserves sibling fields).
 
-On a 401 response from upstream, `OAuthAddon.response()` calls `config.resolve_oauth_token(provider)` to re-resolve the credential source — for OAuth sources this triggers another refresh attempt; for static `command` / `file` loaders it just re-reads. The request is then replayed with whatever token the resolver returns; if the resolver returns nothing (empty token, refresh failed), the 401 propagates to the client.
+On a 401 response from upstream, `AuthAddon.response()` calls `config.resolve_auth_token(provider)` to re-resolve the credential source — for OAuth sources this triggers another refresh attempt; for static `command` / `file` loaders it just re-reads. The request is then replayed with whatever token the resolver returns; if the resolver returns nothing (empty token, refresh failed), the 401 propagates to the client.
 
 ### OAuth refresh lifecycle
 
@@ -283,7 +284,7 @@ from_yaml()
 [mitmweb starts, addons register, ready signal]
 
 prewarm_project()
- └── token = config.get_oauth_token("gemini")   # reads the fresh cached token
+ └── token = config.resolve_auth_token("gemini") # reads or refreshes the configured token
  └── POST cloudcode-pa.../v1internal:loadCodeAssist with Bearer <fresh>
  └── _cached_project = response["cloudaicompanionProject"]
 ```
@@ -308,7 +309,7 @@ ccproxy:
         header: authorization
       host: cloudcode-pa.googleapis.com
       path: "/v1internal:{action}"
-      provider: gemini
+      type: gemini
 ```
 
 ### Sharing the Claude Code CLI credential file
@@ -328,7 +329,7 @@ ccproxy:
         header: authorization
       host: api.anthropic.com
       path: /v1/messages
-      provider: anthropic
+      type: anthropic
 ```
 
 The Claude Code CLI stores its OAuth state under a `claudeAiOauth` envelope:
@@ -368,9 +369,11 @@ Hooks run in two stages: `inbound` (before the request reaches the provider) and
 ccproxy:
   hooks:
     inbound:
-      - ccproxy.hooks.forward_oauth
+      - ccproxy.hooks.inject_auth
       - ccproxy.hooks.extract_session_id
     outbound:
+      - ccproxy.hooks.gemini_cli
+      - ccproxy.hooks.pplx_stamp_headers
       - ccproxy.hooks.inject_mcp_notifications
 ```
 
@@ -389,9 +392,10 @@ ccproxy:
 
 | Hook | Stage | Purpose |
 |---|---|---|
-| `ccproxy.hooks.forward_oauth` | inbound | Substitutes sentinel keys (`sk-ant-oat-ccproxy-{name}`) with the cached auth token from `providers[name].auth`; injects `Authorization: Bearer …` (or the custom `auth.header` when set) and stamps `ctx.metadata.oauth_provider` for downstream routing |
+| `ccproxy.hooks.inject_auth` | inbound | Substitutes sentinel keys (`sk-ant-oat-ccproxy-{name}`) with the cached auth token from `providers[name].auth`; injects `Authorization: Bearer …` (or the custom `auth.header` when set) and stamps `ctx.metadata.auth_provider` / `ctx.metadata.auth_injected` for downstream routing and retry logic |
 | `ccproxy.hooks.extract_session_id` | inbound | Reads `metadata.user_id` via `glom(ctx._body, 'metadata.user_id')` and stores session_id on `ctx.metadata.session_id` for downstream use |
 | `ccproxy.hooks.gemini_cli` | outbound | Single hook for all Gemini sentinel-key traffic. Wraps standard Gemini bodies in the `v1internal` envelope, conditionally masquerades `google-genai-sdk/*` UAs as Gemini CLI, rewrites paths to `cloudcode-pa`, and unwraps the `{response: {...}}` envelope on the way back. |
+| `ccproxy.hooks.pplx_stamp_headers` | outbound | Converts Perplexity Pro's injected bearer placeholder into the cookie-auth browser header bundle expected by the WebUI endpoint. |
 | `ccproxy.hooks.inject_mcp_notifications` | outbound | Injects buffered MCP terminal events as synthetic tool_use/tool_result blocks |
 | `ccproxy.hooks.verbose_mode` | outbound | Strips `redact-thinking-*` flags from the `anthropic-beta` header |
 | `ccproxy.hooks.shape` | outbound | Picks a per-provider captured shape, injects content fields from the incoming request, applies it to the outbound flow. The shape carries the captured Claude client's identity verbatim — no separate identity-injection hook is needed. |
@@ -467,7 +471,7 @@ ccproxy:
 
 ## Transform Overrides
 
-The default `inspector.transforms` list is empty: routing comes from sentinel-key resolution against the `providers` map. When a sentinel key arrives, ccproxy resolves the matching `Provider`, sets `ctx.metadata.oauth_provider`, and either redirects (incoming format matches `provider`) or cross-transforms via lightllm (formats differ). Most users never need a `TransformOverride`.
+The default `inspector.transforms` list is empty: routing comes from sentinel-key resolution against the `providers` map. When a sentinel key arrives, ccproxy resolves the matching `Provider`, sets `ctx.metadata.auth_provider`, and either redirects (incoming format matches the provider `type`) or cross-transforms via lightllm (formats differ). Most users never need a `TransformOverride`.
 
 `inspector.transforms` is an ordered list of `TransformOverride` entries layered on top of Provider auto-routing. The first regex match wins. Use overrides for edge cases — bypassing auth for a specific host, forcing a particular destination for a path/model combo, etc.
 

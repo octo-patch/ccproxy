@@ -66,13 +66,17 @@ value is passed to `_build_addons()` as `wg_cli_port` so the addon chain can ref
   │  addon chain:                                                   │
   │    ReadySignal                                                  │
   │    → InspectorAddon (OTel spans, flow records, SSE streaming)   │
+  │    → FingerprintCaptureAddon (native ClientHello metadata)      │
   │    → MultiHARSaver (ccproxy.dump command)                       │
-  │    → ShapeCaptureAddon (ccproxy.shape command)                      │
-  │    → ccproxy_inbound  (DAG: OAuth, session extraction)          │
+  │    → ShapeCaptureAddon (ccproxy.shape command)                  │
+  │    → ccproxy_inbound  (DAG: auth, session extraction)           │
   │    → ccproxy_transform (lightllm dispatch)                      │
   │    → ccproxy_outbound (DAG: shape replay, MCP injection, beta)  │
-  │    → OAuthAddon (401-detect → refresh → replay)                 │
+  │    → TransportOverrideAddon (curl-cffi sidecar when needed)     │
+  │    → AuthAddon (401-detect → refresh → replay)                  │
   │    → GeminiAddon (capacity fallback + envelope unwrap)          │
+  │    → PerplexityAddon (thread id capture)                        │
+  │    → EgressSanitizerAddon (strip x-ccproxy-* headers)           │
   └──────────┬──────────────────────────────────────────────────────┘
              │ transform rewrite: new host/port/body
              ▼
@@ -101,22 +105,27 @@ The addon chain is built by `_build_addons()` in `src/ccproxy/inspector/process.
 on the `WebMaster` instance. Addons receive mitmproxy lifecycle events in list order.
 
 ```
-ReadySignal → InspectorAddon → MultiHARSaver → ShapeCaptureAddon
+ReadySignal → InspectorAddon → FingerprintCaptureAddon → MultiHARSaver → ShapeCaptureAddon
             → ccproxy_inbound → ccproxy_transform → ccproxy_outbound
-            → OAuthAddon → GeminiAddon
+            → TransportOverrideAddon → AuthAddon → GeminiAddon → PerplexityAddon
+            → EgressSanitizerAddon
 ```
 
 | Addon | Type | Purpose |
 |-------|------|---------|
 | `ReadySignal` | Built-in class | Fires `asyncio.Event` when all listeners are bound (after mitmproxy's `RunningHook`). Lets `run_inspector()` block until ports are ready. |
 | `InspectorAddon` | `InspectorAddon` | Direction detection, `FlowRecord` creation, pre-pipeline `client_request` snapshot, OTel span lifecycle, SSE streaming setup for transform-mode flows. Must be first so spans open and snapshots capture before any route handler mutates headers. |
+| `FingerprintCaptureAddon` | `FingerprintCaptureAddon` | Captures the native client TLS ClientHello fingerprint and stores it on the flow metadata for optional shape-backed sidecar replay. |
 | `MultiHARSaver` | `MultiHARSaver` | Implements the `ccproxy.dump` mitmproxy command — builds a multi-page HAR 1.2 (`entries[2i]` = forwarded request + provider response, `entries[2i+1]` = client request + client response). |
 | `ShapeCaptureAddon` | `ShapeCaptureAddon` | Implements the `ccproxy.shape` mitmproxy command — validates a flow against the provider's `capture.path_pattern`, then writes either a provider patch queue or an explicit sanitized `.mflow` override. |
-| `ccproxy_inbound` | `InspectorRouter` (pipeline) | DAG executor for `hooks.inbound` entries — OAuth sentinel substitution (`forward_oauth`), session ID extraction (`extract_session_id`). Skipped if no inbound hooks configured. |
+| `ccproxy_inbound` | `InspectorRouter` (pipeline) | DAG executor for `hooks.inbound` entries — auth sentinel substitution (`inject_auth`), session ID extraction (`extract_session_id`). Skipped if no inbound hooks configured. |
 | `ccproxy_transform` | `InspectorRouter` (transform) | lightllm dispatch — matches `inspector.transforms` rules and falls back to sentinel-driven `Provider` routing. Rewrites destination (always) and body (cross-format). Handles non-streaming response transform back to OpenAI shape. |
 | `ccproxy_outbound` | `InspectorRouter` (pipeline) | DAG executor for `hooks.outbound` entries — `gemini_cli` (cloudcode-pa envelope wrap), `inject_mcp_notifications`, `verbose_mode` (strip `redact-thinking-*`), `shape` (replay captured compliance envelope), `commitbee_compat`. Skipped if no outbound hooks configured. |
-| `OAuthAddon` | `OAuthAddon` | 401-detect → refresh → replay. Triggered by `metadata_from_flow(flow).oauth_injected` set by `forward_oauth`. Re-resolves the credential source via `config.resolve_oauth_token(provider)` and replays the request with the fresh token. |
-| `GeminiAddon` | `GeminiAddon` | Two responsibilities for `metadata_from_flow(flow).oauth_provider == "gemini"` flows: capacity fallback (sticky retry on the original model + walk `gemini_capacity.fallback_models` on 429/503) and cloudcode-pa envelope unwrap (buffered via `unwrap_buffered`, streaming via `EnvelopeUnwrapStream` installed in `responseheaders`). |
+| `TransportOverrideAddon` | `TransportOverrideAddon` | Redirects provider-bound flows through the in-process curl-cffi sidecar when the resolved `Provider` declares `fingerprint_profile` or the active shape carries a captured fingerprint. |
+| `AuthAddon` | `AuthAddon` | 401-detect → refresh → replay. Triggered by `metadata_from_flow(flow).auth_injected` set by `inject_auth`. Re-resolves the credential source via `config.resolve_auth_token(provider)` and replays the request with the fresh token. |
+| `GeminiAddon` | `GeminiAddon` | Two responsibilities for `metadata_from_flow(flow).auth_provider == "gemini"` flows: capacity fallback (sticky retry on the original model + walk `gemini_capacity.fallback_models` on 429/503) and cloudcode-pa envelope unwrap (buffered via `unwrap_buffered`, streaming via `EnvelopeUnwrapStream` installed in `responseheaders`). |
+| `PerplexityAddon` | `PerplexityAddon` | Captures Perplexity response identifiers from raw provider SSE and saves them into the in-memory thread cache for organic multi-turn continuation. |
+| `EgressSanitizerAddon` | `EgressSanitizerAddon` | Last pass before upstream egress; strips ccproxy-internal `x-ccproxy-*` headers after all addons have consumed them. |
 
 The pipeline routers are only added to the chain if the corresponding hook list is non-empty:
 
@@ -127,11 +136,14 @@ addons.append(_make_transform_router())
 if outbound_hooks:
     addons.append(_make_pipeline_router("ccproxy_outbound", outbound_hooks))
 
-addons.append(OAuthAddon())
+addons.append(TransportOverrideAddon(sidecar_port=sidecar_port))
+addons.append(AuthAddon())
 addons.append(GeminiAddon())
+addons.append(PerplexityAddon())
+addons.append(EgressSanitizerAddon())
 ```
 
-`OAuthAddon.response` runs before `GeminiAddon.response` in the chain — so a 401 → refresh → replay → 429 sequence cascades naturally into `GeminiAddon`'s capacity fallback.
+`AuthAddon.response` runs before `GeminiAddon.response` in the chain — so a 401 → refresh → replay → 429 sequence cascades naturally into `GeminiAddon`'s capacity fallback.
 
 ---
 
@@ -193,7 +205,7 @@ class FlowRecord:
 | Field | Written by | Read by |
 |-------|------------|---------|
 | `direction` | `InspectorAddon.request()` | Pipeline route guards |
-| `auth` | `forward_oauth` hook | (logging context) |
+| `auth` | `inject_auth` hook | (logging context) |
 | `otel` | `InspectorAddon.request()` via tracer | `InspectorAddon.response()` / `.error()` |
 | `client_request` | `InspectorAddon.request()` | "Client Request" content view, `ccproxy.clientrequest` command |
 | `provider_response` | `InspectorAddon.response()` | "Provider Response" content view, `ccproxy.dump` command |
@@ -215,13 +227,13 @@ metadata.direction   # "inbound"
 
 ### AuthMeta
 
-Written by the `forward_oauth` hook when an OAuth sentinel key is detected:
+Written by the `inject_auth` hook when an auth sentinel key is detected:
 
 ```python
 @dataclass
 class AuthMeta:
     provider: str       # sentinel suffix (e.g. "anthropic")
-    credential: str     # substituted OAuth token
+    credential: str     # substituted auth token
     auth_header: str    # header name used ("authorization" or custom)
     injected: bool      # True once header was set on the request
     original_key: str   # the sentinel key value before substitution
@@ -246,11 +258,13 @@ response phase:
 ```python
 @dataclass(frozen=True)
 class TransformMeta:
-    provider: str               # destination provider (e.g. "anthropic", "gemini")
-    model: str                  # destination model name
-    request_data: dict[str, Any] # full request body at transform time
-    is_streaming: bool          # True if stream=True in the original request
+    provider_type: str              # destination wire dialect for lightllm dispatch
+    model: str                      # destination model name
+    request_data: dict[str, Any]    # full request body at transform time
+    is_streaming: bool              # True when the request uses SSE streaming
     mode: Literal["redirect", "transform"] = "redirect"
+    inbound_format: str = "unknown" # listener-side wire format
+    request_parameters: Any = None  # pydantic-ai request parameters for response intake
 ```
 
 ### ClientRequest
@@ -295,15 +309,16 @@ InspectorAddon.responseheaders fires
   → content-type != text/event-stream  → no-op (buffered by mitmproxy)
   → content-type == text/event-stream
       → record.transform set, transform.is_streaming, transform.mode == "transform"
-            → make_sse_transformer(provider, model, optional_params)
-            → flow.response.stream = SSETransformer(...)   [cross-provider]
+            → dispatch_intake(provider_type, request_params)
+            → dispatch_render(inbound_format, model)
+            → flow.response.stream = SSEPipeline(...)      [cross-provider]
       → for redirect-mode Gemini streaming flows: returns without setting stream
         (deferred to GeminiAddon below)
       → else
             → flow.response.stream = True                  [passthrough]
 
 GeminiAddon.responseheaders fires (after outbound pipeline)
-  → only acts when oauth_provider == "gemini" + content-type is SSE +
+  → only acts when auth_provider == "gemini" + content-type is SSE +
     transform.mode == "redirect" + transform.is_streaming
       → if status_code is in retry_status_codes and capacity fallback enabled:
             → leave stream unset (so mitmproxy buffers the body for retry)
@@ -325,7 +340,7 @@ Lives in `src/ccproxy/hooks/gemini_envelope.py`; installed by `GeminiAddon.respo
 **Passthrough** (`flow.response.stream = True`): Raw SSE bytes forwarded to the client unchanged —
 used for same-provider flows or when no transform rule matched.
 
-If `make_sse_transformer()` raises (e.g. unsupported provider), the handler logs a warning and
+If `SSEPipeline` construction raises (e.g. unsupported provider), the handler logs a warning and
 falls back to passthrough.
 
 ---
@@ -380,7 +395,7 @@ handle_transform (RouteType.REQUEST)
   → target.mode == "passthrough"
       → _handle_passthrough(): forward unchanged, log only
   → target.mode == "transform"
-      → _handle_transform(): call transform_to_provider() via lightllm
+      → _handle_transform(): call lightllm.graph.dispatch_dump_sync()
           → rewrites host, port, scheme, path, headers, body
           → persists TransformMeta on FlowRecord
 ```
@@ -390,11 +405,11 @@ handle_transform (RouteType.REQUEST)
 ```
 handle_transform_response (RouteType.RESPONSE)
   → guard: record.transform is not None
-  → guard: transform.is_streaming → return (handled by SSETransformer already)
+  → guard: transform.is_streaming → return (handled by SSEPipeline already)
   → guard: response status < 400
-  → transform_to_openai(model, provider, MitmResponseShim(flow.response), ...)
-      → MitmResponseShim duck-types httpx.Response for mitmproxy's flow.response
-  → rewrite flow.response.content to OpenAI JSON
+  → transform_buffered_response_sync(...)
+      → provider response bytes → response IR → listener-format JSON
+  → rewrite flow.response.content to listener-format JSON
   → set content-type: application/json, strip content-encoding
 ```
 
@@ -610,8 +625,12 @@ on port 16686.
 |------|------|
 | `src/ccproxy/inspector/process.py` | `run_inspector()`, `_build_opts()`, `_build_addons()`, `ReadySignal`, `get_wg_client_conf()` |
 | `src/ccproxy/inspector/addon.py` | `InspectorAddon` — direction detection, flow record lifecycle, pre-pipeline snapshot, conversation/system enrichment, SSE streaming setup, OTel delegation |
-| `src/ccproxy/inspector/oauth_addon.py` | `OAuthAddon` — response-side 401-detect → refresh → replay loop |
+| `src/ccproxy/inspector/fingerprint_capture.py` | `FingerprintCaptureAddon` — native ClientHello fingerprint capture for shape-backed transport replay |
+| `src/ccproxy/inspector/transport_override_addon.py` | `TransportOverrideAddon` — rewrites provider-bound flows to the in-process curl-cffi sidecar when impersonation is configured |
+| `src/ccproxy/inspector/auth_addon.py` | `AuthAddon` — response-side 401-detect → refresh → replay loop |
 | `src/ccproxy/inspector/gemini_addon.py` | `GeminiAddon` — capacity fallback orchestrator + Gemini envelope unwrap (buffered + streaming) |
+| `src/ccproxy/inspector/pplx_addon.py` | `PerplexityAddon` — captures thread identifiers from raw Perplexity SSE |
+| `src/ccproxy/inspector/egress_sanitizer_addon.py` | `EgressSanitizerAddon` — strips ccproxy-internal headers before upstream egress |
 | `src/ccproxy/inspector/multi_har_saver.py` | `MultiHARSaver` — `ccproxy.dump` command for multi-page HAR export |
 | `src/ccproxy/inspector/contentview.py` | `ClientRequestContentview`, `ProviderResponseContentview` — custom mitmproxy content views |
 | `src/ccproxy/flows/store.py` | `FlowRecord`, `AuthMeta`, `OtelMeta`, `TransformMeta`, `HttpSnapshot`, `ClientRequest`, `InspectorMeta`, TTL store |

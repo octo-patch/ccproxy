@@ -2,7 +2,7 @@
 """Anthropic SDK through ccproxy to DeepSeek using the sentinel key.
 
 DeepSeek exposes an Anthropic-compatible API — same wire format, same SDK.
-ccproxy handles auth header injection via ``forward_oauth`` (``x-api-key``
+ccproxy handles auth header injection via ``inject_auth`` (``x-api-key``
 header) and routes to the configured DeepSeek host. This is a same-format
 redirect — no body transformation is needed.
 

@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Example using Anthropic SDK with ccproxy OAuth sentinel key.
+"""Example using Anthropic SDK with ccproxy auth sentinel key.
 
-This example demonstrates using the Anthropic SDK with ccproxy's OAuth
+This example demonstrates using the Anthropic SDK with ccproxy's auth
 sentinel key feature. The sentinel key `sk-ant-oat-ccproxy-{provider}`
-triggers automatic OAuth token substitution from ccproxy's cached credentials.
+triggers automatic token substitution from ccproxy's configured provider.
 
 Requirements:
-- ccproxy running: `ccproxy start --detach`
+- ccproxy running: `ccproxy start`
 - OAuth credentials configured in ~/.config/ccproxy/ccproxy.yaml under providers
 """
 
@@ -26,10 +26,10 @@ BASE_URL = os.environ.get("CCPROXY_BASE_URL", "http://127.0.0.1:4000")
 
 
 def create_client() -> anthropic.Anthropic:
-    """Create Anthropic client configured for ccproxy with OAuth sentinel key.
+    """Create Anthropic client configured for ccproxy with an auth sentinel key.
 
-    The sentinel key triggers OAuth token substitution in ccproxy's pipeline hooks,
-    which also inject required headers and system message prefix.
+    The sentinel key triggers token substitution in ccproxy's pipeline hooks,
+    while shape replay supplies the required compliance envelope.
     """
     return anthropic.Anthropic(
         api_key=SENTINEL_KEY,
@@ -88,7 +88,7 @@ def main() -> None:
     try:
         # Check if running
         console.print(
-            "[yellow]Note:[/yellow] This script requires ccproxy running: [cyan]ccproxy start --detach[/cyan]\n"
+            "[yellow]Note:[/yellow] This script requires ccproxy running: [cyan]ccproxy start[/cyan]\n"
         )
 
         # Simple request
@@ -101,7 +101,7 @@ def main() -> None:
     except Exception:
         console.print(
             "\n[yellow]Troubleshooting:[/yellow]",
-            "1. Start ccproxy: [cyan]ccproxy start --detach[/cyan]",
+            "1. Start ccproxy: [cyan]ccproxy start[/cyan]",
             "2. Verify providers in ~/.config/ccproxy/ccproxy.yaml",
             "3. Check logs: [cyan]ccproxy logs -f[/cyan]",
             sep="\n",

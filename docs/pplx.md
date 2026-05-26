@@ -62,7 +62,7 @@ providers:
       file: ~/.config/ccproxy/perplexity-session-token
     host: www.perplexity.ai
     path: /rest/sse/perplexity_ask
-    provider: perplexity_pro
+    type: perplexity_pro
     fingerprint_profile: chrome131         # curl-cffi TLS impersonation
 
 pplx:
@@ -421,7 +421,7 @@ providers:
       file: ~/.config/ccproxy/perplexity-session-token
     host: www.perplexity.ai
     path: /rest/sse/perplexity_ask
-    provider: perplexity_pro               # ccproxy-internal provider id
+    type: perplexity_pro                   # ccproxy-internal provider id
     fingerprint_profile: chrome131         # curl-cffi impersonation (recommended)
 ```
 
@@ -455,12 +455,13 @@ The pplx pipeline lives in `nix/defaults.nix`:
 ```yaml
 hooks:
   inbound:
-    - ccproxy.hooks.forward_oauth
+    - ccproxy.hooks.inject_auth
     - ccproxy.hooks.extract_session_id
     - ccproxy.hooks.extract_pplx_files       # multimodal extraction
     - ccproxy.hooks.pplx_thread_inject       # three-mode resolution
   outbound:
     - ccproxy.hooks.gemini_cli
+    - ccproxy.hooks.pplx_stamp_headers       # cookie + browser header bundle
     - ccproxy.hooks.pplx_preflight           # /search/new warmup
     - ccproxy.hooks.inject_mcp_notifications
     - ccproxy.hooks.verbose_mode
@@ -492,8 +493,8 @@ ccproxy port 4000 / 4001 (mitmweb reverse listener)
    MultiHARSaver             HAR capture (passive)
    ShapeCaptureAddon         shape capture (skipped for perplexity — no shaping)
    InspectorRouter (inbound) runs the inbound DAG:
-     1. forward_oauth          resolves sentinel → session cookie
-                               stamps ctx.metadata.oauth_provider = "perplexity_pro"
+     1. inject_auth            resolves sentinel → session cookie placeholder
+                               stamps ctx.metadata.auth_provider = "perplexity_pro"
      2. extract_session_id     reads metadata.user_id → ctx.metadata.session_id
      3. extract_pplx_files     walks messages for image_url parts
                                uploads to S3 via batch_create_upload_urls + multipart + subscribe
@@ -504,18 +505,17 @@ ccproxy port 4000 / 4001 (mitmweb reverse listener)
                                  Mode 2: PerplexityThreadStore.get(conversation_id)
                                  Mode 3: no-op
                                injects ctx._body["pplx"] = {last_backend_uuid, read_write_token, frontend_context_uuid}
-   InspectorRouter (transform)  calls lightllm.transform_to_provider:
-     PerplexityProConfig.validate_environment   stamps Cookie + UA + Origin + x-perplexity-request-reason + x-app-api* headers
-     PerplexityProConfig.get_complete_url       returns https://www.perplexity.ai/rest/sse/perplexity_ask
-     PerplexityProConfig.transform_request      calls _build_pplx_payload(
+   InspectorRouter (transform)  calls lightllm.graph.dispatch_dump_sync:
+     PerplexityAdapter.render                  calls _build_pplx_payload(
                                                   query=_flatten_messages(messages),
                                                   model_id=model,
                                                   extras=optional_params["pplx"])
                                                 returns {params: {...28 fields...}, query_str: "..."}
    InspectorRouter (outbound) runs the outbound DAG:
      1. gemini_cli              skip (not Gemini)
-     2. pplx_preflight          fires GET /search/new?q=<query[:2000]> as best-effort warmup
-     3. inject_mcp_notifications, verbose_mode, commitbee_compat, shape  (all skip)
+     2. pplx_stamp_headers      converts the resolved token to Cookie + browser headers
+     3. pplx_preflight          fires GET /search/new?q=<query[:2000]> as best-effort warmup
+     4. inject_mcp_notifications, verbose_mode, commitbee_compat, shape  (all skip)
    TransportOverrideAddon       provider.fingerprint_profile == "chrome131"
                                 rewrites flow.request to 127.0.0.1:<sidecar_port>
                                 X-CCProxy-Target-Url: https://www.perplexity.ai/rest/sse/perplexity_ask
@@ -531,12 +531,12 @@ ccproxy port 4000 / 4001 (mitmweb reverse listener)
    sidecar streams bytes back through mitmproxy
    InspectorAddon.response       stashes raw upstream body to FlowRecord.provider_response.body
    InspectorRouter (transform)   non-streaming: calls handle_transform_response which calls
-                                                 PerplexityProConfig.transform_response
-                                                 (full SSE parse → OpenAI ChatCompletion JSON)
-                                  streaming:     SSETransformer wraps each chunk through
-                                                 PerplexityProIterator.chunk_parser
+                                                 transform_buffered_response_sync
+                                                 (full SSE parse → listener JSON)
+                                  streaming:     SSEPipeline wraps each chunk through
+                                                 PerplexityResponseIntakeFSM + listener renderer
    InspectorRouter (outbound)   skip for response phase
-   OAuthAddon.response          skip (Perplexity doesn't use OAuth Bearer; 401 path inactive)
+   AuthAddon.response           skip (Perplexity uses cookie auth; the generic 401 replay path is inactive)
    GeminiAddon.response         skip (not Gemini)
    PerplexityAddon.response     scans FlowRecord.provider_response.body for thread identifiers
                                 saves to PerplexityThreadStore keyed by conversation_id
@@ -595,25 +595,19 @@ attachments by the `extract_pplx_files` hook upstream.
 Both modes share the same parser group; they differ only in how the parsed
 state is delivered to the client.
 
-**Non-streaming** — `PerplexityProConfig.transform_response` (pplx.py:600-650):
-1. Reads the full buffered SSE response via `raw_response.text.splitlines()`
-2. Loops `_parse_sse_line` + `_extract_deltas` over every line
-3. `state.answer_seen` and `state.reasoning_seen` accumulate
-4. Emits one `Choices(message=Message(role="assistant", content=state.answer_seen))`
-5. Stamps `model_response.pplx_thread_url_slug` from `state.ids["thread_url_slug"]`
-6. The route layer JSON-encodes and overwrites `flow.response.content`
+**Non-streaming** — `transform_buffered_response_sync`:
+1. Treats the buffered Perplexity body as concatenated SSE bytes.
+2. Feeds those bytes through `PerplexityResponseIntakeFSM`.
+3. Accumulates answer, reasoning, thread ids, steps, and model metadata in the intake state.
+4. Renders the resulting response parts into the listener format, typically OpenAI Chat JSON.
+5. The route layer overwrites `flow.response.content` with that listener-format JSON.
 
-**Streaming** — `PerplexityProIterator.chunk_parser` (pplx.py:670-720):
-1. Called once per parsed SSE chunk by `SSETransformer`
-2. State persists across calls (`self._state`)
-3. Each chunk → `Delta(content=answer_delta, reasoning_content=reasoning_delta)`
-4. `finish_reason = "stop"` only when `state.final` is True (gated on
-   `final_sse_message`, NOT on `final` which can appear multiple times)
-5. After emitting the stop chunk, `self._terminated = True` and subsequent
-   chunks return `None` (suppressed by `SSETransformer`'s
-   `if model_chunk is None: return b""`)
-6. The terminal chunk carries `response.pplx_thread_url_slug` as a non-spec
-   field
+**Streaming** — `SSEPipeline`:
+1. Feeds each parsed SSE byte chunk to `PerplexityResponseIntakeFSM`.
+2. State persists across chunks (`answer_seen`, `reasoning_seen`, ids, rendered steps).
+3. Each intake event becomes response IR, then the listener renderer emits OpenAI-compatible SSE.
+4. `finish_reason = "stop"` is emitted only when the intake sees `final_sse_message`, not the earlier `final` events that can still carry useful blocks.
+5. The terminal chunk carries `pplx_thread_url_slug` and related non-spec fields for clients that want to resume the server thread.
 
 ---
 
@@ -793,7 +787,7 @@ for clarification then retry with a more specific query.
 ### Resolution chain (`pplx_thread_inject`)
 
 `src/ccproxy/hooks/pplx_thread_inject.py`. Inbound DAG hook running after
-`forward_oauth` (needs `ctx.metadata.oauth_provider`) and
+`inject_auth` (needs `ctx.metadata.auth_provider`) and
 `extract_session_id`. Stops at the first hit.
 
 ```
@@ -830,10 +824,11 @@ ctx._body["pplx"] = {
 ctx.metadata.pplx.resolved_via = resolved_via
 ```
 
-`ctx._body["pplx"]` flows through LiteLLM's `map_openai_params` into
-`optional_params["pplx"]`, which `_build_pplx_payload` reads as `extras`.
-The presence of `last_backend_uuid` triggers `query_source: "followup"` and
-the entire continuation codepath upstream.
+`ctx._body["pplx"]` is preserved as `req.raw_extras["pplx"]` by the OpenAI
+request parser. `PerplexityAdapter.render()` passes that block to
+`_build_pplx_payload()` as `extras`. The presence of `last_backend_uuid`
+triggers `query_source: "followup"` and the entire continuation codepath
+upstream.
 
 ### Divergence math — counting user turns
 
@@ -1014,9 +1009,9 @@ answer. Silent failure — the worst kind.
 
 ### Why it's a hook, not part of `transform_request`
 
-- **Layer separation**: `transform_request` is a LiteLLM `BaseConfig`
-  method whose contract is "given inputs, return the wire payload." Firing
-  a side HTTP call there violates that contract.
+- **Layer separation**: the Perplexity request adapter's contract is "given
+  inputs, return the wire payload." Firing a side HTTP call there violates that
+  contract.
 - **Cost visibility**: as a registered hook, it shows up in
   `Pipeline execution order` logs with its own timing.
 - **Symmetry**: mirrors `gemini_cli`'s `prewarm_project` hook (also fires a
@@ -1373,8 +1368,7 @@ TLS extensions and the real on-the-wire HTTP/2 bytes.
 
 ## Headers and the `x-perplexity-request-reason` family
 
-`PerplexityProConfig.validate_environment` (pplx.py:531-560) sets these on
-every outbound request:
+`pplx_stamp_headers` sets these on every outbound Perplexity ask request:
 
 ```http
 Cookie:                       __Secure-next-auth.session-token=<token>
@@ -1416,7 +1410,7 @@ Server-side it affects:
 
 ccproxy sends the right value for each endpoint:
 
-- `validate_environment` (main ask) → `perplexity-query-state-provider`
+- `pplx_stamp_headers` (main ask) → `perplexity-query-state-provider`
 - `pplx_thread_inject._fetch_thread` → `perplexity-query-state-provider`
 - `extract_pplx_files._await_processing` → `ask-input-inner-home`
 - MCP tools → `perplexity-query-state-provider` (observability calls)
@@ -1442,7 +1436,11 @@ cross-origin or programmatic request.
 ```
 src/ccproxy/
 ├── lightllm/
-│   ├── pplx.py                       # renamed from perplexity.py; full rewrite
+│   ├── adapters/
+│   │   └── perplexity.py             # PerplexityAdapter: IR → Perplexity wire payload
+│   ├── graph/
+│   │   └── perplexity_intake.py      # Perplexity SSE → response IR
+│   ├── pplx.py                       # Perplexity payload, SSE parsing, thread import helpers
 │   │   ├── _build_pplx_payload       # 28-field production payload (165-258)
 │   │   ├── _flatten_messages         # OpenAI messages → query_str (122-159)
 │   │   ├── _parse_sse_line           # data: <json> → dict (260-280)
@@ -1451,29 +1449,27 @@ src/ccproxy/
 │   │   ├── _PerplexityException, _PerplexityThreadNotFoundError, _PerplexityClarifyingQuestionsError
 │   │   ├── _extract_final_answer     # for thread → OpenAI conversion
 │   │   ├── _format_citations         # [N] → [N](url) | strip | preserve
-│   │   ├── _thread_to_openai_messages # the MCP import helper
-│   │   ├── PerplexityProConfig       # LiteLLM BaseConfig subclass
-│   │   └── PerplexityProIterator     # streaming chunk parser
-│   └── pplx_threads.py               # NEW
+│   │   └── _thread_to_openai_messages # the MCP import helper
+│   └── pplx_threads.py
 │       ├── PerplexityThreadState     # frozen dataclass
 │       ├── PerplexityThreadStore     # in-memory TTL store
 │       ├── _get_ttl_seconds          # lazy config read
 │       ├── get_pplx_thread_store     # singleton accessor
 │       └── clear_pplx_threads        # test cleanup
 ├── hooks/
-│   ├── pplx_preflight.py             # NEW: /search/new warmup
-│   ├── pplx_thread_inject.py         # NEW: three-mode resolution
-│   └── extract_pplx_files.py         # NEW: multimodal → S3 attachments
+│   ├── pplx_preflight.py             # /search/new warmup
+│   ├── pplx_thread_inject.py         # three-mode resolution
+│   └── extract_pplx_files.py         # multimodal → S3 attachments
 ├── inspector/
-│   └── pplx_addon.py                 # NEW: SSE state capture → L1 cache
+│   └── pplx_addon.py                 # SSE state capture → L1 cache
 ├── specs/
 │   └── perplexity_models.json        # refreshed: 15 → 22 models
 └── mcp/
-    └── server.py                     # added 5 pplx MCP tools
+    └── server.py                     # Perplexity quota + thread-library MCP tools
 
 tests/
 ├── conftest.py                       # added clear_pplx_threads()
-└── test_lightllm_pplx.py             # NEW: 19 tests
+└── test_lightllm_pplx.py             # Perplexity payload, parser, and cache coverage
 
 nix/
 └── defaults.nix                      # added pplx block, hook registrations, fingerprint_profile
@@ -1485,24 +1481,16 @@ docs/
 ### Modified files
 
 ```
-src/ccproxy/lightllm/registry.py      # import from pplx (was perplexity)
-src/ccproxy/lightllm/dispatch.py      # import from pplx (was perplexity)
+src/ccproxy/lightllm/registry.py      # Perplexity provider registration
 src/ccproxy/inspector/process.py      # register PerplexityAddon in _build_addons
-src/ccproxy/hooks/__init__.py         # export the three new pplx hooks
+src/ccproxy/hooks/__init__.py         # export the Perplexity hooks
 src/ccproxy/config.py                 # add PplxThreadConfig, PplxConfig classes
                                         + CCProxyConfig.pplx field
 ```
 
-### Renamed
-
-```
-src/ccproxy/lightllm/perplexity.py    →    pplx.py
-                                            (existing tests still load via registry)
-```
-
 ### Test coverage
 
-`tests/test_lightllm_pplx.py` has 19 test functions covering:
+The Perplexity test surface covers:
 
 - Registry resolution
 - Model catalog presence
@@ -1518,11 +1506,7 @@ src/ccproxy/lightllm/perplexity.py    →    pplx.py
 - File-upload helpers (data URI decoding)
 - User-turn counting (with system message interleaving)
 - PerplexityAddon SSE ID scanning
-- Iterator delta emission (content + reasoning + slug echo)
-
-All 80 lightllm + config + pplx tests pass; the broader 957-test suite has
-one pre-existing failure (`test_routing.py::test_blacklisted_domain_gets_default_response`)
-unrelated to this work.
+- Streaming intake/render delta emission (content + reasoning + slug echo)
 
 ---
 

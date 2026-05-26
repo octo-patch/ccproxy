@@ -76,16 +76,16 @@ dispatch, SSE streaming.
 ```
 ccproxy start
   → mitmweb (reverse + WireGuard listeners, in-process via WebMaster API)
-  → InspectorAddon.request() → MultiHARSaver → ShapeCapturer
+  → InspectorAddon.request() → FingerprintCaptureAddon → MultiHARSaver → ShapeCaptureAddon
     → inbound DAG → transform router (lightllm) → outbound DAG
-    → AuthAddon → GeminiAddon
+    → TransportOverrideAddon → AuthAddon → GeminiAddon → PerplexityAddon → EgressSanitizerAddon
   → provider API directly
 ```
 
 `InspectorAddon` owns OTel span lifecycle, FlowRecord creation, direction detection, and
 pre-pipeline request snapshot.
 `responseheaders()` sets `flow.response.stream` (either `True` for passthrough or an
-`SSETransformer` for cross-provider transform).
+`SSEPipeline` for cross-provider transform).
 `AuthAddon` runs after the pipeline and detects 401s on flows where `inject_auth` injected a token,
 refreshes, and replays.
 `GeminiAddon` follows it and handles cloudcode-pa response unwrapping plus capacity (429/503)
@@ -98,9 +98,10 @@ overwritten by transform) and `wireguard:{conf}@{udp_port}`.
 ### Addon Chain (registered in `inspector/process.py:_build_addons`)
 
 ```
-InspectorAddon → MultiHARSaver → ShapeCapturer
+InspectorAddon → FingerprintCaptureAddon → MultiHARSaver → ShapeCaptureAddon
               → ccproxy_inbound (DAG) → ccproxy_transform → ccproxy_outbound (DAG)
-              → TransportOverrideAddon → AuthAddon → GeminiAddon
+              → TransportOverrideAddon → AuthAddon → GeminiAddon → PerplexityAddon
+              → EgressSanitizerAddon
 ```
 
 The pipeline routers are only added when their hook list is non-empty.

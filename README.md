@@ -10,8 +10,8 @@ process inside a rootless WireGuard namespace, intercepts at the network layer,
 and feeds it through a DAG-driven pipeline that can decompose, transform, and
 re-route traffic between providers.
 Cross-provider request and response transformation is handled by `lightllm`, a
-surgical connector into LiteLLM’s `BaseConfig` completion layer — no LiteLLM
-proxy subprocess, no gateway server.
+surgical adapter and streaming-FSM layer inside ccproxy — no LiteLLM proxy
+subprocess, no gateway server.
 
 **New in 2.0 beta**: DeepSeek V4 routing support — redirect Anthropic-format
 requests to DeepSeek’s `/anthropic/v1/messages` endpoint with a single transform
@@ -20,7 +20,7 @@ rule. See [Configuration](#configuration) for the routing setup.
 The hook pipeline is your extension point for building mods and taking control
 of your LLM usage while respecting terms of service:
 - **Cross-provider routing**: redirect or transform requests between Anthropic,
-  Gemini, OpenAI, DeepSeek, and any LiteLLM-supported provider.
+  Gemini, OpenAI, DeepSeek, Perplexity Pro, and Anthropic-compatible forks.
 - **Compliance shaping**: capture real SDK requests via WireGuard observation
   and stamp those compliance envelopes onto proxied requests, keeping you within
   provider terms of service.
@@ -159,20 +159,21 @@ flowchart TD
 ```
 
 **Addon chain** (fixed order):
-`ReadySignal → InspectorAddon → MultiHARSaver → ShapeCapturer → inbound DAG → transform → outbound DAG → OAuthAddon → GeminiAddon`
+`ReadySignal → InspectorAddon → FingerprintCaptureAddon → MultiHARSaver → ShapeCaptureAddon → inbound DAG → transform → outbound DAG → TransportOverrideAddon → AuthAddon → GeminiAddon → PerplexityAddon → EgressSanitizerAddon`
 
-`OAuthAddon` and `GeminiAddon` sit after the outbound pipeline so they see
-ccproxy-finalized requests/responses. `OAuthAddon` owns 401-detect → refresh →
+`AuthAddon` and `GeminiAddon` sit after the outbound pipeline so they see
+ccproxy-finalized requests/responses. `AuthAddon` owns 401-detect → refresh →
 replay. `GeminiAddon` owns Gemini capacity fallback (sticky retry + fallback
 chain on 429/503) and cloudcode-pa envelope unwrapping.
 
-**lightllm** invokes LiteLLM’s `BaseConfig` transformation pipeline directly —
-URL rewriting, auth signing, request/response format conversion — without the
-proxy server, cost tracking, or callback machinery.
+**lightllm** converts request and response bodies through ccproxy's own
+adapter layer and streaming FSMs. URL rewriting and auth injection are owned by
+the inspector route and `Provider` config, while `lightllm` owns wire-format
+conversion.
 
-**SSE streaming**: `SSETransformer` handles cross-provider streaming by parsing
-SSE events, transforming each chunk via LiteLLM’s per-provider
-`ModelResponseIterator`, and re-serializing as OpenAI-format SSE.
+**SSE streaming**: `SSEPipeline` handles cross-provider streaming by parsing
+SSE events into ccproxy's response IR and rendering each chunk back to the
+listener's wire format.
 
 ## Configuration
 
@@ -193,7 +194,7 @@ ccproxy:
         command: "jq -r '.claudeAiOauth.accessToken' ~/.claude/.credentials.json"
       host: api.anthropic.com
       path: /v1/messages
-      provider: anthropic
+      type: anthropic
 
     deepseek:
       auth:
@@ -202,14 +203,15 @@ ccproxy:
         header: x-api-key
       host: api.deepseek.com
       path: /anthropic/v1/messages
-      provider: anthropic
+      type: anthropic
 
   hooks:
     inbound:
-      - ccproxy.hooks.forward_oauth
+      - ccproxy.hooks.inject_auth
       - ccproxy.hooks.extract_session_id
     outbound:
       - ccproxy.hooks.gemini_cli
+      - ccproxy.hooks.pplx_stamp_headers
       - ccproxy.hooks.inject_mcp_notifications
       - ccproxy.hooks.verbose_mode
       - ccproxy.hooks.shape
@@ -218,7 +220,7 @@ ccproxy:
   inspector:
     # Optional regex-matched override rules layered on top of the
     # sentinel-driven providers map. Default is empty: most routing
-    # comes from `providers` via forward_oauth's sentinel detection.
+    # comes from `providers` via inject_auth's sentinel detection.
     transforms:
       - match_path: ^/v1/chat/completions
         match_model: ^gpt-4o
@@ -273,7 +275,7 @@ ccproxy:
         header: authorization
       host: api.anthropic.com
       path: /v1/messages
-      provider: anthropic
+      type: anthropic
 
     deepseek:
       auth:
@@ -282,7 +284,7 @@ ccproxy:
         header: x-api-key
       host: api.deepseek.com
       path: /anthropic/v1/messages
-      provider: anthropic
+      type: anthropic
 ```
 
 **Hook config**: hooks in each stage list are topologically sorted by
@@ -319,7 +321,7 @@ ccproxy:
         header: authorization
       host: api.anthropic.com
       path: /v1/messages
-      provider: anthropic
+      type: anthropic
 ```
 
 The four glom paths declare the file's schema (`{claudeAiOauth: {accessToken,
@@ -332,9 +334,10 @@ even if both tools refresh concurrently.
 
 | Hook | Stage | Purpose |
 | --- | --- | --- |
-| `forward_oauth` | inbound | Sentinel key (`sk-ant-oat-ccproxy-{provider}`) substitution from `providers` |
+| `inject_auth` | inbound | Sentinel key (`sk-ant-oat-ccproxy-{provider}`) substitution from `providers` |
 | `extract_session_id` | inbound | Parses `metadata.user_id` → stores session_id on `ctx.metadata.session_id` |
 | `gemini_cli` | outbound | Single hook for Gemini sentinel-key traffic: `v1internal` envelope wrap, conditional UA masquerade, path rewrite to `cloudcode-pa`, and unwrap on the way back |
+| `pplx_stamp_headers` | outbound | Converts the Perplexity Pro sentinel token into the browser-shaped cookie/auth header bundle |
 | `inject_mcp_notifications` | outbound | Injects buffered MCP terminal events as synthetic tool_use/tool_result |
 | `verbose_mode` | outbound | Strips `redact-thinking-*` from `anthropic-beta` header |
 | `shape` | outbound | Replays a captured shape and stamps content fields from the incoming request |
@@ -342,16 +345,19 @@ even if both tools refresh concurrently.
 
 ## Shape Replay (Anthropic)
 
-Anthropic traffic depends on a captured shape. The shape is the only source of
-the Claude Code identity headers (user-agent, anthropic-beta, etc.) and the
-billing-header block — there is no synthetic-identity fallback hook anymore. If
-no shape exists for the `anthropic` provider, or if the captured shape is from
-an outdated Claude CLI release, Anthropic will reject the request with 401/400.
+Anthropic traffic depends on shape replay. ccproxy ships a sanitized packaged
+default for Anthropic, and that shape is the only source of the Claude Code
+identity headers (user-agent, anthropic-beta, etc.) and the billing-header
+block — there is no synthetic-identity fallback hook anymore. If the shape is
+stale for the active Claude CLI release, Anthropic can reject the request with
+401/400.
 
-Capture (and re-capture) a shape any time the Claude CLI version changes:
+Capture a local customization when the Claude CLI version changes or when you
+need to inspect/update the compliance envelope:
 
 ```bash
-ccproxy flows shape --provider anthropic
+ccproxy run --inspect -- claude -p "shape refresh"
+ccproxy shapes save anthropic
 ```
 
 ## CLI Reference
@@ -369,6 +375,11 @@ ccproxy flows dump [--jq FILTER]...              # Multi-page HAR of flow set
 ccproxy flows diff [--jq FILTER]...              # Sliding-window diff across set
 ccproxy flows compare [--jq FILTER]...           # Per-flow client-vs-forwarded diff
 ccproxy flows clear [--all] [--jq FILTER]...     # Clear flow set (--all bypasses filters)
+
+# Shape artifacts
+ccproxy shapes save PROVIDER [--jq FILTER]...    # Write/update provider shape patch
+ccproxy shapes save PROVIDER --mflow             # Write request-only .mflow override
+ccproxy shapes audit [--directory PATH]          # Audit packaged .mflow artifacts
 ```
 
 `ccproxy run` (without `--inspect`) sets `ANTHROPIC_BASE_URL`,
@@ -555,9 +566,9 @@ See [Installation](#installation) for the per-distro system package list.
 on `PATH` and prints the missing ones with package hints. The reverse proxy
 (`ccproxy start`) does not require any of these and works on macOS too.
 
-### OAuth token errors
+### Auth token errors
 
-OAuth tokens are loaded at startup from each `providers[name].auth` source. If
+Auth tokens are loaded at startup from each `providers[name].auth` source. If
 a token command fails or returns an empty string, the sentinel key substitution
 is skipped and the raw sentinel key is forwarded — which will be rejected by
 the provider.
@@ -570,7 +581,7 @@ jq -r '.claudeAiOauth.accessToken' ~/.claude/.credentials.json
 OAuth-source providers (`anthropic_oauth`, `google_oauth`) refresh in-process
 via `AuthSource.resolve()` whenever the cached access token is within 60s of
 expiry — this fires at startup (`_load_credentials()`) and on each header
-injection. On a 401 from upstream, `OAuthAddon` re-resolves the credential
+injection. On a 401 from upstream, `AuthAddon` re-resolves the credential
 source and replays the request with the new token. Static `command` / `file`
 loaders have no refresh capability — they read whatever's on disk every time
 and rely on whichever secret manager owns rotation. Fix your `providers`

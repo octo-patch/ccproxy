@@ -2,7 +2,7 @@
 """google-genai SDK through ccproxy using the Gemini OAuth sentinel key.
 
 The sentinel key ``sk-ant-oat-ccproxy-gemini`` resolves to an OAuth Bearer
-token from ``~/.gemini/oauth_creds.json`` via the ``forward_oauth`` hook.
+token from ``~/.gemini/oauth_creds.json`` via the ``inject_auth`` hook.
 The ``gemini_cli`` outbound hook wraps the standard Gemini API body in
 the v1internal envelope and routes to ``cloudcode-pa.googleapis.com``.
 

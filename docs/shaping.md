@@ -22,7 +22,7 @@ When ccproxy's lightllm transform converts a request, the outbound payload is AP
 
 A **shape** is a captured, known-good request carrying this complete compliance envelope. Packaged defaults and explicit full overrides are stored as response-free `.mflow` files: request state plus preserved flow metadata. Normal user customization is stored as a quilt-style patch queue against a deterministic `shape.json` projection of that request.
 
-ccproxy ships sanitized default shapes for built-in shaping providers. These bundled shapes are read-only package assets and are used automatically when the user has not captured an override. User customizations normally live as small `.patch` files under `$CCPROXY_CONFIG_DIR/shapes/{provider}/`.
+ccproxy ships sanitized default shapes for built-in shaping providers. These bundled shapes are read-only package assets and are used automatically when the user has not captured an override. They are prepared for public distribution as request-only `.mflow` files: no response body, no auth/cookie headers, and no ccproxy flow-record metadata. User customizations normally live as small `.patch` files under `$CCPROXY_CONFIG_DIR/shapes/{provider}/`.
 
 Base resolution order is:
 
@@ -48,17 +48,23 @@ ccproxy flows list
 ccproxy flows compare
 
 # 4. Generate/update the provider patch queue
-ccproxy flows shape anthropic
+ccproxy shapes save anthropic
 
 # Optional escape hatch: write a sanitized request-only full override
-ccproxy flows shape anthropic --mflow
+ccproxy shapes save anthropic --mflow
 ```
 
 A good shape has a successful (2xx) response, originates from the authentic target SDK, contains the full set of compliance headers, and has a representative system prompt structure.
 
 ### Under the Hood
 
-`ccproxy flows shape` invokes `MitmwebClient.save_shape()` → `POST /commands/ccproxy.shape` → `ShapeCaptureAddon.save_shape_artifact()` (`inspector/shape_capturer.py`). The addon validates the flow (POST method, JSON content-type, `capture.path_pattern` regex), sanitizes it, preserves serializable flow metadata, embeds any captured replay fingerprint under `ccproxy.fingerprint.profile`, and then:
+`ccproxy shapes save` resolves the current flow set with the same `--jq`
+filtering used by `ccproxy flows`, then invokes `MitmwebClient.save_shape()` →
+`POST /commands/ccproxy.shape` → `ShapeCaptureAddon.save_shape_artifact()`
+(`inspector/shape_capturer.py`). The addon validates the flow (POST method,
+JSON content-type, `capture.path_pattern` regex), sanitizes it, preserves
+serializable flow metadata for local overrides, embeds any captured replay
+fingerprint under `ccproxy.fingerprint.profile`, and then:
 
 - Default mode: canonicalizes the selected request and provider base into `shape.json`, writes a standard unified diff as `{shapes_dir}/{provider}/0001-local-shape.patch`, and lists it in `{shapes_dir}/{provider}/series`.
 - `--mflow` mode: writes a sanitized response-free `{shapes_dir}/{provider}.mflow` override via `FlowWriter`.
@@ -159,7 +165,7 @@ incoming request's content
 
 The `shape` hook (`hooks/shape.py`) runs last in the outbound pipeline. Its guard condition (`shape_guard`) ensures it only fires when:
 
-- The flow entered via **reverse proxy** OR has the `ccproxy.oauth_injected` flag
+- The flow entered via **reverse proxy** OR has the `ccproxy.auth_injected` flag
 - AND the `FlowRecord` has a completed `TransformMeta`
 
 WireGuard passthrough flows (already authentic) and flows without a transform are not shaped.
@@ -313,7 +319,7 @@ Numeric path segments auto-coerce to list indices. Non-numeric segments are dict
 
 `apply_shape(shape, ctx, preserve_headers)` (`shaping/models.py`) stamps the shape onto the outbound flow:
 
-1. Snapshot `preserve_headers` values from the target flow (auth headers from `forward_oauth`, host from redirect handler)
+1. Snapshot `preserve_headers` values from the target flow (auth headers from `inject_auth`, host from redirect handler)
 2. Clear ALL headers on the target flow
 3. Copy ALL shape headers (compliance headers, user-agent, beta flags, x-stainless-*, etc.)
 4. Restore the preserved headers (overwriting any shape values for those keys)
@@ -321,7 +327,7 @@ Numeric path segments auto-coerce to list indices. Non-numeric segments are dict
 6. Set `flow.request.content = shape.content`
 7. Resync `ctx._body` from the shape content
 
-Auth headers from `forward_oauth` and the `host` from the transform router survive shaping. Everything else comes from the shape's compliance envelope. The `preserve_headers` list is configurable per-provider.
+Auth headers from `inject_auth` and the `host` from the transform router survive shaping. Everything else comes from the shape's compliance envelope. The `preserve_headers` list is configurable per-provider.
 
 ### Configuration
 
@@ -390,7 +396,7 @@ shaping:
 | `shape_hooks` | `list[str \| dict]` | `[]` | Dotted module paths or `{hook, params}` dicts containing `@hook`-decorated functions, DAG-ordered |
 | `preserve_headers` | `list[str]` | auth + host | Target headers apply_shape must NOT overwrite |
 | `strip_headers` | `list[str]` | auth + transport | Shape headers to remove before stamping |
-| `capture.path_pattern` | `str` | `""` | Regex for flow validation during `ccproxy flows shape` |
+| `capture.path_pattern` | `str` | `""` | Regex for flow validation during `ccproxy shapes save` |
 
 ### Writing Custom Shape Hooks
 
@@ -463,6 +469,9 @@ To add a new provider, add an entry under `shaping.providers` with the appropria
 # Fresh install: bundled defaults are used automatically
 just up
 
+# Check the packaged request-only artifacts
+ccproxy shapes audit
+
 # Verification
 # Run a request through the reverse proxy with the sentinel key, then:
 ccproxy flows compare
@@ -472,7 +481,7 @@ ccproxy flows compare
 # Optional customization / maintenance
 # Generate a patch when the target SDK updates beta headers or system prompt structure:
 ccproxy run --inspect -- claude -p "shape refresh"
-ccproxy flows shape anthropic
+ccproxy shapes save anthropic
 
 # Remove user customizations and return to the bundled default:
 rm -rf ~/.config/ccproxy/shapes/anthropic ~/.config/ccproxy/shapes/anthropic.mflow
@@ -484,10 +493,10 @@ rm -rf ~/.config/ccproxy/shapes/anthropic ~/.config/ccproxy/shapes/anthropic.mfl
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| "No shape available for provider X" in logs | No user override and no bundled default for that provider | Add a bundled default or write an explicit `.mflow` override with `ccproxy flows shape X --mflow` |
+| "No shape available for provider X" in logs | No user override and no bundled default for that provider | Add a bundled default or write an explicit `.mflow` override with `ccproxy shapes save X --mflow` |
 | "No shaping profile for provider X" in logs | Missing provider config | Add `shaping.providers.X` to ccproxy.yaml |
-| Shape hook not firing (no "Applied shape" log) | Guard condition not met: flow lacks transform, or entered via WireGuard passthrough | Verify transform/redirect rule exists; check flow entered via reverse proxy or OAuth |
+| Shape hook not firing (no "Applied shape" log) | Guard condition not met: flow lacks transform, or entered via WireGuard passthrough | Verify transform/redirect routing exists; check that the flow entered through the reverse proxy or had auth injected |
 | System prompt missing shape's preamble | `merge_strategies` misconfigured | Ensure `system: prepend_shape` is set in the provider's `merge_strategies` config |
 | 400 "too many cache_control breakpoints" | Shape system blocks carry `cache_control` that survives `prepend_shape` merge | Add the `strip` and `insert` caching hooks to `shape_hooks` (see Cache Breakpoint Hooks) |
-| 400/403 from provider after shaping | Stale shape (SDK updated headers) | Re-capture: `ccproxy run --inspect -- claude -p "refresh"` then `ccproxy flows shape X` |
+| 400/403 from provider after shaping | Stale shape (SDK updated headers) | Re-capture: `ccproxy run --inspect -- claude -p "refresh"` then `ccproxy shapes save X` |
 | Auth headers leaking from shape | `strip_headers` misconfigured | Ensure `authorization` and `x-api-key` are in the provider's `strip_headers` list |

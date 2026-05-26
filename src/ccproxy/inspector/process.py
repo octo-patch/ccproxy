@@ -135,9 +135,10 @@ def _build_addons(
     wg_cli_port: int,
     sidecar_port: int,
 ) -> list[Any]:
-    """Final addon chain: ``InspectorAddon → MultiHARSaver → ShapeCaptureAddon →
-    inbound pipeline → transform (lightllm) → outbound pipeline → AuthAddon →
-    GeminiAddon``.
+    """Final addon chain: ``InspectorAddon → FingerprintCaptureAddon →
+    MultiHARSaver → ShapeCaptureAddon → inbound pipeline → transform
+    (lightllm) → outbound pipeline → TransportOverrideAddon → AuthAddon →
+    GeminiAddon → PerplexityAddon → EgressSanitizerAddon``.
 
     mitmproxy dispatches addons in registration order. ``AuthAddon`` and
     ``GeminiAddon`` both sit AFTER the outbound pipeline so they see

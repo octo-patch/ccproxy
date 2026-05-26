@@ -38,7 +38,7 @@ sending v1internal envelope traffic to cloudcode-pa.** This is enforced by the
 ```
 client                          ccproxy                          upstream
 
-Gemini SDK / Glass / OpenAI ──► forward_oauth ──► [transform] ──► gemini_cli ──► cloudcode-pa
+Gemini SDK / Glass / OpenAI ──► inject_auth ──► [transform] ──► gemini_cli ──► cloudcode-pa
   sentinel key                  resolves token   normalizes        wraps body,         v1internal
                                                   format            rewrites path
 ```
@@ -60,8 +60,8 @@ The hook is **idempotent**: if the body is already in v1internal envelope shape
 
 ### Trigger
 
-Fires only when `ctx.metadata.oauth_provider == "gemini"` — set by
-`forward_oauth` after sentinel-key resolution. Other Gemini traffic (raw API
+Fires only when `ctx.metadata.auth_provider == "gemini"` — set by
+`inject_auth` after sentinel-key resolution. Other Gemini traffic (raw API
 key, no sentinel) is not touched.
 
 ### Project resolution
@@ -159,23 +159,23 @@ providers:
       header: authorization
     host: cloudcode-pa.googleapis.com
     path: "/v1internal:{action}"
-    provider: gemini
+    type: gemini
 ```
 
 The `client_id` / `client_secret` are public installed-app values embedded in
 the gemini-cli npm distribution — ccproxy does not vendor them; supply them in
 your config.
 
-`forward_oauth` substitutes the sentinel key with the resolved token and stamps
-`ctx.metadata.oauth_provider = "gemini"` so the `gemini_cli` hook
-fires. On a 401 from upstream, `OAuthAddon` (not the gemini_cli hook itself)
-re-resolves the credential source via `config.resolve_oauth_token("gemini")`
+`inject_auth` substitutes the sentinel key with the resolved token and stamps
+`ctx.metadata.auth_provider = "gemini"` so the `gemini_cli` hook
+fires. On a 401 from upstream, `AuthAddon` (not the gemini_cli hook itself)
+re-resolves the credential source via `config.resolve_auth_token("gemini")`
 and replays the request.
 
 ## Capacity fallback (GeminiAddon)
 
 `GeminiAddon` orchestrates Gemini-specific capacity handling for any flow
-flagged with `metadata_from_flow(flow).oauth_provider == "gemini"`. On a
+flagged with `metadata_from_flow(flow).auth_provider == "gemini"`. On a
 429/503 carrying `RESOURCE_EXHAUSTED` or `INTERNAL` status, it sticky-retries
 the original model up to `sticky_retry_attempts` times (honouring
 `RetryInfo.retryDelay` per attempt, capped by
@@ -209,16 +209,17 @@ providers.gemini = {
   };
   host = "cloudcode-pa.googleapis.com";
   path = "/v1internal:{action}";
-  provider = "gemini";
+  type = "gemini";
 };
 
 inspector.transforms = [];
 
 hooks.outbound = [
   "ccproxy.hooks.gemini_cli"            # envelope wrap, header masquerade
+  "ccproxy.hooks.pplx_stamp_headers"    # no-op for Gemini; default outbound hook set
   "ccproxy.hooks.inject_mcp_notifications"
   "ccproxy.hooks.verbose_mode"
-  "ccproxy.hooks.shape"                 # optional CLI-fingerprint shape
+  "ccproxy.hooks.shape"                 # packaged/user Gemini shape replay
 ];
 ```
 
@@ -238,7 +239,7 @@ See `examples/gemini_sdk_via_ccproxy.py` (text) and
 ### 401 Unauthorized
 - Check `~/.gemini/oauth_creds.json` exists and has a valid `access_token`
 - Run `gemini -p ""` directly to force a token refresh
-- `ccproxy logs -f` will show `OAuth token injected for provider 'gemini'`
+- `ccproxy logs -f` will show `Auth token injected for provider 'gemini'`
 
 ### 429 Resource Exhausted
 - cloudcode-pa rate limits are 25–40 second windows
@@ -253,10 +254,10 @@ See `examples/gemini_sdk_via_ccproxy.py` (text) and
 
 ### Streaming response shows `{"response": {...}}` envelope
 - `GeminiAddon.responseheaders` should install `EnvelopeUnwrapStream`. Check
-  that `metadata_from_flow(flow).oauth_provider == "gemini"`,
+  that `metadata_from_flow(flow).auth_provider == "gemini"`,
   `transform.is_streaming == True`, and `transform.mode == "redirect"` are
   all set on the flow record. If `transform` is `None`, the `gemini_cli` hook
-  didn't fire — check `oauth_provider` metadata.
+  didn't fire — check `auth_provider` metadata.
 
 ### Inspecting flows
 
@@ -281,6 +282,6 @@ The `compare` view will show:
 | Buffered response unwrap (`unwrap_buffered`) | `src/ccproxy/hooks/gemini_envelope.py` |
 | Streaming response unwrap (`EnvelopeUnwrapStream`) | `src/ccproxy/hooks/gemini_envelope.py` |
 | Capacity fallback + envelope unwrap orchestrator | `src/ccproxy/inspector/gemini_addon.py` |
-| 401 retry orchestrator | `src/ccproxy/inspector/oauth_addon.py` |
+| 401 retry orchestrator | `src/ccproxy/inspector/auth_addon.py` |
 | Provider routing | `nix/defaults.nix` `providers.gemini` |
 | Tests | `tests/test_gemini_cli.py`, `tests/test_gemini_addon_capacity.py` |

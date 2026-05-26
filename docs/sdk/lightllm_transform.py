@@ -3,14 +3,14 @@
 
 Uses the OpenAI Python SDK pointed at ccproxy. When the sentinel key resolves
 to a provider whose wire format differs from OpenAI (``/v1/chat/completions``),
-ccproxy auto-triggers a transform through LiteLLM's ``BaseConfig`` pipeline:
+ccproxy auto-triggers a transform through its local ``lightllm`` adapters:
 
-- Anthropic provider → ``AnthropicConfig.transform_request / transform_response``
-- Gemini provider → ``_transform_gemini`` code path
-  (bypasses ``BaseConfig``, uses ``_get_gemini_url`` + ``_transform_request_body``)
+- Anthropic provider → Anthropic request adapter plus response intake/render FSM
+- Gemini provider → Google request adapter plus the ``gemini_cli`` v1internal envelope hook
 
-Streaming responses are handled by ``SSETransformer`` — provider-native SSE
-chunks are parsed, transformed, and re-serialized as OpenAI-format SSE.
+Streaming responses are handled by ``SSEPipeline`` — provider-native SSE
+chunks are parsed into ccproxy's response IR and re-serialized as
+OpenAI-format SSE.
 
 Requirements:
 - ccproxy running: ``ccproxy start``

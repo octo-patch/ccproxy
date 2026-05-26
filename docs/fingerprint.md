@@ -7,12 +7,14 @@ has to keep them separate:
 - **Provider-visible traffic**: the TLS connection made by ccproxy to the real provider.
 - **Mitmproxy flow data**: HTTP semantics after TLS has already been terminated.
 
-The TLS fingerprint is treated as an inherent property of every captured
-shape: `ccproxy flows shape <provider>` writes the JA3/JA4 material parsed
-from the originating ClientHello into the same `.mflow` it persists. At
-runtime, any provider whose shape carries an embedded fingerprint
-automatically replays through the impersonating sidecar — no explicit
-`providers.<name>.fingerprint_profile` is required.
+The TLS fingerprint is treated as an inherent property of every user-captured
+shape: `ccproxy shapes save <provider>` writes the JA3/JA4 material parsed
+from the originating ClientHello into the local `.mflow` metadata when the
+source flow has one. At runtime, any provider whose local shape carries an
+embedded fingerprint automatically replays through the impersonating sidecar —
+no explicit `providers.<name>.fingerprint_profile` is required. Public packaged
+default shapes are request-only distribution artifacts and intentionally do not
+carry captured client fingerprint metadata.
 
 The active code path:
 
@@ -24,11 +26,10 @@ The active code path:
    reaches mitmproxy contributes a fingerprint.
 2. [`ShapeCaptureAddon`](../src/ccproxy/inspector/shape_capturer.py) embeds
    that profile into `shapes/{provider}.mflow` metadata as
-   `ccproxy.fingerprint.profile` when `ccproxy flows shape {provider}` is run.
-   Bundled fallbacks carry the same metadata in
-   `ccproxy/templates/shapes/{provider}.mflow`.
-3. [`forward_oauth`](../src/ccproxy/hooks/forward_oauth.py) detects the
-   `sk-ant-oat-ccproxy-anthropic` sentinel and stores `ctx.metadata.oauth_provider`.
+   `ccproxy.fingerprint.profile` when `ccproxy shapes save {provider}` is run
+   against a flow with captured ClientHello metadata.
+3. [`inject_auth`](../src/ccproxy/hooks/inject_auth.py) detects the
+   `sk-ant-oat-ccproxy-anthropic` sentinel and stores `ctx.metadata.auth_provider`.
 4. [`transform`](../src/ccproxy/inspector/routes/transform.py) rewrites the
    reverse-proxy request to `https://api.anthropic.com/v1/messages`.
 5. [`TransportOverrideAddon`](../src/ccproxy/inspector/transport_override_addon.py)
@@ -46,8 +47,8 @@ The active code path:
 
 Set `providers.<name>.fingerprint_profile` only as an override — either to
 force a `curl-cffi` browser name (e.g. `chrome131` for `perplexity_pro`,
-which has no captured shape counterpart) or to reuse another provider's
-captured shape.
+which uses browser impersonation rather than a captured SDK shape) or to reuse
+another provider's captured shape.
 
 ## Capture a Profile From Your CLI
 
@@ -61,14 +62,11 @@ attaches it to the flow as `ccproxy.fingerprint.client`.
 ccproxy run --inspect -- <your-tool> <args>
 
 # 2. Find the captured flow for the provider you want to shape.
-ccproxy flows list --jq '
-  .[] | select(.request.pretty_host == "api.anthropic.com"
-            and (.request.path | startswith("/v1/messages"))) | .id
-'
+ccproxy flows list --json --jq 'map(select(.request.pretty_host == "api.anthropic.com" and (.request.path | startswith("/v1/messages"))))'
 
-# 3. Persist it as the provider's shape (--mflow writes the full flow,
+# 3. Persist it as the provider's shape (--mflow writes a request-only override,
 #    embedding ccproxy.fingerprint.profile in its metadata).
-ccproxy flows shape anthropic --jq 'map(select(.id == "<flow-id>"))' --mflow
+ccproxy shapes save anthropic --jq 'map(select(.id == "<flow-id>"))' --mflow
 
 # 4. Done. The next outbound request that ccproxy routes through this
 #    provider replays the captured JA3 + signature algorithms via the
@@ -77,8 +75,8 @@ ccproxy flows shape anthropic --jq 'map(select(.id == "<flow-id>"))' --mflow
 
 Substitute `anthropic` for any provider declared in `ccproxy.yaml` (e.g.
 `openai`, `deepseek`, a custom provider you added). The provider does not
-need an explicit `fingerprint_profile` — the shape's embedded fingerprint
-drives the runtime impersonation automatically.
+need an explicit `fingerprint_profile` when the local shape has an embedded
+fingerprint — the shape drives runtime impersonation automatically.
 
 Per-CLI fingerprinting means you can:
 
@@ -207,7 +205,7 @@ To persist the captured profile for replay, shape the Anthropic request flow:
 
 ```bash
 ccproxy flows list --json | jq '.[] | select(.request.pretty_host == "api.anthropic.com" and (.request.path | startswith("/v1/messages"))) | .id'
-ccproxy flows shape anthropic --jq 'map(select(.id == "<flow-id>"))'
+ccproxy shapes save anthropic --jq 'map(select(.id == "<flow-id>"))'
 uv run python - <<'PY'
 from pathlib import Path
 from mitmproxy import http
