@@ -1,7 +1,7 @@
 """Tests for ccproxy.transport.sidecar.
 
 Covers: lifecycle (start/stop/port), two-header contract, profile validation,
-target-URL validation, happy-path forwarding, streaming, hop-by-hop stripping,
+target-URL validation, happy-path forwarding, streaming, relay header filtering,
 and transport error handling.
 """
 
@@ -458,11 +458,11 @@ class TestHappyPathForwarding:
 
 
 # ---------------------------------------------------------------------------
-# Hop-by-hop header stripping
+# Relay header filtering
 # ---------------------------------------------------------------------------
 
 
-class TestHopByHopStripping:
+class TestRelayHeaderFiltering:
     async def test_contract_headers_not_forwarded(self, running_sidecar) -> None:
         """TARGET_URL_HEADER and IMPERSONATE_HEADER are not forwarded upstream."""
         sidecar, async_transport = running_sidecar
@@ -546,10 +546,10 @@ class TestHopByHopStripping:
             await resp.aread()
         assert "transfer-encoding" not in received_headers[0]
 
-    async def test_hop_by_hop_response_headers_stripped(self, running_sidecar) -> None:
-        """Hop-by-hop headers in the upstream response are stripped before relaying.
+    async def test_relay_excluded_response_headers_stripped(self, running_sidecar) -> None:
+        """Relay-excluded response headers are stripped before relaying.
 
-        The upstream transport returns raw headers that include hop-by-hop entries;
+        The upstream transport returns raw headers that include excluded entries;
         the sidecar's _filter_response_headers must strip them. We use the raw-tuple
         form so httpx doesn't swallow the headers before the sidecar sees them.
         """
@@ -584,9 +584,9 @@ class TestHopByHopStripping:
             resp_hdrs = {k.lower(): v for k, v in resp.headers.items()}
             await resp.aread()
 
-        # Hop-by-hop headers from upstream are stripped
+        # Relay-excluded headers from upstream are stripped
         assert "proxy-authenticate" not in resp_hdrs
-        # Non-hop-by-hop custom header survives
+        # Non-excluded custom header survives
         assert resp_hdrs.get("x-custom") == "kept"
 
 

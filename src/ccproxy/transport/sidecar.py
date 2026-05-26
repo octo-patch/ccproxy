@@ -38,7 +38,7 @@ logger = logging.getLogger(__name__)
 TARGET_URL_HEADER = "x-ccproxy-target-url"
 IMPERSONATE_HEADER = "x-ccproxy-impersonate"
 
-_HOP_BY_HOP = frozenset(
+_RELAY_EXCLUDED_HEADERS = frozenset(
     {
         "connection",
         "keep-alive",
@@ -52,8 +52,11 @@ _HOP_BY_HOP = frozenset(
         "content-length",
     }
 )
-"""Hop-by-hop headers per RFC 7230 §6.1 plus ``host``/``content-length``,
-which are set by the outbound client based on the rewritten target."""
+"""Headers the sidecar must not relay verbatim.
+
+Includes RFC 7230 hop-by-hop headers plus ``host`` and ``content-length``,
+which the outbound client recomputes from the rewritten target and body.
+"""
 
 
 def _filter_headers(headers: list[tuple[bytes, bytes]], drop: frozenset[str]) -> dict[str, str]:
@@ -70,7 +73,7 @@ def _filter_response_headers(headers: list[tuple[bytes, bytes]]) -> list[tuple[s
     out: list[tuple[str, str]] = []
     for k, v in headers:
         name = k.decode("latin-1").lower()
-        if name in _HOP_BY_HOP:
+        if name in _RELAY_EXCLUDED_HEADERS:
             continue
         out.append((k.decode("latin-1"), v.decode("latin-1")))
     return out
@@ -91,7 +94,7 @@ async def _handle(request: Request) -> Response:
     if host is None:
         return Response(f"invalid target URL: {target_url!r}", status_code=400)
 
-    drop = _HOP_BY_HOP | {TARGET_URL_HEADER, IMPERSONATE_HEADER}
+    drop = _RELAY_EXCLUDED_HEADERS | {TARGET_URL_HEADER, IMPERSONATE_HEADER}
     fwd_headers = _filter_headers(list(request.headers.raw), drop)
     body = await request.body()
 

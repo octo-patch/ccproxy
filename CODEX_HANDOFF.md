@@ -14,8 +14,6 @@ No active blocker from the previous packaged-shape handoff remains.
 
 ## Remaining follow-ups only
 
-- `src/ccproxy/transport/sidecar.py:_HOP_BY_HOP` is still a cosmetic misnomer because it includes
-  `host` and `content-length`, which are not strictly RFC 7230 hop-by-hop headers.
 - Codex/OpenAI Responses is not a packaged default.
   Do not add it back to `nix/defaults.nix`, `scripts/package_mflows.py`, or the packaged-shape E2E
   gate until ccproxy has live supported OpenAI Responses/Codex provider behavior.
