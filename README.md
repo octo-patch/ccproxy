@@ -21,9 +21,8 @@ The hook pipeline is your extension point for building mods and taking control
 of your LLM usage while respecting terms of service:
 - **Cross-provider routing**: redirect or transform requests between Anthropic,
   Gemini, OpenAI, DeepSeek, Perplexity Pro, and Anthropic-compatible forks.
-- **Compliance shaping**: capture real SDK requests via WireGuard observation
-  and stamp those compliance envelopes onto proxied requests, keeping you within
-  provider terms of service.
+- **Compliance shaping**: replay packaged, sanitized SDK compliance envelopes
+  for built-in providers while injecting your actual request content at runtime.
 - **MCP bridging**: add unsupported MCP features to any client:
   [sampling](https://modelcontextprotocol.io/specification/2025-11-25/client/sampling)
   via sentinel key detection,
@@ -340,7 +339,7 @@ even if both tools refresh concurrently.
 | `pplx_stamp_headers` | outbound | Converts the Perplexity Pro sentinel token into the browser-shaped cookie/auth header bundle |
 | `inject_mcp_notifications` | outbound | Injects buffered MCP terminal events as synthetic tool_use/tool_result |
 | `verbose_mode` | outbound | Strips `redact-thinking-*` from `anthropic-beta` header |
-| `shape` | outbound | Replays a captured shape and stamps content fields from the incoming request |
+| `shape` | outbound | Replays a packaged or local shape and stamps content fields from the incoming request |
 | `commitbee_compat` | outbound | Last-mile compatibility shim for commitbee |
 
 ## Shape Replay (Anthropic)
@@ -348,17 +347,10 @@ even if both tools refresh concurrently.
 Anthropic traffic depends on shape replay. ccproxy ships a sanitized packaged
 default for Anthropic, and that shape is the only source of the Claude Code
 identity headers (user-agent, anthropic-beta, etc.) and the billing-header
-block — there is no synthetic-identity fallback hook anymore. If the shape is
-stale for the active Claude CLI release, Anthropic can reject the request with
-401/400.
-
-Capture a local customization when the Claude CLI version changes or when you
-need to inspect/update the compliance envelope:
-
-```bash
-ccproxy run --inspect -- claude -p "shape refresh"
-ccproxy shapes save anthropic
-```
+block — there is no synthetic-identity fallback hook anymore. Normal users do
+not need to capture a shape before using the packaged defaults. If a packaged
+shape goes stale for a future upstream SDK release, update ccproxy to a release
+with refreshed packaged defaults.
 
 ## CLI Reference
 
@@ -377,9 +369,9 @@ ccproxy flows compare [--jq FILTER]...           # Per-flow client-vs-forwarded 
 ccproxy flows clear [--all] [--jq FILTER]...     # Clear flow set (--all bypasses filters)
 
 # Shape artifacts
-ccproxy shapes save PROVIDER [--jq FILTER]...    # Write/update provider shape patch
-ccproxy shapes save PROVIDER --mflow             # Write request-only .mflow override
 ccproxy shapes audit [--directory PATH]          # Audit packaged .mflow artifacts
+ccproxy shapes save PROVIDER [--jq FILTER]...    # Advanced: write/update local shape patch
+ccproxy shapes save PROVIDER --mflow             # Advanced: write request-only .mflow override
 ```
 
 `ccproxy run` (without `--inspect`) sets `ANTHROPIC_BASE_URL`,

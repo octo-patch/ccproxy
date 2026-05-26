@@ -7,6 +7,10 @@ has to keep them separate:
 - **Provider-visible traffic**: the TLS connection made by ccproxy to the real provider.
 - **Mitmproxy flow data**: HTTP semantics after TLS has already been terminated.
 
+Packaged default shapes do not require user-side fingerprint capture. This page
+is for transport debugging, custom provider work, and deliberate local
+impersonation overrides.
+
 The TLS fingerprint is treated as an inherent property of every user-captured
 shape: `ccproxy shapes save <provider>` writes the JA3/JA4 material parsed
 from the originating ClientHello into the local `.mflow` metadata when the
@@ -50,7 +54,7 @@ force a `curl-cffi` browser name (e.g. `chrome131` for `perplexity_pro`,
 which uses browser impersonation rather than a captured SDK shape) or to reuse
 another provider's captured shape.
 
-## Capture a Profile From Your CLI
+## Advanced: Capture a Profile From Your CLI
 
 Any HTTP client that can be driven through `ccproxy run --inspect` becomes a
 source of TLS fingerprints. The WireGuard namespace terminates TLS on the

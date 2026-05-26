@@ -398,7 +398,7 @@ ccproxy:
 | `ccproxy.hooks.pplx_stamp_headers` | outbound | Converts Perplexity Pro's injected bearer placeholder into the cookie-auth browser header bundle expected by the WebUI endpoint. |
 | `ccproxy.hooks.inject_mcp_notifications` | outbound | Injects buffered MCP terminal events as synthetic tool_use/tool_result blocks |
 | `ccproxy.hooks.verbose_mode` | outbound | Strips `redact-thinking-*` flags from the `anthropic-beta` header |
-| `ccproxy.hooks.shape` | outbound | Picks a per-provider captured shape, injects content fields from the incoming request, applies it to the outbound flow. The shape carries the captured Claude client's identity verbatim — no separate identity-injection hook is needed. |
+| `ccproxy.hooks.shape` | outbound | Picks a per-provider packaged or local shape, injects content fields from the incoming request, applies it to the outbound flow. The shape carries the native client identity envelope — no separate identity-injection hook is needed. |
 | `ccproxy.hooks.commitbee_compat` | outbound | Last-mile compatibility shim for the commitbee tool. |
 
 ### Writing custom hooks
@@ -587,7 +587,7 @@ At startup, ccproxy issues `HEAD <url>` via httpx. Any HTTP response (200, 301, 
 
 ## Shaping Configuration
 
-Request shaping stamps captured compliance envelopes onto proxied requests. See [shaping.md](shaping.md) for the full reference.
+Request shaping stamps packaged or local compliance envelopes onto proxied requests. See [shaping.md](shaping.md) for the full reference.
 
 ```yaml
 ccproxy:

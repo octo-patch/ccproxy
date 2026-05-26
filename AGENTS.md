@@ -164,21 +164,22 @@ cascades into capacity fallback.
 | `pplx_preflight` | outbound | Best-effort `GET /search/new?q=...` warm-up before `perplexity_ask`. |
 | `inject_mcp_notifications` | outbound | Inject buffered MCP events as synthetic tool_use/tool_result pairs before final user message. |
 | `verbose_mode` | outbound | Strip `redact-thinking-*` from `anthropic-beta`. |
-| `shape` | outbound | Apply provider-specific captured shape with `content_fields` injection. |
+| `shape` | outbound | Apply provider-specific packaged/local shape with `content_fields` injection. |
 | `commitbee_compat` | outbound | commitbee compatibility shim; `isinstance(_body, dict)` short-circuit. |
 
 - **`shaping/`** — Request shaping framework.
 
   **IMPERATIVE**: Shape replay is load-bearing for Anthropic identity.
-  The previous `inject_claude_code_identity` hook has been removed; the captured shape is now the
+  The previous `inject_claude_code_identity` hook has been removed; shape replay is now the
   only source of the Claude Code identity headers (user-agent, anthropic-beta, x-stainless-*, etc.)
   and the billing-header block.
   If a shape is missing or stale for the `anthropic` provider, requests will fail with 401/400 from
   Anthropic with no fallback.
-  Capture a fresh shape via `ccproxy shapes save anthropic --mflow` whenever the Claude CLI version
-  changes.
+  Normal users should consume the packaged defaults; do not direct users to capture their own shapes
+  as a setup step. Refresh packaged defaults through `scripts/package_mflows.py` when provider SDK
+  behavior changes.
 
-  A *shape* is a captured `mitmproxy.http.HTTPFlow` (real Claude CLI request) persisted as a
+  A *shape* is a known-good `mitmproxy.http.HTTPFlow` persisted as a
   `{provider}.mflow`. At runtime, the working copy is configured via `http.Request.from_state()`,
   configured headers are stripped, `content_fields` from the provider’s profile are injected from
   the incoming request per `merge_strategies`, shape inner-DAG hooks run, then `apply_shape()`

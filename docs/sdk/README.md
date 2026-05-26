@@ -31,7 +31,7 @@ client = anthropic.Anthropic(
 When ccproxy sees this sentinel key, it:
 1. Looks up the token for the specified provider from the `providers` map
 2. Substitutes the sentinel with the real token (and routes the request to the matching `Provider`'s `host`/`path`)
-3. If shaping is enabled, stamps captured compliance headers (beta flags, user-agent, etc.) onto the request
+3. If shaping is enabled, stamps the packaged compliance envelope (beta flags, user-agent, etc.) onto the request
 
 **Requirements:**
 - A `providers` entry configured in `~/.config/ccproxy/ccproxy.yaml` for the sentinel suffix
