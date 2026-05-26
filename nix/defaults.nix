@@ -43,22 +43,6 @@
         type = "perplexity_pro";
         fingerprint_profile = "chrome131";
       };
-      codex = {
-        # Routes Codex CLI traffic to OpenAI's ChatGPT-backed Responses
-        # endpoint. ``auth_mode=chatgpt`` in ~/.codex/auth.json means
-        # Codex hits chatgpt.com/backend-api/codex (not api.openai.com),
-        # bearing the JWT ``access_token`` from that file.
-        # Inbound /v1/responses matches provider type ``openai_responses``
-        # so the transform router auto-derives a same-format redirect —
-        # no cross-format transform fires.
-        auth = {
-          type = "command";
-          command = "jq -r '.tokens.access_token' ~/.codex/auth.json";
-        };
-        host = "chatgpt.com";
-        path = "/backend-api/codex/responses";
-        type = "openai_responses";
-      };
     };
     hooks = {
       inbound = [
@@ -186,22 +170,6 @@
             "transfer-encoding" "connection" "accept-encoding"
           ];
           capture = { path_pattern = "^/v1internal:"; };
-        };
-        openai_responses = {
-          content_fields = [];
-          shape_hooks = [
-            "ccproxy.shaping.regenerate"
-            "ccproxy.shaping.responses"
-          ];
-          preserve_headers = [ "authorization" "host" ];
-          strip_headers = [
-            "authorization" "cookie"
-            "chatgpt-account-id" "x-codex-turn-metadata"
-            "x-codex-window-id" "session-id" "thread-id"
-            "content-length" "host" "transfer-encoding" "connection"
-            "accept-encoding"
-          ];
-          capture = { path_pattern = "^/(v1/|backend-api/codex/)?responses"; };
         };
       };
     };

@@ -29,7 +29,7 @@ class ShapeSave(_FlowsBase):
     """
 
     provider: Annotated[str, tyro.conf.Positional, tyro.conf.arg(metavar="PROVIDER")]
-    """Target provider type (e.g., 'anthropic', 'gemini', 'openai_responses')."""
+    """Target provider type (e.g., 'anthropic', 'gemini')."""
 
     mflow: bool = False
     """Write a sanitized request-only .mflow override instead of a patch."""

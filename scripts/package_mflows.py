@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import os
 import subprocess
@@ -18,7 +19,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from mitmproxy import http
+from mitmproxy import connection, http
 from mitmproxy.io import FlowReader, FlowWriter
 
 from ccproxy.config import clear_config_instance, get_config, get_config_dir
@@ -58,24 +59,6 @@ CAPTURES: dict[str, Capture] = {
         and _request_host(flow) == "cloudcode-pa.googleapis.com"
         and _request_path(flow).startswith("/v1internal:"),
     ),
-    "openai_responses": Capture(
-        command=lambda: [
-            "codex",
-            "--ask-for-approval",
-            "never",
-            "--sandbox",
-            "read-only",
-            "--disable",
-            "enable_request_compression",
-            "exec",
-            "--ephemeral",
-            "--skip-git-repo-check",
-            "Reply with exactly: packaged mflow ok",
-        ],
-        selector=lambda flow: _is_2xx(flow)
-        and _request_host(flow) == "chatgpt.com"
-        and _request_path(flow).endswith("/responses"),
-    ),
 }
 
 SENSITIVE_HEADERS = {
@@ -89,11 +72,6 @@ SENSITIVE_HEADERS = {
     "x-ccproxy-auth-injected",
     "x-ccproxy-target-url",
     "x-ccproxy-impersonate",
-    "chatgpt-account-id",
-    "session-id",
-    "thread-id",
-    "x-codex-turn-metadata",
-    "x-codex-window-id",
 }
 
 
@@ -267,11 +245,10 @@ def _package_flow(provider: str, source: http.HTTPFlow) -> http.HTTPFlow:
     incoming_ctx = Context.from_request(_canonical_request(provider))
     prepare_shape(shape_ctx, incoming_ctx, profile)
 
-    packaged: http.HTTPFlow = source.copy()  # type: ignore[no-untyped-call]
+    client_conn = connection.Client(peername=("127.0.0.1", 0), sockname=("127.0.0.1", 0))
+    server_conn = connection.Server(address=(working.host, working.port))
+    packaged = http.HTTPFlow(client_conn, server_conn)
     packaged.request = working
-    packaged.response = None
-    packaged.websocket = None
-    packaged.error = None
     packaged.comment = ""
     return packaged
 
@@ -295,14 +272,6 @@ def _canonical_request(provider: str) -> http.Request:
             },
         }
         return _json_request("https://cloudcode-pa.googleapis.com/v1internal:generateContent", body)
-    if provider == "openai_responses":
-        body = {
-            "model": "gpt-5.5",
-            "input": [{"role": "user", "content": "Reply with exactly: packaged mflow ok"}],
-            "max_output_tokens": 32,
-            "stream": False,
-        }
-        return _json_request("https://chatgpt.com/backend-api/codex/responses", body)
     raise ValueError(f"unsupported provider: {provider}")
 
 
@@ -344,23 +313,41 @@ def _audit_flow(provider: str, source: http.HTTPFlow, packaged: http.HTTPFlow) -
         if name.lower() in SENSITIVE_HEADERS:
             raise ValueError(f"{provider}: packaged flow kept sensitive header {name!r}")
 
-    packaged_text = _request_search_text(packaged)
+    packaged_text = _serialized_search_text(packaged)
+    packaged_text_lower = packaged_text.lower()
+    for marker in _sensitive_state_markers():
+        if marker in packaged_text_lower:
+            raise ValueError(f"{provider}: packaged flow kept sensitive state marker {marker!r}")
     for value in _sensitive_source_values(provider, source):
         if value and value in packaged_text:
             raise ValueError(f"{provider}: source-sensitive value survived packaging")
 
 
-def _request_search_text(flow: http.HTTPFlow) -> str:
-    if flow.request is None:
-        return ""
-    headers = "\n".join(f"{name}: {value}" for name, value in flow.request.headers.items())
-    body = (flow.request.content or b"").decode("utf-8", errors="replace")
-    return f"{headers}\n{body}"
+def _serialized_search_text(flow: http.HTTPFlow) -> str:
+    data = io.BytesIO()
+    FlowWriter(data).add(flow)  # type: ignore[no-untyped-call]
+    return data.getvalue().decode("utf-8", errors="replace")
+
+
+def _sensitive_state_markers() -> set[str]:
+    return {
+        "ccproxy.record",
+        "client_request",
+        "provider_response",
+        "authorization",
+        "bearer ",
+        "ya29.",
+        "set-cookie",
+        "cookie",
+    }
 
 
 def _sensitive_source_values(provider: str, flow: http.HTTPFlow) -> set[str]:
     body = _body(flow)
     values: set[str] = set()
+    for name, value in _all_headers(flow.get_state()):
+        if name.lower() in SENSITIVE_HEADERS or value.startswith(("Bearer ", "ya29.")):
+            values.add(value.removeprefix("Bearer "))
     if provider == "anthropic":
         metadata = body.get("metadata")
         if isinstance(metadata, dict):
@@ -375,14 +362,21 @@ def _sensitive_source_values(provider: str, flow: http.HTTPFlow) -> set[str]:
         request = body.get("request")
         if isinstance(request, dict) and isinstance(request.get("session_id"), str):
             values.add(request["session_id"])
-    elif provider == "openai_responses":
-        for key in ("metadata", "previous_response_id", "prompt_cache_key", "conversation_id"):
-            value = body.get(key)
-            if isinstance(value, str):
-                values.add(value)
-            elif isinstance(value, dict):
-                _collect_strings(value, values)
     return {value for value in values if len(value) >= 8}
+
+
+def _all_headers(value: Any) -> list[tuple[str, str]]:
+    headers: list[tuple[str, str]] = []
+    if isinstance(value, dict):
+        if all(isinstance(k, str) and isinstance(v, str) for k, v in value.items()):
+            for key, item in value.items():
+                headers.append((key, item))
+        for item in value.values():
+            headers.extend(_all_headers(item))
+    elif isinstance(value, list):
+        for item in value:
+            headers.extend(_all_headers(item))
+    return headers
 
 
 def _body(flow: http.HTTPFlow) -> dict[str, Any]:

@@ -16,7 +16,6 @@ SHAPES_DIR = Path(__file__).resolve().parents[2] / "src" / "ccproxy" / "template
 
 ANTHROPIC_MODEL = os.environ.get("CCPROXY_E2E_ANTHROPIC_MODEL", "claude-haiku-4-5-20251001")
 GEMINI_MODEL = os.environ.get("CCPROXY_E2E_GEMINI_MODEL", "gemini-3.1-pro-preview")
-CODEX_MODEL = os.environ.get("CCPROXY_E2E_CODEX_MODEL", "gpt-5.5")
 
 
 def _proxy_reachable() -> bool:
@@ -54,8 +53,6 @@ def _call_with_retry(fn: Callable[[], Any], *, retries: int = 2, backoff: float 
             if status in {429, 500, 502, 503, 504} and attempt < retries:
                 time.sleep(backoff * (attempt + 1))
                 continue
-            if status in {429, 500, 502, 503, 504}:
-                pytest.skip(f"upstream transient {status} persisted across {retries + 1} attempts")
             raise
     raise AssertionError(f"unreachable after retry loop: {last_exc!r}")
 
@@ -98,30 +95,12 @@ def test_google_genai_sdk_uses_packaged_shape() -> None:
         lambda: client.models.generate_content(
             model=GEMINI_MODEL,
             contents="Reply with exactly: packaged e2e ok",
+            config=types.GenerateContentConfig(
+                max_output_tokens=128,
+                thinking_config=types.ThinkingConfig(include_thoughts=False, thinking_budget=0),
+            ),
         )
     )
 
     assert response.text is not None
     assert "packaged e2e ok" in response.text.lower()
-
-
-@pytest.mark.skipif(not (Path.home() / ".codex" / "auth.json").exists(), reason="Codex auth absent")
-def test_openai_responses_sdk_uses_packaged_shape() -> None:
-    _require_shape("openai_responses")
-    from openai import OpenAI
-
-    client = OpenAI(
-        api_key="sk-ant-oat-ccproxy-codex",
-        base_url=f"{CCPROXY_BASE}/v1",
-    )
-
-    response = _call_with_retry(
-        lambda: client.responses.create(
-            model=CODEX_MODEL,
-            input="Reply with exactly: packaged e2e ok",
-            max_output_tokens=32,
-        )
-    )
-
-    text = getattr(response, "output_text", "") or str(response)
-    assert "packaged e2e ok" in text.lower()

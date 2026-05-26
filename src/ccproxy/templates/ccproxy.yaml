@@ -85,13 +85,6 @@ ccproxy:
       host: api.anthropic.com
       path: /v1/messages
       type: anthropic
-    codex:
-      auth:
-        command: jq -r '.tokens.access_token' ~/.codex/auth.json
-        type: command
-      host: chatgpt.com
-      path: /backend-api/codex/responses
-      type: openai_responses
     deepseek:
       auth:
         command: printenv DEEPSEEK_API_KEY
@@ -180,29 +173,6 @@ ccproxy:
         - ccproxy.shaping.gemini
         strip_headers:
         - authorization
-        - content-length
-        - host
-        - transfer-encoding
-        - connection
-        - accept-encoding
-      openai_responses:
-        capture:
-          path_pattern: ^/(v1/|backend-api/codex/)?responses
-        content_fields: []
-        preserve_headers:
-        - authorization
-        - host
-        shape_hooks:
-        - ccproxy.shaping.regenerate
-        - ccproxy.shaping.responses
-        strip_headers:
-        - authorization
-        - cookie
-        - chatgpt-account-id
-        - x-codex-turn-metadata
-        - x-codex-window-id
-        - session-id
-        - thread-id
         - content-length
         - host
         - transfer-encoding
