@@ -221,7 +221,7 @@ ccproxy shapes save gemini --mflow \
   --jq 'map(select(.request.pretty_host == "cloudcode-pa.googleapis.com" and (.request.path | startswith("/v1internal:")))) | .[-1:]'
 ```
 
-`--mflow` writes a sanitized request-only override such as
+`--mflow` writes a request-only local override such as
 `~/.config/ccproxy/shapes/anthropic.mflow`. It is still local to your machine.
 
 ### Undo the Manual Shape
@@ -260,12 +260,13 @@ how ccproxy uses those files at runtime.
 filtering used by `ccproxy flows`, then invokes `MitmwebClient.save_shape()` →
 `POST /commands/ccproxy.shape` → `ShapeCaptureAddon.save_shape_artifact()`
 (`inspector/shape_capturer.py`). The addon validates the flow (POST method,
-JSON content-type, `capture.path_pattern` regex), sanitizes it, preserves
-serializable flow metadata for local overrides, embeds any captured replay
-fingerprint under `ccproxy.fingerprint.profile`, and then:
+JSON content-type, `capture.path_pattern` regex), prepares a local shape by
+removing response-side state and auth/transport/internal request headers,
+preserves serializable flow metadata for local overrides, embeds any captured
+replay fingerprint under `ccproxy.fingerprint.profile`, and then:
 
 - Default mode: canonicalizes the selected request and provider base into `shape.json`, writes a standard unified diff as `{shapes_dir}/{provider}/0001-local-shape.patch`, and lists it in `{shapes_dir}/{provider}/series`.
-- `--mflow` mode: writes a sanitized response-free `{shapes_dir}/{provider}.mflow` override via `FlowWriter`.
+- `--mflow` mode: writes a response-free `{shapes_dir}/{provider}.mflow` override via `FlowWriter`.
 
 ### Shape Storage
 

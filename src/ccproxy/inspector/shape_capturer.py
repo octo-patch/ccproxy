@@ -81,7 +81,7 @@ class ShapeCaptureAddon:
             fingerprint = _fingerprint_from_flow(flow, provider)
             if fingerprint is None:
                 fingerprint_missing.append(fid)
-            clean = _sanitize_shape_flow(flow)
+            clean = _prepare_local_shape_flow(flow)
             if fingerprint is not None:
                 metadata_from_flow(clean).fingerprint.profile = fingerprint.to_dict()
             if mode == "patch":
@@ -168,8 +168,14 @@ def _validate_flow(
     return True
 
 
-def _sanitize_shape_flow(flow: http.HTTPFlow) -> http.HTTPFlow:
-    """Deep-copy a flow into a request-only shape artifact."""
+def _prepare_local_shape_flow(flow: http.HTTPFlow) -> http.HTTPFlow:
+    """Deep-copy a captured flow for local shape storage.
+
+    This is not the public packaged-default scrub. It removes response-side
+    state plus auth, transport, and ccproxy-internal request headers; package
+    preparation runs the apply-time shaping hooks against a canonical request
+    and then audits for public-distribution PII separately.
+    """
     clone: http.HTTPFlow = flow.copy()  # type: ignore[no-untyped-call]
     clone.response = None
     clone.websocket = None

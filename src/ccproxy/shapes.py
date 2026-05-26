@@ -32,7 +32,7 @@ class ShapeSave(_FlowsBase):
     """Target provider type (e.g., 'anthropic', 'gemini')."""
 
     mflow: bool = False
-    """Write a sanitized request-only .mflow override instead of a patch."""
+    """Write a request-only .mflow override instead of a patch."""
 
 
 class ShapeAudit(BaseModel):
