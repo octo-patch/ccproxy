@@ -32,29 +32,227 @@ Base resolution order is:
 
 After the base is loaded, ccproxy applies the user patch queue from `{shapes_dir}/{provider}/series` if present.
 
-### Advanced Local Override Workflow
+## Manual Shaping When a Packaged Default Is Stale
 
-This workflow is for development and deliberate local overrides only. It is not part of normal ccproxy setup; packaged defaults are the supported distribution path for built-in providers.
+Most users should never need this section. Use the packaged shapes first.
+If a request used to work and now fails after the upstream CLI or SDK changed,
+first upgrade ccproxy and try again. A newer ccproxy release may already ship a
+refreshed packaged shape.
+
+Use this manual guide when all of these are true:
+
+- You are using a built-in shaped provider such as `anthropic` or `gemini`.
+- The packaged shape fails, usually with a provider-side 400, 401, or 403.
+- There is not yet a ccproxy release with an updated packaged shape.
+- The provider's official CLI still works on your machine when run normally.
+
+In plain language: you will run the provider's real CLI once through ccproxy's
+inspector, let ccproxy record the working request shape, and then ask ccproxy
+to save only the useful request envelope. Your prompts and credentials are not
+put into the packaged defaults; this creates a local override in your own
+`$CCPROXY_CONFIG_DIR/shapes/` directory.
+
+Use a boring test prompt, not private work. The local patch or `.mflow` can
+include pieces of the captured request, and it is meant to stay on your machine.
+
+### Before You Start
+
+Make sure the real provider CLI is installed and logged in:
 
 ```bash
-# 1. Start ccproxy and run real traffic through the inspector
-just up
-ccproxy run --inspect -- claude -p "hello, this is a shape capture"
+# Anthropic / Claude Code
+claude -p "reply with ok"
 
-# 2. List captured flows — look for a 200 to api.anthropic.com
-ccproxy flows list
-
-# 3. Verify the flow has all expected compliance headers
-ccproxy flows compare
-
-# 4. Generate/update the provider patch queue
-ccproxy shapes save anthropic
-
-# Optional escape hatch: write a sanitized request-only full override
-ccproxy shapes save anthropic --mflow
+# Gemini CLI
+gemini -p "reply with ok"
 ```
 
-A good local override has a successful (2xx) response, originates from the authentic target SDK, contains the full set of compliance headers, and has a representative system prompt structure.
+Make sure ccproxy is running in another terminal:
+
+```bash
+ccproxy start
+```
+
+For this repository's dev shell, use the supervised dev instance instead:
+
+```bash
+just up
+```
+
+Check that ccproxy is reachable:
+
+```bash
+ccproxy status --proxy --inspect
+```
+
+The manual capture command uses `ccproxy run --inspect`. That mode requires the
+WireGuard namespace prerequisites listed in the README. If `ccproxy run
+--inspect` reports missing system tools or namespace permissions, fix those
+first; `ccproxy shapes save` cannot create a shape until ccproxy has inspected
+one real CLI request.
+
+### Step 1: Clear Old Captured Flows
+
+This makes the next steps less confusing. It does not delete your saved shapes;
+it only clears the temporary inspection history shown by `ccproxy flows`.
+
+```bash
+ccproxy flows clear --all
+```
+
+### Step 2: Run One Small Real CLI Request
+
+Choose the provider you are fixing.
+
+For Anthropic / Claude Code:
+
+```bash
+ccproxy run --inspect -- claude --model haiku -p "Reply with exactly: manual shape ok"
+```
+
+For Gemini:
+
+```bash
+ccproxy run --inspect -- gemini -m gemini-3.1-pro-preview -p "Reply with exactly: manual shape ok"
+```
+
+The important part is that the command succeeds. The exact wording of the
+prompt is not special; it is just short and easy to recognize in the flow list.
+
+### Step 3: Confirm ccproxy Saw the Provider Request
+
+List the captured flows:
+
+```bash
+ccproxy flows list
+```
+
+For Anthropic, look for a successful request to `api.anthropic.com` whose path
+starts with `/v1/messages`.
+
+For Gemini, look for a successful request to `cloudcode-pa.googleapis.com`
+whose path starts with `/v1internal:`.
+
+If you do not see a matching 2xx flow, stop here. The shape would be based on a
+failed or unrelated request. Check `ccproxy logs -f`, then run the CLI request
+again.
+
+### Step 4: Save the Local Shape Patch
+
+Use the provider-specific command below. The `--jq` filter picks the newest
+matching provider request from the flow list, so you do not need to copy a flow
+ID by hand.
+
+For Anthropic:
+
+```bash
+ccproxy shapes save anthropic \
+  --jq 'map(select(.request.pretty_host == "api.anthropic.com" and (.request.path | startswith("/v1/messages")))) | .[-1:]'
+```
+
+For Gemini:
+
+```bash
+ccproxy shapes save gemini \
+  --jq 'map(select(.request.pretty_host == "cloudcode-pa.googleapis.com" and (.request.path | startswith("/v1internal:")))) | .[-1:]'
+```
+
+Expected output looks like this:
+
+```text
+Saved shape patch for anthropic: /home/you/.config/ccproxy/shapes/anthropic/0001-local-shape.patch
+```
+
+or:
+
+```text
+Shape patch for anthropic is unchanged.
+```
+
+Both are acceptable. `unchanged` means your local capture already matches the
+current base shape.
+
+### Step 5: Test the SDK Path Again
+
+Run the SDK, app, or harness that was failing. You do not need to restart
+ccproxy; shape patches are read from disk when the shape hook picks the shape.
+
+If you want a small direct check, use the same style as the packaged-shape E2E
+tests: make one SDK request through ccproxy with the sentinel key and ask for a
+short exact phrase.
+
+For Anthropic SDK clients, the important settings are:
+
+```python
+api_key = "sk-ant-oat-ccproxy-anthropic"
+base_url = "http://127.0.0.1:4000"
+```
+
+For Gemini SDK clients, the important settings are:
+
+```python
+api_key = "sk-ant-oat-ccproxy-gemini"
+base_url = "http://127.0.0.1:4000/gemini"
+```
+
+Then compare the client request with the final request ccproxy forwarded:
+
+```bash
+ccproxy flows compare
+```
+
+You should see your actual prompt content plus the provider's native headers and
+request structure in the forwarded request.
+
+### If Patch Mode Fails
+
+Patch mode is preferred because it keeps your local change small and layered on
+top of the packaged default. If `ccproxy shapes save PROVIDER` says there is no
+base shape, or if the upstream request changed so much that a patch is not
+useful, save a full request-only local override instead:
+
+```bash
+ccproxy shapes save anthropic --mflow \
+  --jq 'map(select(.request.pretty_host == "api.anthropic.com" and (.request.path | startswith("/v1/messages")))) | .[-1:]'
+```
+
+```bash
+ccproxy shapes save gemini --mflow \
+  --jq 'map(select(.request.pretty_host == "cloudcode-pa.googleapis.com" and (.request.path | startswith("/v1internal:")))) | .[-1:]'
+```
+
+`--mflow` writes a sanitized request-only override such as
+`~/.config/ccproxy/shapes/anthropic.mflow`. It is still local to your machine.
+
+### Undo the Manual Shape
+
+If the local shape makes things worse, delete it and ccproxy will fall back to
+the packaged default on the next request:
+
+```bash
+rm -rf ~/.config/ccproxy/shapes/anthropic ~/.config/ccproxy/shapes/anthropic.mflow
+rm -rf ~/.config/ccproxy/shapes/gemini ~/.config/ccproxy/shapes/gemini.mflow
+```
+
+Use only the provider line you actually changed.
+
+### What to Send When Reporting the Stale Shape
+
+If you open an issue or ask for help, include:
+
+- The provider you refreshed: `anthropic` or `gemini`.
+- The CLI version: `claude --version` or `gemini --version`.
+- The ccproxy version.
+- The upstream status code from the failing request.
+- Whether `ccproxy shapes save PROVIDER` wrote a patch or required `--mflow`.
+
+Do not paste auth tokens, cookies, full request bodies, or `.mflow` files into a
+public issue.
+
+## Advanced Reference: Local Override Internals
+
+This reference explains what the commands in the manual guide write to disk and
+how ccproxy uses those files at runtime.
 
 ### Under the Hood
 
@@ -478,7 +676,7 @@ ccproxy flows compare
 # The diff shows the forwarded request carrying shape compliance headers
 # alongside your actual message content
 
-# Advanced development override:
+# Advanced development override; see "Manual Shaping When a Packaged Default Is Stale" above:
 ccproxy run --inspect -- claude -p "shape refresh"
 ccproxy shapes save anthropic
 
@@ -497,5 +695,5 @@ rm -rf ~/.config/ccproxy/shapes/anthropic ~/.config/ccproxy/shapes/anthropic.mfl
 | Shape hook not firing (no "Applied shape" log) | Guard condition not met: flow lacks transform, or entered via WireGuard passthrough | Verify transform/redirect routing exists; check that the flow entered through the reverse proxy or had auth injected |
 | System prompt missing shape's preamble | `merge_strategies` misconfigured | Ensure `system: prepend_shape` is set in the provider's `merge_strategies` config |
 | 400 "too many cache_control breakpoints" | Shape system blocks carry `cache_control` that survives `prepend_shape` merge | Add the `strip` and `insert` caching hooks to `shape_hooks` (see Cache Breakpoint Hooks) |
-| 400/403 from provider after shaping | Stale packaged or local shape | Update ccproxy to a release with refreshed packaged defaults; if you are developing a local override, regenerate it with `ccproxy shapes save X` |
+| 400/403 from provider after shaping | Stale packaged or local shape | Update ccproxy to a release with refreshed packaged defaults. If no fixed release exists yet, follow the manual shaping guide above. |
 | Auth headers leaking from shape | `strip_headers` misconfigured | Ensure `authorization` and `x-api-key` are in the provider's `strip_headers` list |

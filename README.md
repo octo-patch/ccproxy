@@ -342,15 +342,17 @@ even if both tools refresh concurrently.
 | `shape` | outbound | Replays a packaged or local shape and stamps content fields from the incoming request |
 | `commitbee_compat` | outbound | Last-mile compatibility shim for commitbee |
 
-## Shape Replay (Anthropic)
+## Shape Replay
 
-Anthropic traffic depends on shape replay. ccproxy ships a sanitized packaged
-default for Anthropic, and that shape is the only source of the Claude Code
-identity headers (user-agent, anthropic-beta, etc.) and the billing-header
-block — there is no synthetic-identity fallback hook anymore. Normal users do
-not need to capture a shape before using the packaged defaults. If a packaged
-shape goes stale for a future upstream SDK release, update ccproxy to a release
-with refreshed packaged defaults.
+Anthropic and Gemini traffic depend on shape replay. ccproxy ships sanitized
+packaged defaults for both providers. For Anthropic, the shape is the only
+source of the Claude Code identity headers (user-agent, anthropic-beta, etc.)
+and the billing-header block — there is no synthetic-identity fallback hook
+anymore. Normal users do not need to capture a shape before using the packaged
+defaults. If a packaged shape goes stale for a future upstream SDK release,
+update ccproxy to a release with refreshed packaged defaults. If no fixed
+release is available yet, follow the manual rescue path in
+[Request Shaping](docs/shaping.md#manual-shaping-when-a-packaged-default-is-stale).
 
 ## CLI Reference
 

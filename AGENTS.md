@@ -178,6 +178,8 @@ cascades into capacity fallback.
   Normal users should consume the packaged defaults; do not direct users to capture their own shapes
   as a setup step. Refresh packaged defaults through `scripts/package_mflows.py` when provider SDK
   behavior changes.
+  If a packaged default is stale and no fixed ccproxy release exists yet, point users to the manual
+  shaping guide in `docs/shaping.md` as the temporary rescue path.
 
   A *shape* is a known-good `mitmproxy.http.HTTPFlow` persisted as a
   `{provider}.mflow`. At runtime, the working copy is configured via `http.Request.from_state()`,
