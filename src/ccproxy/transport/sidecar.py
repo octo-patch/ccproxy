@@ -7,9 +7,9 @@ fingerprint impersonation. The two-header contract on the incoming request:
 - ``X-CCProxy-Impersonate`` — ``curl-cffi`` impersonate profile name.
 
 The sidecar strips those, forwards everything else through the cached
-``httpx.AsyncClient`` from :mod:`ccproxy.transport.dispatch`, and streams the
-response body back chunk-by-chunk. mitmproxy's existing streaming pipeline
-handles relaying chunks to the client unchanged.
+``httpx.AsyncClient`` from :mod:`ccproxy.transport.dispatch`, decodes any
+upstream Content-Encoding, and streams the response body back chunk-by-chunk.
+mitmproxy's existing streaming pipeline handles relaying chunks to the client.
 
 Lifecycle: :class:`Sidecar` binds 127.0.0.1 on an OS-picked port at
 :meth:`Sidecar.start`. :attr:`Sidecar.port` exposes the bound port for the
@@ -25,6 +25,8 @@ from collections.abc import AsyncIterator
 from urllib.parse import urlsplit
 
 import uvicorn
+from httpx import Headers
+from httpx._decoders import SUPPORTED_DECODERS, ContentDecoder, DecodingError, MultiDecoder
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import Response, StreamingResponse
@@ -58,6 +60,32 @@ Includes RFC 7230 hop-by-hop headers plus ``host`` and ``content-length``,
 which the outbound client recomputes from the rewritten target and body.
 """
 
+_RELAY_RESPONSE_EXCLUDED_HEADERS = _RELAY_EXCLUDED_HEADERS | {"content-encoding"}
+"""Response headers that no longer describe the sidecar-relayed body."""
+
+
+def _content_decodings(headers: Headers) -> list[str]:
+    return [
+        encoding.strip().lower()
+        for value in headers.get_list("content-encoding")
+        for encoding in value.split(",")
+        if encoding.strip()
+    ]
+
+
+def _response_decoder(headers: Headers) -> ContentDecoder | None:
+    decodings = [encoding for encoding in _content_decodings(headers) if encoding != "identity"]
+    if not decodings:
+        return None
+
+    try:
+        decoders = [SUPPORTED_DECODERS[encoding]() for encoding in decodings]
+    except (KeyError, ImportError) as exc:
+        logger.warning("sidecar: unsupported Content-Encoding %s: %s", ", ".join(decodings), exc)
+        return None
+
+    return MultiDecoder(decoders)
+
 
 def _filter_headers(headers: list[tuple[bytes, bytes]], drop: frozenset[str]) -> dict[str, str]:
     out: dict[str, str] = {}
@@ -69,11 +97,15 @@ def _filter_headers(headers: list[tuple[bytes, bytes]], drop: frozenset[str]) ->
     return out
 
 
-def _filter_response_headers(headers: list[tuple[bytes, bytes]]) -> list[tuple[str, str]]:
+def _filter_response_headers(
+    headers: list[tuple[bytes, bytes]],
+    *,
+    drop: frozenset[str] = _RELAY_EXCLUDED_HEADERS,
+) -> list[tuple[str, str]]:
     out: list[tuple[str, str]] = []
     for k, v in headers:
         name = k.decode("latin-1").lower()
-        if name in _RELAY_EXCLUDED_HEADERS:
+        if name in drop:
             continue
         out.append((k.decode("latin-1"), v.decode("latin-1")))
     return out
@@ -118,17 +150,38 @@ async def _handle(request: Request) -> Response:
         logger.warning("sidecar: transport error for %s: %s", target_url, e)
         return Response(f"transport error: {e}", status_code=502)
 
+    decoder = _response_decoder(upstream.headers)
+    response_header_drop = _RELAY_RESPONSE_EXCLUDED_HEADERS if decoder is not None else _RELAY_EXCLUDED_HEADERS
+
     async def body_stream() -> AsyncIterator[bytes]:
         try:
             async for chunk in upstream.aiter_raw():
-                yield chunk
+                if decoder is None:
+                    yield chunk
+                    continue
+                try:
+                    decoded = decoder.decode(chunk)
+                except DecodingError as exc:
+                    logger.warning("sidecar: failed to decode Content-Encoding for %s: %s", target_url, exc)
+                    raise
+                if decoded:
+                    yield decoded
+            if decoder is not None:
+                flushed = decoder.flush()
+                if flushed:
+                    yield flushed
         finally:
             await upstream.aclose()
 
     return StreamingResponse(
         body_stream(),
         status_code=upstream.status_code,
-        headers=dict(_filter_response_headers(list(upstream.headers.raw))),
+        headers=dict(
+            _filter_response_headers(
+                list(upstream.headers.raw),
+                drop=response_header_drop,
+            )
+        ),
     )
 
 

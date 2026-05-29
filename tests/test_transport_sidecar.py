@@ -7,6 +7,7 @@ and transport error handling.
 
 from __future__ import annotations
 
+import gzip
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 from unittest.mock import AsyncMock, patch
@@ -698,6 +699,41 @@ class TestStreamingResponse:
 
         assert chunk_a in bytes(received)
         assert chunk_b in bytes(received)
+
+    async def test_streaming_decodes_content_encoding_for_clients(self, running_sidecar) -> None:
+        sidecar, async_transport = running_sidecar
+        body = b"data: decoded chunk\n\n"
+        encoded = gzip.compress(body)
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                headers={
+                    "content-type": "text/event-stream",
+                    "content-encoding": "gzip",
+                },
+                stream=_AsyncChunkedStream([encoded]),
+            )
+
+        async_transport.handler = handler
+        received = bytearray()
+        async with (
+            httpx.AsyncClient() as client,
+            client.stream(
+                "POST",
+                f"http://127.0.0.1:{sidecar.port}/v1/messages",
+                headers={
+                    TARGET_URL_HEADER: "https://api.anthropic.com/v1/messages",
+                    IMPERSONATE_HEADER: "chrome131",
+                },
+                content=b"{}",
+            ) as resp,
+        ):
+            assert "content-encoding" not in resp.headers
+            async for chunk in resp.aiter_raw():
+                received.extend(chunk)
+
+        assert bytes(received) == body
 
     async def test_streaming_status_code_propagates(self, running_sidecar) -> None:
         sidecar, async_transport = running_sidecar

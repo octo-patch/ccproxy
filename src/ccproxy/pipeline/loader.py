@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import importlib
 import logging
+from dataclasses import replace
 from typing import Any
 
 from pydantic import ValidationError
@@ -27,8 +28,8 @@ def load_hooks(entries: list[str | dict[str, Any]]) -> list[HookSpec]:
 
     Side effects:
     - Imports each module, triggering @hook registration.
-    - Mutates the singleton HookSpec objects in the global registry
-      by assigning their ``params`` and ``priority`` fields per entry.
+    - Returns per-load HookSpec copies with ``params`` and ``priority`` resolved
+      from the given config entries.
     """
     hook_priority_map: dict[str, int] = {}
     hook_params_map: dict[str, dict[str, Any]] = {}
@@ -65,19 +66,24 @@ def load_hooks(entries: list[str | dict[str, Any]]) -> list[HookSpec]:
         if name not in hook_priority_map:
             continue
         params = hook_params_map.get(name, {})
-        spec.params = {}
+        resolved_params: dict[str, Any] = {}
         if params and spec.model is not None:
             try:
                 validated = spec.model(**params)
             except ValidationError as exc:
                 raise ValueError(f"Hook {spec.name!r} params failed validation: {exc}") from exc
-            spec.params = validated.model_dump()
+            resolved_params = validated.model_dump()
         elif params and spec.model is None:
             logger.warning(
                 "Hook %r received YAML params but declares no model=; ignoring",
                 name,
             )
-        spec.priority = hook_priority_map.get(name, max_priority)
-        hook_specs.append(spec)
+        hook_specs.append(
+            replace(
+                spec,
+                params=resolved_params,
+                priority=hook_priority_map.get(name, max_priority),
+            )
+        )
 
     return hook_specs
