@@ -12,7 +12,7 @@ path (which is currently broken on frontier models). We want the
 *server-side* MCP path.
 
 Usage:
-    uv run python examples/pplx_mcp_probe.py
+    uv run python docs/examples/pplx_mcp_probe.py
     ccproxy flows list                  # find the flow id
     ccproxy flows dump > /tmp/probe.har # raw SSE captured
 
@@ -29,8 +29,7 @@ from rich.panel import Panel
 console = Console()
 err_console = Console(stderr=True)
 
-PORT = os.environ.get("CCPROXY_PORT", "4001")
-BASE_URL = f"http://127.0.0.1:{PORT}/v1"
+BASE_URL = f"{os.environ.get('CCPROXY_BASE_URL', 'http://127.0.0.1:4000')}/v1"
 SENTINEL_KEY = "sk-ant-oat-ccproxy-perplexity_pro"
 MODEL = os.environ.get("CCPROXY_PPLX_MODEL", "anthropic/claude-sonnet-4.6")
 

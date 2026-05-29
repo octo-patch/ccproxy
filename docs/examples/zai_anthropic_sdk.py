@@ -17,6 +17,8 @@ Prompt Caching:
 - Note: Z.AI caching behavior differs from native Anthropic API
 """
 
+import os
+
 import anthropic
 from rich.console import Console
 from rich.panel import Panel
@@ -125,6 +127,7 @@ maintainability, and correctness over cleverness or premature optimization.
 
 # Beta header required for prompt caching
 PROMPT_CACHING_BETA = "prompt-caching-2024-07-31"
+BASE_URL = os.environ.get("CCPROXY_BASE_URL", "http://127.0.0.1:4000")
 
 
 def create_client(with_caching: bool = False) -> anthropic.Anthropic:
@@ -139,7 +142,7 @@ def create_client(with_caching: bool = False) -> anthropic.Anthropic:
 
     return anthropic.Anthropic(
         api_key="sk-ant-oat-ccproxy-zai",  # Sentinel key resolves to providers.zai
-        base_url="http://127.0.0.1:4000",
+        base_url=BASE_URL,
         default_headers=default_headers if default_headers else None,
     )
 

@@ -231,8 +231,8 @@ auth or force a specific destination for a non-sentinel flow.
 
 ## Working examples
 
-See `examples/gemini_sdk_via_ccproxy.py` (text) and
-`examples/gemini_sdk_image_via_ccproxy.py` (multi-MB image payload).
+See `docs/examples/gemini_sdk.py` (text) and
+`docs/examples/gemini_sdk_image_via_ccproxy.py` (multi-MB image payload).
 
 ## Troubleshooting
 

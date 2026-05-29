@@ -1,10 +1,10 @@
-# SDK Examples
+# Examples
 
-This directory contains examples demonstrating how to use various Python SDKs with ccproxy for LLM request routing and monitoring.
+This directory contains runnable examples for routing SDK clients through ccproxy.
 
 ## Overview
 
-These examples show how to route SDK requests through ccproxy to leverage intelligent model routing, request classification, and observability features. All examples assume ccproxy is running locally on the default port (4000).
+These examples show how to route SDK requests through ccproxy to leverage provider routing, auth substitution, and observability. They default to the production listener at `http://127.0.0.1:4000`; set `CCPROXY_BASE_URL=http://127.0.0.1:4001` for the dev instance.
 
 To install all SDK dependencies needed by these examples:
 
@@ -65,7 +65,7 @@ ccproxy start
 **Usage:**
 ```bash
 # Run both simple and streaming examples
-uv run python docs/sdk/anthropic_sdk.py
+uv run python docs/examples/anthropic_sdk.py
 ```
 
 **Features:**
@@ -98,7 +98,7 @@ ccproxy start
 **Usage:**
 ```bash
 # Run both simple and streaming examples
-uv run python docs/sdk/litellm_sdk.py
+uv run python docs/examples/litellm_sdk.py
 ```
 
 **Features:**
@@ -130,7 +130,7 @@ ccproxy start
 
 **Usage:**
 ```bash
-uv run python docs/sdk/zai_anthropic_sdk.py
+uv run python docs/examples/zai_anthropic_sdk.py
 ```
 
 **Features:**
@@ -163,7 +163,7 @@ ccproxy start
 
 **Usage:**
 ```bash
-uv run python docs/sdk/gemini_sdk.py
+uv run python docs/examples/gemini_sdk.py
 ```
 
 **Features:**
@@ -171,6 +171,21 @@ uv run python docs/sdk/gemini_sdk.py
 - Base URL: `http://127.0.0.1:4000/gemini`
 - Demonstrates both `generate_content()` and `generate_content_stream()` patterns
 - Same-format redirect — no body transformation needed
+
+---
+
+### gemini_sdk_image_via_ccproxy.py
+
+google-genai SDK through ccproxy with an inline image payload.
+
+**Purpose:**
+- Demonstrate multi-MB inline image payloads through the Gemini SDK path
+- Verify ccproxy preserves `inlineData` payloads while wrapping the request for `cloudcode-pa`
+
+**Usage:**
+```bash
+uv run python docs/examples/gemini_sdk_image_via_ccproxy.py ~/pictures/screenshot.png
+```
 
 ---
 
@@ -194,7 +209,7 @@ ccproxy start
 
 **Usage:**
 ```bash
-uv run python docs/sdk/deepseek_sdk.py
+uv run python docs/examples/deepseek_sdk.py
 ```
 
 **Features:**
@@ -227,7 +242,7 @@ ccproxy start
 
 **Usage:**
 ```bash
-uv run python docs/sdk/lightllm_transform.py
+uv run python docs/examples/lightllm_transform.py
 ```
 
 **Features:**
@@ -238,6 +253,21 @@ uv run python docs/sdk/lightllm_transform.py
 - ``SSEPipeline`` handles cross-provider streaming: parses provider-native SSE
   chunks into ccproxy's response IR and re-serializes them as OpenAI SSE
 - Demonstrates both non-streaming and streaming for each provider direction
+
+---
+
+### pplx_mcp_probe.py
+
+OpenAI SDK probe for Perplexity Pro server-side MCP connector traffic.
+
+**Purpose:**
+- Exercise the Perplexity Pro provider via the OpenAI SDK
+- Capture a real flow for inspecting Perplexity's server-side MCP SSE blocks
+
+**Usage:**
+```bash
+uv run python docs/examples/pplx_mcp_probe.py
+```
 
 ## Common Setup
 
