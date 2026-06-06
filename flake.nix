@@ -165,13 +165,52 @@
         releaseTestDeps = with pkgs; [
           qemu_kvm
           cloud-utils
+          python3
+          socat
+          xorriso
         ];
+        wslArtifactValidator = pkgs.writeShellApplication {
+          name = "ccproxy-validate-wsl-artifact";
+          runtimeInputs = with pkgs; [
+            bash
+            git
+            uv
+          ];
+          text = ''
+            export LD_LIBRARY_PATH="${pkgs.lib.makeLibraryPath [
+              pkgs.file
+              pkgs.stdenv.cc.cc.lib
+            ]}''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+            exec bash ${./scripts/validate_wsl_artifact.sh} "$@"
+          '';
+        };
+        wslKvmSmoke = pkgs.writeShellApplication {
+          name = "ccproxy-wsl-kvm-smoke";
+          runtimeInputs = with pkgs; [
+            coreutils
+            curl
+            gnugrep
+            gnused
+            jq
+            python3
+            qemu_kvm
+            socat
+            xorriso
+          ];
+          text = ''
+            export OVMF_CODE="${pkgs.OVMF.fd}/FV/OVMF_CODE.fd"
+            export OVMF_VARS_TEMPLATE="${pkgs.OVMF.fd}/FV/OVMF_VARS.fd"
+            exec bash ${./scripts/wsl_kvm_smoke.sh} "$@"
+          '';
+        };
       in {
         packages = {
           default = pkgs.writeShellScriptBin "ccproxy" ''
             export PATH="${venv}/bin:${inspectDeps}:$PATH"
             exec ${venv}/bin/ccproxy "$@"
           '';
+          inherit wslArtifactValidator;
+          inherit wslKvmSmoke;
         };
 
         devShells = {
@@ -225,6 +264,7 @@
         system = "x86_64-linux";
         specialArgs = {
           ccproxyPackage = self.packages.x86_64-linux.default;
+          nixosWslIcon = "${nixos-wsl}/assets/NixOS-WSL.ico";
         };
         modules = [
           nixos-wsl.nixosModules.default

@@ -3,15 +3,18 @@
   lib,
   pkgs,
   ccproxyPackage,
+  nixosWslIcon,
   ...
 }:
 
 let
   distroName = "ccproxy";
+  shortcutIconPath = "/usr/share/wsl/ccproxy.ico";
   nixosWslChannel = "https://github.com/nix-community/NixOS-WSL/archive/refs/heads/main.tar.gz";
   wslDistributionConf = pkgs.writeText "wsl-distribution.conf" (
     lib.generators.toINI { } {
       oobe.defaultName = distroName;
+      shortcut.icon = shortcutIconPath;
     }
   );
   defaultConfig = pkgs.writeText "configuration.nix" ''
@@ -129,6 +132,19 @@ in
 
         echo "[ccproxy-wsl] Installing WSL distribution metadata"
         install -Dm644 ${wslDistributionConf} "$root/etc/wsl-distribution.conf"
+        install -Dm644 ${nixosWslIcon} "$root${shortcutIconPath}"
+
+        if [ -L "$root/etc/wsl.conf" ]; then
+          wsl_conf_link="$(readlink "$root/etc/wsl.conf")"
+          case "$wsl_conf_link" in
+            /*) wsl_conf_target="$root$wsl_conf_link" ;;
+            *) wsl_conf_target="$root/etc/$wsl_conf_link" ;;
+          esac
+          rm -f "$root/etc/wsl.conf"
+          install -Dm644 "$wsl_conf_target" "$root/etc/wsl.conf"
+        else
+          chmod 0644 "$root/etc/wsl.conf"
+        fi
 
         echo "[ccproxy-wsl] Installing default NixOS configuration"
         install -Dm644 ${defaultConfig} "$root/etc/nixos/configuration.nix"

@@ -85,8 +85,12 @@ build-wsl ARTIFACT="ccproxy.wsl":
 
 # Validate a .wsl artifact with Microsoft's modern distro validator.
 validate-wsl-artifact ARTIFACT="ccproxy.wsl":
-    bash scripts/validate_wsl_artifact.sh {{ARTIFACT}}
+    nix run .#wslArtifactValidator -- {{ARTIFACT}}
 
 # Run the Windows-local WSL2 import/probe/unregister harness.
 test-wsl ARTIFACT="ccproxy.wsl":
     pwsh -File scripts/test_wsl.ps1 -Artifact {{ARTIFACT}}
+
+# Build/run a disposable Windows 11 KVM VM and execute the WSL2 harness inside it.
+test-wsl-kvm ARTIFACT="tmp/ccproxy-wsl-smoke/ccproxy.wsl":
+    nix run .#wslKvmSmoke -- {{ARTIFACT}}
