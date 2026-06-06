@@ -526,6 +526,9 @@ class TestNamespaceCommands:
         }
         assert payload["topology"]["gateway_ip"] == "10.0.2.2"
         assert payload["tools"]["slirp4netns"]["present"] is True
+        assert payload["tools"]["sysctl"]["present"] is True
+        assert "is_wsl" in payload["kernel"]
+        assert payload["devices"]["dev_net_tun"]["path"] == "/dev/net/tun"
 
     def test_namespace_status_payload_reports_missing_wireguard_config(self, tmp_path: Path) -> None:
         with patch("ccproxy.cli.shutil.which", return_value=None):
@@ -534,6 +537,7 @@ class TestNamespaceCommands:
         assert payload["mode"] == "permissive"
         assert payload["wireguard_config"]["present"] is False
         assert payload["tools"]["wg"] == {"present": False, "path": None}
+        assert payload["tools"]["sysctl"] == {"present": False, "path": None}
 
     def test_namespace_wireguard_config_prints_generated_file(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]

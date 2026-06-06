@@ -32,6 +32,7 @@ e2e-namespace-observe:
     command -v ip >/dev/null
     command -v wg >/dev/null
     command -v iptables >/dev/null
+    command -v sysctl >/dev/null
     tmp=$(mktemp -d); \
     trap 'CCPROXY_CONFIG_DIR="'"$tmp"'" process-compose down >/dev/null 2>&1 || true; rm -rf "'"$tmp"'"' EXIT; \
     cp src/ccproxy/templates/ccproxy.yaml "$tmp/ccproxy.yaml"; \
@@ -77,3 +78,15 @@ release-test-qemu-all:
     scripts/qemu_release_test.sh debian-12
     scripts/qemu_release_test.sh ubuntu-24.04
     scripts/qemu_release_test.sh fedora-44
+
+# Build the x86_64 NixOS-WSL release artifact.
+build-wsl ARTIFACT="ccproxy.wsl":
+    sudo nix run .#nixosConfigurations.ccproxy-wsl.config.system.build.tarballBuilder -- {{ARTIFACT}}
+
+# Validate a .wsl artifact with Microsoft's modern distro validator.
+validate-wsl-artifact ARTIFACT="ccproxy.wsl":
+    bash scripts/validate_wsl_artifact.sh {{ARTIFACT}}
+
+# Run the Windows-local WSL2 import/probe/unregister harness.
+test-wsl ARTIFACT="ccproxy.wsl":
+    pwsh -File scripts/test_wsl.ps1 -Artifact {{ARTIFACT}}

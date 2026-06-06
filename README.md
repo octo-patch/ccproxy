@@ -50,22 +50,52 @@ the namespace jail (`ccproxy run --inspect`) requires Linux kernel features
 (unprivileged user/net namespaces, `slirp4netns`, `iptables` NAT) that have no
 macOS equivalent.
 
-### Linux / WSL2
+### Windows via WSL2
+
+The recommended Windows install is the `ccproxy.wsl` distro artifact. It is
+built on NixOS-WSL and includes ccproxy plus the Linux namespace tools required
+by `ccproxy run --inspect`.
+
+```powershell
+# Requires Store WSL 2.4.4 or newer.
+wsl --update
+wsl --version
+wsl --install --from-file ccproxy.wsl
+wsl -d ccproxy
+```
+
+Inside the distro:
+
+```bash
+ccproxy init
+ccproxy start
+ccproxy namespace status --json
+ccproxy namespace doctor --json
+```
+
+Tier 1 Windows support is Windows 11 22H2+ with Store-distributed WSL2,
+systemd enabled, and mirrored networking recommended. Windows 10 and older WSL
+networking are best-effort. WSL1 and native Windows without WSL are unsupported.
+
+Advanced users can still use Ubuntu on WSL2 with systemd and Nix, but the
+release artifact is the primary out-of-box path.
+
+### Linux
 
 The WireGuard namespace jail needs a small set of system tools on `PATH`:
 `slirp4netns`, `wireguard-tools` (`wg`), `iproute2` (`ip`), `iptables`,
-`util-linux` (`unshare`, `nsenter`).
+`util-linux` (`unshare`, `nsenter`), and `procps` (`sysctl`).
 
 ```bash
-# Debian / Ubuntu / WSL2-Ubuntu
+# Debian / Ubuntu
 sudo apt update
-sudo apt install -y slirp4netns wireguard-tools iproute2 iptables
+sudo apt install -y slirp4netns wireguard-tools iproute2 iptables procps
 
 # Fedora
-sudo dnf install -y slirp4netns wireguard-tools iproute iptables-nft
+sudo dnf install -y slirp4netns wireguard-tools iproute iptables-nft procps-ng
 
 # Arch
-sudo pacman -S slirp4netns wireguard-tools iproute2 iptables
+sudo pacman -S slirp4netns wireguard-tools iproute2 iptables procps-ng
 
 # NixOS — provided via the project devShell (`nix develop`)
 ```

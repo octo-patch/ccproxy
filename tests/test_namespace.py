@@ -130,9 +130,9 @@ class TestCheckNamespaceCapabilities:
             mock_path_cls.return_value.exists.return_value = False
             problems = check_namespace_capabilities()
 
-        # 5 tools: slirp4netns, unshare, nsenter, ip, wg
-        assert len(problems) == 5
-        tool_names = {"slirp4netns", "unshare", "nsenter", "ip", "wg"}
+        # 7 tools: slirp4netns, unshare, nsenter, ip, wg, iptables, sysctl
+        assert len(problems) == 7
+        tool_names = {"slirp4netns", "unshare", "nsenter", "ip", "wg", "iptables", "sysctl"}
         for problem in problems:
             assert any(tool in problem for tool in tool_names)
 
@@ -147,8 +147,8 @@ class TestCheckNamespaceCapabilities:
 
             problems = check_namespace_capabilities()
 
-        # 1 userns + 5 tools = 6 problems
-        assert len(problems) == 6
+        # 1 userns + 7 tools = 8 problems
+        assert len(problems) == 8
 
     @patch("shutil.which", return_value="/usr/bin/tool")
     def test_userns_file_unreadable(self, mock_which: Mock) -> None:

@@ -99,6 +99,8 @@ def check_namespace_capabilities() -> list[str]:
         "nsenter": ("util-linux", "nixpkgs#util-linux"),
         "ip": ("iproute2", "nixpkgs#iproute2"),
         "wg": ("wireguard-tools", "nixpkgs#wireguard-tools"),
+        "iptables": ("iptables", "nixpkgs#iptables"),
+        "sysctl": ("procps", "nixpkgs#procps"),
     }
     for tool, (pkg, nix_pkg) in required_tools.items():
         if not shutil.which(tool):

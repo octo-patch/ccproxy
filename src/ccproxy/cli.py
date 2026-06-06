@@ -885,13 +885,46 @@ def show_status(
                     )
 
 
+def _read_proc_text(path: Path) -> str | None:
+    try:
+        return path.read_text(errors="replace").strip()
+    except OSError:
+        return None
+
+
+def _is_wsl_kernel(release: str | None, version: str | None) -> bool:
+    text = f"{release or ''}\n{version or ''}".lower()
+    return "microsoft" in text or "wsl" in text
+
+
 def _namespace_status_payload(config_dir: Path) -> dict[str, Any]:
     wg_conf_file = config_dir / ".inspector-wireguard-client.conf"
-    tools = {tool: shutil.which(tool) for tool in ("slirp4netns", "unshare", "nsenter", "ip", "wg", "iptables")}
+    release = _read_proc_text(Path("/proc/sys/kernel/osrelease"))
+    version = _read_proc_text(Path("/proc/version"))
+    userns = _read_proc_text(Path("/proc/sys/kernel/unprivileged_userns_clone"))
+    dev_net_tun = Path("/dev/net/tun")
+    tools = {
+        tool: shutil.which(tool)
+        for tool in ("slirp4netns", "unshare", "nsenter", "ip", "wg", "iptables", "sysctl")
+    }
     return {
         "mode": "permissive",
         "runner": "builtin-unshare-slirp4netns-wireguard",
         "privacy_claim": False,
+        "kernel": {
+            "is_wsl": _is_wsl_kernel(release, version),
+            "release": release,
+            "version": version,
+        },
+        "sysctls": {
+            "kernel.unprivileged_userns_clone": userns,
+        },
+        "devices": {
+            "dev_net_tun": {
+                "path": str(dev_net_tun),
+                "present": dev_net_tun.exists(),
+            },
+        },
         "wireguard_config": {
             "path": str(wg_conf_file),
             "present": wg_conf_file.exists(),
@@ -919,6 +952,24 @@ def run_namespace_status(config_dir: Path, *, json_output: bool = False) -> None
     table.add_row("mode", "permissive development capture")
     table.add_row("runner", payload["runner"])
     table.add_row("privacy claim", "false")
+    kernel = payload["kernel"]
+    table.add_row(
+        "kernel",
+        "\n".join(
+            [
+                f"is_wsl: {kernel['is_wsl']}",
+                f"release: {kernel['release']}",
+                f"version: {kernel['version']}",
+            ]
+        ),
+    )
+    sysctls = payload["sysctls"]
+    table.add_row("sysctls", "\n".join(f"{key}: {value}" for key, value in sysctls.items()))
+    devices = payload["devices"]
+    table.add_row(
+        "devices",
+        "\n".join(f"{item['path']}: {'present' if item['present'] else 'missing'}" for item in devices.values()),
+    )
     wg = payload["wireguard_config"]
     table.add_row("wireguard config", f"{wg['path']}\npresent: {wg['present']}")
     topology = payload["topology"]

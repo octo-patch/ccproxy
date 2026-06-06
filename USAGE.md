@@ -107,7 +107,9 @@ rules for.
 
 **Requirements**: `ccproxy start` must be running.
 The following tools must be in PATH: `slirp4netns`, `unshare`, `nsenter`, `ip`,
-`wg`. NixOS with kernel 6.18+ satisfies these by default.
+`wg`, `iptables`, and `sysctl`. NixOS with kernel 6.18+ satisfies these by
+default. On Windows, this path is supported only inside WSL2; use the
+`ccproxy.wsl` artifact for the supported out-of-box environment.
 
 ### Key differences
 
@@ -653,6 +655,8 @@ clients.
 | `nsenter` | In PATH |
 | `ip` | In PATH |
 | `wg` | In PATH |
+| `iptables` | In PATH |
+| `sysctl` | In PATH |
 
 * * *
 
@@ -803,6 +807,8 @@ ccproxy start                                  Start inspector server (foregroun
 ccproxy init [--force]                         Initialize config files
 ccproxy run [--inspect] -- <command> [args...]  Run command with proxy environment
 ccproxy status [--json] [--proxy] [--inspect]  Show status / health check
+ccproxy namespace status [--json]              Show namespace runtime inputs
+ccproxy namespace doctor [--json]              Probe namespace DNS/egress/localhost
 ccproxy logs [-f] [-n N]                       View logs
 ccproxy flows list [--json] [--jq FILTER]...   List flows
 ccproxy flows dump [--jq FILTER]...            Export multi-page HAR

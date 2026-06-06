@@ -19,6 +19,11 @@
       inputs.uv2nix.follows = "uv2nix";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+
+    nixos-wsl = {
+      url = "github:nix-community/NixOS-WSL/main";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
   outputs =
@@ -28,6 +33,7 @@
       uv2nix,
       pyproject-nix,
       pyproject-build-systems,
+      nixos-wsl,
       ...
     }:
     let
@@ -147,6 +153,8 @@
           wireguard-tools
           iproute2
           iptables
+          util-linux
+          procps
         ];
         inspectorPacketDeps = with pkgs; [
           tcpdump
@@ -213,5 +221,15 @@
 
       inherit defaultSettings;
       homeModules.ccproxy = import ./nix/module.nix;
+      nixosConfigurations.ccproxy-wsl = nixpkgs.lib.nixosSystem {
+        system = "x86_64-linux";
+        specialArgs = {
+          ccproxyPackage = self.packages.x86_64-linux.default;
+        };
+        modules = [
+          nixos-wsl.nixosModules.default
+          ./nix/wsl.nix
+        ];
+      };
     };
 }
