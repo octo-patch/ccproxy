@@ -33,6 +33,7 @@ from curl_cffi.const import CurlOpt
 from curl_cffi.requests.impersonate import BrowserTypeLiteral
 from httpx_curl_cffi import AsyncCurlTransport
 
+from ccproxy.config import get_config
 from ccproxy.inspector.fingerprint import CapturedFingerprint
 
 MAX_SESSIONS = 16
@@ -114,7 +115,7 @@ class _Cache:
                 )
             else:
                 transport = AsyncCurlTransport(**fingerprint.transport_kwargs())
-            client = httpx.AsyncClient(transport=transport)
+            client = httpx.AsyncClient(transport=transport, timeout=_transport_timeout())
             self._entries[key] = _Entry(client=client, last_used=now)
             await self._evict_lru()
             return client
@@ -143,6 +144,16 @@ class _Cache:
 
 
 _cache: _Cache | None = None
+
+
+def _transport_timeout() -> float:
+    """Return the client-level timeout value for the curl-backed transport."""
+    timeout = get_config().provider_timeout
+    if timeout is not None:
+        return timeout
+    # httpx-curl-cffi converts HTTPX timeouts to curl timeout options; 0
+    # maps to libcurl's disabled timeout behavior.
+    return 0.0
 
 
 def _get_cache() -> _Cache:

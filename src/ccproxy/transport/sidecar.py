@@ -1,10 +1,12 @@
 """In-process HTTP sidecar that forwards requests via curl-cffi impersonation.
 
-mitmproxy reverse-proxies through this sidecar when a flow needs TLS+HTTP/2
-fingerprint impersonation. The two-header contract on the incoming request:
+mitmproxy reverse-proxies through this sidecar so provider egress has an
+explicit TLS+HTTP/2 fingerprint policy. The request contract is:
 
 - ``X-CCProxy-Target-Url`` — real upstream URL (scheme + host + path).
 - ``X-CCProxy-Impersonate`` — ``curl-cffi`` impersonate profile name.
+- ``X-CCProxy-Fingerprint`` — optional base64url JSON captured ClientHello
+  profile for this flow.
 
 The sidecar strips those, forwards everything else through the cached
 ``httpx.AsyncClient`` from :mod:`ccproxy.transport.dispatch`, decodes any
@@ -19,6 +21,8 @@ Lifecycle: :class:`Sidecar` binds 127.0.0.1 on an OS-picked port at
 from __future__ import annotations
 
 import asyncio
+import base64
+import json
 import logging
 import socket
 from collections.abc import AsyncIterator
@@ -39,6 +43,7 @@ logger = logging.getLogger(__name__)
 
 TARGET_URL_HEADER = "x-ccproxy-target-url"
 IMPERSONATE_HEADER = "x-ccproxy-impersonate"
+FINGERPRINT_HEADER = "x-ccproxy-fingerprint"
 
 _RELAY_EXCLUDED_HEADERS = frozenset(
     {
@@ -126,14 +131,18 @@ async def _handle(request: Request) -> Response:
     if host is None:
         return Response(f"invalid target URL: {target_url!r}", status_code=400)
 
-    drop = _RELAY_EXCLUDED_HEADERS | {TARGET_URL_HEADER, IMPERSONATE_HEADER}
+    drop = _RELAY_EXCLUDED_HEADERS | {TARGET_URL_HEADER, IMPERSONATE_HEADER, FINGERPRINT_HEADER}
     fwd_headers = _filter_headers(list(request.headers.raw), drop)
     body = await request.body()
 
     try:
-        fingerprint = _resolve_captured_fingerprint(profile)
+        fingerprint = _fingerprint_from_header(request.headers.get(FINGERPRINT_HEADER))
+        if fingerprint is None:
+            fingerprint = _resolve_captured_fingerprint(profile)
         client = await transport.get_client(host=host, profile=profile, fingerprint=fingerprint)
     except transport.UnknownFingerprintProfileError as e:
+        return Response(str(e), status_code=400)
+    except ValueError as e:
         return Response(str(e), status_code=400)
 
     try:
@@ -191,6 +200,20 @@ def _resolve_captured_fingerprint(profile: str) -> CapturedFingerprint | None:
     from ccproxy.shaping.store import get_store
 
     return get_store().pick_fingerprint(profile)
+
+
+def _fingerprint_from_header(value: str | None) -> CapturedFingerprint | None:
+    if not value:
+        return None
+    try:
+        padding = "=" * (-len(value) % 4)
+        raw = base64.urlsafe_b64decode((value + padding).encode()).decode()
+        payload = json.loads(raw)
+    except Exception as exc:
+        raise ValueError(f"invalid {FINGERPRINT_HEADER}") from exc
+    if not isinstance(payload, dict):
+        raise ValueError(f"invalid {FINGERPRINT_HEADER}")
+    return CapturedFingerprint.from_dict(payload)
 
 
 def _build_app() -> Starlette:

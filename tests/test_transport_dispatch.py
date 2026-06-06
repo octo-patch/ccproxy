@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -120,6 +121,39 @@ class TestCacheIdentity:
     async def test_client_is_open_on_return(self) -> None:
         client = await get_client(host="example.com", profile="chrome131")
         assert not client.is_closed
+
+
+# ---------------------------------------------------------------------------
+# Provider timeout policy
+# ---------------------------------------------------------------------------
+
+
+class TestProviderTimeout:
+    async def test_default_provider_timeout_uses_curl_disabled_timeout(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(
+            "ccproxy.transport.dispatch.get_config",
+            lambda: SimpleNamespace(provider_timeout=None),
+        )
+
+        client = await get_client(host="example.com", profile="chrome131")
+
+        assert client.timeout.connect == 0.0
+        assert client.timeout.read == 0.0
+        assert client.timeout.write == 0.0
+        assert client.timeout.pool == 0.0
+
+    async def test_configured_provider_timeout_applies_to_client(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(
+            "ccproxy.transport.dispatch.get_config",
+            lambda: SimpleNamespace(provider_timeout=120.0),
+        )
+
+        client = await get_client(host="example.com", profile="chrome131")
+
+        assert client.timeout.connect == 120.0
+        assert client.timeout.read == 120.0
+        assert client.timeout.write == 120.0
+        assert client.timeout.pool == 120.0
 
 
 # ---------------------------------------------------------------------------
