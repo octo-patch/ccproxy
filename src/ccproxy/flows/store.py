@@ -117,6 +117,9 @@ class FlowRecord:
     direction: Literal["inbound"]
     """Traffic direction (always inbound)."""
 
+    source: Literal["unknown", "reverse", "wireguard"] = "unknown"
+    """Listener family that accepted the request."""
+
     auth: AuthMeta | None = None
     """Auth decision from the auth hook, if any."""
 
@@ -191,6 +194,7 @@ class InspectorMeta:
 
     RECORD = "ccproxy.record"
     DIRECTION = "ccproxy.direction"
+    SOURCE = "ccproxy.source"
 
 
 _flow_store: dict[str, tuple[FlowRecord, float]] = {}
@@ -198,9 +202,13 @@ _store_lock = threading.Lock()
 _STORE_TTL = 3600
 
 
-def create_flow_record(direction: Literal["inbound"]) -> tuple[str, FlowRecord]:
+def create_flow_record(
+    direction: Literal["inbound"],
+    *,
+    source: Literal["unknown", "reverse", "wireguard"] = "unknown",
+) -> tuple[str, FlowRecord]:
     flow_id = str(uuid.uuid4())
-    record = FlowRecord(direction=direction)
+    record = FlowRecord(direction=direction, source=source)
     with _store_lock:
         _flow_store[flow_id] = (record, time.time())
         _cleanup_expired()

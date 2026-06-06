@@ -24,6 +24,8 @@ from ccproxy.inspector.namespace import (
     cleanup_namespace,
     create_namespace,
     run_in_namespace,
+    run_in_namespace_capture,
+    run_namespace_probe,
 )
 
 # --- Fixtures ---
@@ -61,7 +63,7 @@ def mock_ctx(tmp_path: Path) -> NamespaceContext:
 
 
 class TestCheckNamespaceCapabilities:
-    """Verify that all jail prerequisites are validated before allowing execution."""
+    """Verify that namespace prerequisites are validated before allowing execution."""
 
     @patch("shutil.which")
     def test_all_tools_present(self, mock_which: Mock, tmp_path: Path) -> None:
@@ -555,6 +557,77 @@ class TestRunInNamespace:
         assert result == 127
 
 
+class TestRunInNamespaceCapture:
+    @pytest.fixture(autouse=True)
+    def _skip_warmup(self):
+        with patch("ccproxy.inspector.namespace._warmup_ignore_hosts"):
+            yield
+
+    def test_capture_uses_same_nsenter_vector(self, mock_ctx: NamespaceContext) -> None:
+        """Captured commands run through the same namespace entry path."""
+        completed = subprocess.CompletedProcess(["nsenter"], 0, stdout="ok\n", stderr="")
+        with patch("ccproxy.inspector.namespace.subprocess.run", return_value=completed) as mock_run:
+            result = run_in_namespace_capture(mock_ctx, ["python", "-m", "mod"], {"PATH": "/bin"}, timeout=3.5)
+
+        assert result is completed
+        cmd = mock_run.call_args[0][0]
+        assert cmd[:2] == ["nsenter", "-t"]
+        assert str(mock_ctx.ns_pid) in cmd
+        assert "--net" in cmd
+        assert "--user" in cmd
+        assert cmd[-3:] == ["python", "-m", "mod"]
+        assert mock_run.call_args.kwargs == {
+            "env": {"PATH": "/bin"},
+            "capture_output": True,
+            "text": True,
+            "timeout": 3.5,
+        }
+
+
+class TestRunNamespaceProbe:
+    @patch("ccproxy.inspector.namespace.run_in_namespace_capture")
+    def test_probe_parses_json_payload(self, mock_capture: Mock, mock_ctx: NamespaceContext) -> None:
+        """Probe output is parsed as a JSON object."""
+        mock_capture.return_value = subprocess.CompletedProcess(
+            ["probe"],
+            0,
+            stdout='{"dns_lookup_ok": true, "route_table": "default dev wg0"}',
+            stderr="",
+        )
+
+        payload = run_namespace_probe(mock_ctx, {"PATH": "/bin"}, proxy_port=4001)
+
+        assert payload == {"dns_lookup_ok": True, "route_table": "default dev wg0"}
+        command = mock_capture.call_args[0][1]
+        assert command[:3]
+        assert command[-2:] == ["--proxy-port", "4001"]
+        assert "ccproxy.inspector.namespace_probe" in command
+
+    @patch("ccproxy.inspector.namespace.run_in_namespace_capture")
+    def test_probe_nonzero_raises_runtime_error(self, mock_capture: Mock, mock_ctx: NamespaceContext) -> None:
+        """Probe subprocess failures become RuntimeError diagnostics."""
+        mock_capture.return_value = subprocess.CompletedProcess(["probe"], 1, stdout="", stderr="failed")
+
+        with pytest.raises(RuntimeError, match="namespace probe failed: failed"):
+            run_namespace_probe(mock_ctx, {}, proxy_port=4000)
+
+    @patch("ccproxy.inspector.namespace.run_in_namespace_capture")
+    def test_probe_invalid_json_raises_runtime_error(self, mock_capture: Mock, mock_ctx: NamespaceContext) -> None:
+        """Malformed probe output is reported."""
+        mock_capture.return_value = subprocess.CompletedProcess(["probe"], 0, stdout="not json", stderr="")
+
+        with pytest.raises(RuntimeError, match="invalid JSON"):
+            run_namespace_probe(mock_ctx, {}, proxy_port=4000)
+
+    @patch("ccproxy.inspector.namespace.run_in_namespace_capture")
+    def test_probe_non_object_json_raises_runtime_error(self, mock_capture: Mock, mock_ctx: NamespaceContext) -> None:
+        """Probe output must be a JSON object."""
+        mock_capture.return_value = subprocess.CompletedProcess(["probe"], 0, stdout="[]", stderr="")
+
+        with pytest.raises(RuntimeError, match="non-object JSON"):
+            run_namespace_probe(mock_ctx, {}, proxy_port=4000)
+
+
 # =============================================================================
 # _warmup_ignore_hosts — TLS passthrough priming
 # =============================================================================
@@ -716,7 +789,7 @@ class TestSafeKill:
 
 
 class TestCliInspectHardFailure:
-    """Verify that ccproxy run --inspect refuses to run without the jail."""
+    """Verify that ccproxy run --inspect refuses to run without the namespace path."""
 
     @pytest.fixture(autouse=True)
     def _isolate_config_dir(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

@@ -12,11 +12,18 @@ import pytest
 from ccproxy.cli import (
     Init,
     Logs,
+    NamespaceDoctor,
+    NamespaceStatus,
+    NamespaceWireGuardConfig,
     Run,
     Start,
     Status,
+    _namespace_status_payload,
     init_config,
     main,
+    run_namespace_doctor,
+    run_namespace_status,
+    run_namespace_wireguard_config,
     run_with_proxy,
     setup_logging,
     show_status,
@@ -499,6 +506,141 @@ ccproxy:
         assert "No config files found" in captured.out
 
 
+class TestNamespaceCommands:
+    def test_namespace_status_json_reports_permissive_observational_mode(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        wg_conf = tmp_path / ".inspector-wireguard-client.conf"
+        wg_conf.write_text("[Interface]\nPrivateKey = test\n")
+
+        with patch("ccproxy.cli.shutil.which", side_effect=lambda tool: f"/usr/bin/{tool}"):
+            run_namespace_status(tmp_path, json_output=True)
+
+        captured = capsys.readouterr()
+        payload = json.loads(captured.out)
+        assert payload["mode"] == "permissive"
+        assert payload["privacy_claim"] is False
+        assert payload["wireguard_config"] == {
+            "path": str(wg_conf),
+            "present": True,
+        }
+        assert payload["topology"]["gateway_ip"] == "10.0.2.2"
+        assert payload["tools"]["slirp4netns"]["present"] is True
+
+    def test_namespace_status_payload_reports_missing_wireguard_config(self, tmp_path: Path) -> None:
+        with patch("ccproxy.cli.shutil.which", return_value=None):
+            payload = _namespace_status_payload(tmp_path)
+
+        assert payload["mode"] == "permissive"
+        assert payload["wireguard_config"]["present"] is False
+        assert payload["tools"]["wg"] == {"present": False, "path": None}
+
+    def test_namespace_wireguard_config_prints_generated_file(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        wg_conf = "[Interface]\nPrivateKey = test\n"
+        (tmp_path / ".inspector-wireguard-client.conf").write_text(wg_conf)
+
+        run_namespace_wireguard_config(tmp_path)
+
+        captured = capsys.readouterr()
+        assert captured.out == wg_conf
+
+    def test_namespace_wireguard_config_missing_exits_1(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        with pytest.raises(SystemExit) as exc_info:
+            run_namespace_wireguard_config(tmp_path)
+
+        assert exc_info.value.code == 1
+        captured = capsys.readouterr()
+        assert "Start ccproxy first" in captured.err
+
+    @patch("ccproxy.cli._inspect_command_env", return_value={"PATH": "/bin"})
+    @patch("ccproxy.inspector.namespace.run_namespace_probe")
+    @patch("ccproxy.inspector.namespace.cleanup_namespace")
+    @patch("ccproxy.inspector.namespace.create_namespace")
+    @patch("ccproxy.inspector.namespace.check_namespace_capabilities", return_value=[])
+    def test_namespace_doctor_success_json(
+        self,
+        mock_check: Mock,
+        mock_create: Mock,
+        mock_cleanup: Mock,
+        mock_probe: Mock,
+        mock_env: Mock,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        wg_conf = "[Interface]\nPrivateKey = test\n"
+        (tmp_path / ".inspector-wireguard-client.conf").write_text(wg_conf)
+        (tmp_path / "ccproxy.yaml").write_text("ccproxy:\n  port: 4311\n")
+        monkeypatch.setenv("CCPROXY_CONFIG_DIR", str(tmp_path))
+        clear_config_instance()
+        ctx = Mock()
+        mock_create.return_value = ctx
+        mock_probe.return_value = {
+            "dns_lookup_ok": True,
+            "public_ipv4_ok": True,
+            "public_ipv6_ok": False,
+            "ccproxy_port_ok": True,
+            "route_table": "default dev wg0",
+            "resolver_config": "nameserver 10.0.2.3\n",
+        }
+
+        with pytest.raises(SystemExit) as exc_info:
+            run_namespace_doctor(tmp_path, json_output=True)
+
+        assert exc_info.value.code == 0
+        mock_check.assert_called_once_with()
+        mock_create.assert_called_once_with(wg_conf, proxy_port=4311)
+        mock_probe.assert_called_once_with(ctx, {"PATH": "/bin"}, proxy_port=4311)
+        mock_cleanup.assert_called_once_with(ctx)
+        captured = capsys.readouterr()
+        result = json.loads(captured.out)
+        assert result["failures"] == []
+        assert result["status"]["mode"] == "permissive"
+        assert result["probe"]["route_table"] == "default dev wg0"
+
+    @patch("ccproxy.cli._inspect_command_env", return_value={"PATH": "/bin"})
+    @patch("ccproxy.inspector.namespace.run_namespace_probe")
+    @patch("ccproxy.inspector.namespace.cleanup_namespace")
+    @patch("ccproxy.inspector.namespace.create_namespace")
+    @patch("ccproxy.inspector.namespace.check_namespace_capabilities", return_value=[])
+    def test_namespace_doctor_fails_on_operational_problem(
+        self,
+        mock_check: Mock,
+        mock_create: Mock,
+        mock_cleanup: Mock,
+        mock_probe: Mock,
+        mock_env: Mock,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        (tmp_path / ".inspector-wireguard-client.conf").write_text("[Interface]\nPrivateKey = test\n")
+        (tmp_path / "ccproxy.yaml").write_text("ccproxy:\n  port: 4311\n")
+        monkeypatch.setenv("CCPROXY_CONFIG_DIR", str(tmp_path))
+        clear_config_instance()
+        ctx = Mock()
+        mock_create.return_value = ctx
+        mock_probe.return_value = {
+            "dns_lookup_ok": True,
+            "public_ipv4_ok": False,
+            "public_ipv6_ok": False,
+            "ccproxy_port_ok": True,
+        }
+
+        with pytest.raises(SystemExit) as exc_info:
+            run_namespace_doctor(tmp_path, json_output=True)
+
+        assert exc_info.value.code == 1
+        mock_cleanup.assert_called_once_with(ctx)
+        captured = capsys.readouterr()
+        result = json.loads(captured.out)
+        assert result["failures"] == ["public IPv4 reachability failed"]
+
+
 class TestMainFunction:
     @patch("ccproxy.cli.start_server")
     def test_main_start_command(self, mock_start: Mock, tmp_path: Path, monkeypatch) -> None:
@@ -602,6 +744,36 @@ class TestMainFunction:
             check_mcp=False,
             mermaid=False,
         )
+
+    @patch("ccproxy.cli.run_namespace_status")
+    def test_main_namespace_status_command(self, mock_status: Mock, tmp_path: Path, monkeypatch) -> None:
+        """Test main with namespace status command."""
+        monkeypatch.setenv("CCPROXY_CONFIG_DIR", str(tmp_path))
+        clear_config_instance()
+        cmd = NamespaceStatus(json_output=True)
+        main(cmd, config=tmp_path)
+
+        mock_status.assert_called_once_with(tmp_path, json_output=True)
+
+    @patch("ccproxy.cli.run_namespace_doctor")
+    def test_main_namespace_doctor_command(self, mock_doctor: Mock, tmp_path: Path, monkeypatch) -> None:
+        """Test main with namespace doctor command."""
+        monkeypatch.setenv("CCPROXY_CONFIG_DIR", str(tmp_path))
+        clear_config_instance()
+        cmd = NamespaceDoctor(json_output=True)
+        main(cmd, config=tmp_path)
+
+        mock_doctor.assert_called_once_with(tmp_path, json_output=True)
+
+    @patch("ccproxy.cli.run_namespace_wireguard_config")
+    def test_main_namespace_wireguard_config_command(self, mock_wg: Mock, tmp_path: Path, monkeypatch) -> None:
+        """Test main with namespace wireguard-config command."""
+        monkeypatch.setenv("CCPROXY_CONFIG_DIR", str(tmp_path))
+        clear_config_instance()
+        cmd = NamespaceWireGuardConfig()
+        main(cmd, config=tmp_path)
+
+        mock_wg.assert_called_once_with(tmp_path)
 
 
 class TestSetupLogging:

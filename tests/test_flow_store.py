@@ -20,6 +20,7 @@ from ccproxy.flows.store import (
 class TestFlowRecordDataclass:
     def test_default_values(self):
         record = FlowRecord("inbound")
+        assert record.source == "unknown"
         assert record.auth is None
         assert record.otel is None
         assert record.client_request is None
@@ -49,6 +50,10 @@ class TestCreateFlowRecord:
     def test_inbound_direction(self):
         _, record = create_flow_record("inbound")
         assert record.direction == "inbound"
+
+    def test_source_can_be_stamped(self):
+        _, record = create_flow_record("inbound", source="wireguard")
+        assert record.source == "wireguard"
 
 
 class TestGetFlowRecord:

@@ -18,6 +18,7 @@ import shutil
 import signal
 import socket
 import subprocess
+import sys
 import tempfile
 import threading
 from pathlib import Path
@@ -525,6 +526,53 @@ def run_in_namespace(ctx: NamespaceContext, command: list[str], env: dict[str, s
         except subprocess.TimeoutExpired:
             proc.kill()
             return 130
+
+
+def run_in_namespace_capture(
+    ctx: NamespaceContext,
+    command: list[str],
+    env: dict[str, str],
+    *,
+    timeout: float = 30.0,
+) -> subprocess.CompletedProcess[str]:
+    """Run a command in the namespace and capture output for diagnostics."""
+    _warmup_ignore_hosts(ctx.ns_pid, env)
+
+    nsenter_cmd = [
+        "nsenter",
+        "-t",
+        str(ctx.ns_pid),
+        "--net",
+        "--user",
+        "--preserve-credentials",
+        "--",
+        *command,
+    ]
+    return subprocess.run(nsenter_cmd, env=env, capture_output=True, text=True, timeout=timeout)  # noqa: S603
+
+
+def run_namespace_probe(ctx: NamespaceContext, env: dict[str, str], *, proxy_port: int) -> dict[str, object]:
+    """Collect observable namespace properties through the same execution path as user commands."""
+    result = run_in_namespace_capture(
+        ctx,
+        [
+            sys.executable,
+            "-m",
+            "ccproxy.inspector.namespace_probe",
+            "--proxy-port",
+            str(proxy_port),
+        ],
+        env,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"namespace probe failed: {result.stderr.strip() or result.stdout.strip()}")
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"namespace probe returned invalid JSON: {result.stdout[:200]!r}") from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError("namespace probe returned non-object JSON")
+    return payload
 
 
 def cleanup_namespace(ctx: NamespaceContext) -> None:

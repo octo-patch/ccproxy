@@ -38,6 +38,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 Direction = Literal["inbound"]
+TrafficSource = Literal["reverse", "wireguard"]
 
 
 class InspectorAddon:
@@ -66,6 +67,15 @@ class InspectorAddon:
         if isinstance(mode, (ReverseMode, WireGuardMode)):
             return "inbound"
 
+        return None
+
+    def _get_source(self, flow: http.HTTPFlow) -> TrafficSource | None:
+        """Return the listener family that accepted this flow."""
+        mode = flow.client_conn.proxy_mode
+        if isinstance(mode, ReverseMode):
+            return "reverse"
+        if isinstance(mode, WireGuardMode):
+            return "wireguard"
         return None
 
     @staticmethod
@@ -139,12 +149,15 @@ class InspectorAddon:
         direction = self._get_direction(flow)
         if direction is None:
             return
+        source = self._get_source(flow)
+        if source is None:
+            return
 
         headers = cast("dict[str, Any]", flow.request.headers)
         record = get_flow_record(headers.get(FLOW_ID_HEADER))
 
         if record is None:
-            flow_id, record = create_flow_record(direction)
+            flow_id, record = create_flow_record(direction, source=source)
             flow.request.headers[FLOW_ID_HEADER] = flow_id
             record.client_request = HttpSnapshot(
                 headers=dict(flow.request.headers.items()),  # type: ignore[no-untyped-call]
@@ -153,9 +166,12 @@ class InspectorAddon:
                 url=flow.request.pretty_url,
             )
             self._enrich_record_with_conversation_ids(flow, record)
+        else:
+            record.source = source
 
         metadata = metadata_from_flow(flow)
         metadata.direction = direction
+        metadata.source = source
         metadata.record = record
 
         host = flow.request.pretty_host

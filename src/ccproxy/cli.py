@@ -106,12 +106,42 @@ class Status(BaseModel):
     """Emit the hook DAGs (inbound + outbound) as mermaid stateDiagram-v2 markup."""
 
 
+class NamespaceStatus(BaseModel):
+    """Show observed WireGuard namespace runtime inputs."""
+
+    json_output: Annotated[bool, tyro.conf.arg(name="json")] = False
+    """Output status as JSON."""
+
+
+class NamespaceDoctor(BaseModel):
+    """Run the current permissive namespace path and report observed behavior."""
+
+    json_output: Annotated[bool, tyro.conf.arg(name="json")] = False
+    """Output probe result as JSON."""
+
+
+class NamespaceWireGuardConfig(BaseModel):
+    """Print mitmproxy's generated WireGuard client config."""
+
+
+NamespaceCommands = Annotated[
+    Annotated[NamespaceStatus, tyro.conf.subcommand(name="status")]
+    | Annotated[NamespaceDoctor, tyro.conf.subcommand(name="doctor")]
+    | Annotated[NamespaceWireGuardConfig, tyro.conf.subcommand(name="wireguard-config")],
+    tyro.conf.subcommand(
+        name="namespace",
+        description="Inspect the permissive WireGuard namespace capture path.",
+    ),
+]
+
+
 Command = (
     Annotated[Start, tyro.conf.subcommand(name="start")]
     | Annotated[Init, tyro.conf.subcommand(name="init")]
     | Annotated[Run, tyro.conf.subcommand(name="run")]
     | Annotated[Logs, tyro.conf.subcommand(name="logs")]
     | Annotated[Status, tyro.conf.subcommand(name="status")]
+    | NamespaceCommands
     | Flows
     | Shapes
 )
@@ -392,7 +422,7 @@ def run_with_proxy(
     Without --inspect: sets ANTHROPIC_BASE_URL etc. to point at ccproxy's
     reverse proxy listener so SDK clients route through the inspector.
 
-    With --inspect: confines the subprocess in a WireGuard namespace jail
+    With --inspect: runs the subprocess in a WireGuard namespace
     for transparent traffic capture (all traffic routes through mitmweb).
     """
     # deferred: heavy inspector chain
@@ -855,6 +885,140 @@ def show_status(
                     )
 
 
+def _namespace_status_payload(config_dir: Path) -> dict[str, Any]:
+    wg_conf_file = config_dir / ".inspector-wireguard-client.conf"
+    tools = {tool: shutil.which(tool) for tool in ("slirp4netns", "unshare", "nsenter", "ip", "wg", "iptables")}
+    return {
+        "mode": "permissive",
+        "runner": "builtin-unshare-slirp4netns-wireguard",
+        "privacy_claim": False,
+        "wireguard_config": {
+            "path": str(wg_conf_file),
+            "present": wg_conf_file.exists(),
+        },
+        "topology": {
+            "guest_ip": "10.0.2.100",
+            "gateway_ip": "10.0.2.2",
+            "slirp_dns_ip": "10.0.2.3",
+            "wireguard_client_ip": "10.0.0.1/32",
+        },
+        "tools": {name: {"present": path is not None, "path": path} for name, path in tools.items()},
+    }
+
+
+def run_namespace_status(config_dir: Path, *, json_output: bool = False) -> None:
+    payload = _namespace_status_payload(config_dir)
+    if json_output:
+        builtin_print(json.dumps(payload, indent=2, sort_keys=True))
+        return
+
+    console = Console()
+    table = Table(show_header=False, show_lines=True)
+    table.add_column("Key", style="white", width=20)
+    table.add_column("Value", style="yellow")
+    table.add_row("mode", "permissive development capture")
+    table.add_row("runner", payload["runner"])
+    table.add_row("privacy claim", "false")
+    wg = payload["wireguard_config"]
+    table.add_row("wireguard config", f"{wg['path']}\npresent: {wg['present']}")
+    topology = payload["topology"]
+    table.add_row("topology", "\n".join(f"{key}: {value}" for key, value in topology.items()))
+    tools = payload["tools"]
+    table.add_row(
+        "tools",
+        "\n".join(f"{name}: {'present' if item['present'] else 'missing'}" for name, item in tools.items()),
+    )
+    console.print(Panel(table, title="[bold]ccproxy Namespace[/bold]", border_style="cyan"))
+
+
+def _read_wg_client_conf_or_exit(config_dir: Path) -> str:
+    wg_conf_file = config_dir / ".inspector-wireguard-client.conf"
+    if not wg_conf_file.exists():
+        print("Error: No WireGuard configuration found. Start ccproxy first: ccproxy start", file=sys.stderr)
+        sys.exit(1)
+    return wg_conf_file.read_text()
+
+
+def run_namespace_wireguard_config(config_dir: Path) -> None:
+    builtin_print(_read_wg_client_conf_or_exit(config_dir), end="")
+
+
+def _inspect_command_env(config_dir: Path) -> dict[str, str]:
+    from ccproxy.config import get_config
+
+    env = os.environ.copy()
+    confdir = get_config().inspector.mitmproxy.confdir
+    inspector_confdir = Path(confdir) if confdir else None
+    combined_bundle = _ensure_combined_ca_bundle(config_dir, env.get("SSL_CERT_FILE"), confdir=inspector_confdir)
+    if combined_bundle:
+        bundle = str(combined_bundle)
+        env["SSL_CERT_FILE"] = bundle
+        env["NODE_EXTRA_CA_CERTS"] = bundle
+        env["REQUESTS_CA_BUNDLE"] = bundle
+        env["CURL_CA_BUNDLE"] = bundle
+    return env
+
+
+def run_namespace_doctor(config_dir: Path, *, json_output: bool = False) -> None:
+    """Run a live probe through the current permissive namespace capture path."""
+    from ccproxy.config import get_config
+    from ccproxy.inspector.namespace import (
+        check_namespace_capabilities,
+        cleanup_namespace,
+        create_namespace,
+        run_namespace_probe,
+    )
+
+    problems = check_namespace_capabilities()
+    if problems:
+        for problem in problems:
+            print(f"Error: {problem}", file=sys.stderr)
+        sys.exit(1)
+
+    cfg = get_config()
+    wg_client_conf = _read_wg_client_conf_or_exit(config_dir)
+    ctx = None
+    try:
+        ctx = create_namespace(wg_client_conf, proxy_port=cfg.port)
+        payload = run_namespace_probe(ctx, _inspect_command_env(config_dir), proxy_port=cfg.port)
+    except RuntimeError as exc:
+        print(f"Error: Namespace doctor failed: {exc}", file=sys.stderr)
+        sys.exit(1)
+    finally:
+        if ctx is not None:
+            cleanup_namespace(ctx)
+
+    failures: list[str] = []
+    if not payload.get("dns_lookup_ok"):
+        failures.append("dns lookup failed")
+    if not payload.get("public_ipv4_ok"):
+        failures.append("public IPv4 reachability failed")
+    if not payload.get("ccproxy_port_ok"):
+        failures.append("ccproxy localhost reachability failed")
+    result = {
+        "status": _namespace_status_payload(config_dir),
+        "probe": payload,
+        "failures": failures,
+    }
+    if json_output:
+        builtin_print(json.dumps(result, indent=2, sort_keys=True))
+    else:
+        console = Console(stderr=True)
+        table = Table(show_header=False)
+        table.add_column("Check", style="white")
+        table.add_column("Observed", style="yellow")
+        table.add_row("mode", "permissive development capture")
+        table.add_row("dns_lookup", "ok" if payload.get("dns_lookup_ok") else "failed")
+        table.add_row("public_ipv4", "reachable" if payload.get("public_ipv4_ok") else "failed")
+        table.add_row("public_ipv6", "reachable" if payload.get("public_ipv6_ok") else "not reachable")
+        table.add_row("ccproxy_port", "reachable" if payload.get("ccproxy_port_ok") else "failed")
+        console.print(Panel(table, title="[bold]Namespace Doctor[/bold]", border_style="cyan"))
+        for failure in failures:
+            console.print(f"[red]{failure}[/red]")
+
+    sys.exit(1 if failures else 0)
+
+
 def main(
     cmd: Annotated[Command, tyro.conf.arg(name="")],
     *,
@@ -917,7 +1081,7 @@ def main(
             print("Run a command with ccproxy environment.")
             print()
             print("options:")
-            print("  --inspect, -i       Route subprocess traffic through a WireGuard namespace jail")
+            print("  --inspect, -i       Route subprocess traffic through a WireGuard namespace")
             print("                      for transparent capture of all TCP/UDP traffic.")
             print("                      Requires ccproxy start to be running.")
             print("  command ...         Command and arguments to execute with proxy settings")
@@ -956,6 +1120,15 @@ def main(
             mermaid=cmd.mermaid,
         )
 
+    elif isinstance(cmd, NamespaceStatus):
+        run_namespace_status(config_dir, json_output=cmd.json_output)
+
+    elif isinstance(cmd, NamespaceDoctor):
+        run_namespace_doctor(config_dir, json_output=cmd.json_output)
+
+    elif isinstance(cmd, NamespaceWireGuardConfig):
+        run_namespace_wireguard_config(config_dir)
+
     elif isinstance(cmd, FlowsList | FlowsDump | FlowsDiff | FlowsCompare | FlowsRepl | FlowsClear):
         handle_flows(cmd, config_dir)
     elif isinstance(cmd, ShapeSave | ShapeAudit):
@@ -973,6 +1146,7 @@ def entry_point() -> None:
         "logs",
         "status",
         "run",
+        "namespace",
         "flows",
         "shapes",
     }

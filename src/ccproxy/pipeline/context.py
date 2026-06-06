@@ -278,6 +278,7 @@ class CcproxyMetadata(MetadataSection):
 
     record: Any | None = metadata_field(default=None)
     direction: str = metadata_field(default="")
+    source: str = metadata_field(default="")
     conversation_id: str = metadata_field(default="")
     system_prompt_sha: str = metadata_field(default="")
     sse_transformer: Any | None = metadata_field(default=None)

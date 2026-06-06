@@ -2,276 +2,307 @@
 name: using-ccproxy-inspector
 description: >-
   Operates the ccproxy inspector MITM system for intercepting, inspecting, and
-  transforming LLM API traffic. Covers running CLI tools through the inspector
-  (Claude Code, Aider, any LLM harness), inspecting flows with client-vs-forwarded
-  request comparison, understanding the inbound/transform/outbound pipeline,
-  capturing and checking shaping profiles, and diagnosing flow issues. Use when
-  running CLI applications through ccproxy, inspecting intercepted flows, comparing
-  client request vs forwarded request, checking shaping profile status, using
-  WireGuard namespace jail, or debugging the hook pipeline.
+  transforming LLM API traffic. Covers running CLI tools through the reverse
+  proxy or permissive WireGuard namespace capture path, checking namespace
+  status and doctor output, inspecting flows with client-vs-forwarded request
+  comparison, understanding the inbound/transform/outbound pipeline, capturing
+  and auditing shape artifacts, applying the privacy guide, and diagnosing flow
+  issues. Use when running CLI applications through ccproxy, inspecting
+  intercepted flows, comparing client request vs forwarded request, checking
+  shaping profile status, using WireGuard namespace capture, explaining privacy
+  behavior, or debugging the hook pipeline.
 ---
 
 # Using the ccproxy Inspector
 
-The inspector intercepts LLM API traffic via mitmproxy, routing it through a three-stage hook pipeline (inbound -> transform -> outbound) before forwarding to the provider. It captures pre-pipeline snapshots, enabling comparison of what the client sent vs what the provider received.
+The inspector intercepts LLM API traffic through mitmproxy and routes accepted
+flows through the ccproxy addon chain:
 
-**Prerequisite**: ccproxy must be configured and running. See the `using-ccproxy-api` skill for authentication, sentinel keys, and `ccproxy.yaml` setup.
-
-## Verify ccproxy is running
-
-```bash
-ccproxy status              # Human-readable panel
-ccproxy status --json       # Machine-readable (includes URLs, ports)
-ccproxy status --proxy      # Exit 0 if proxy is up, 1 if down
-ccproxy status --inspect    # Exit 0 if inspector UI is up, 2 if down
+```
+InspectorAddon -> FingerprintCaptureAddon -> MultiHARSaver -> ShapeCaptureAddon
+               -> inbound DAG -> transform router -> outbound DAG
+               -> TransportOverrideAddon -> AuthAddon -> GeminiAddon
+               -> PerplexityAddon -> EgressSanitizerAddon
 ```
 
-## Running CLI tools through the inspector
+Use the `using-ccproxy-api` skill for provider auth, sentinel keys, SDK base URL
+configuration, and `ccproxy.yaml` setup.
 
-### Mode 1: Reverse proxy (`ccproxy run`)
+## Inspect First
 
-Sets SDK environment variables to route traffic through ccproxy's reverse proxy listener.
+Before debugging a flow, establish which process and config directory are in
+play:
 
 ```bash
-ccproxy run -- claude              # Claude Code
-ccproxy run -- aider               # Aider
-ccproxy run -- python my_agent.py  # Any Python script using Anthropic/OpenAI SDK
-ccproxy run -- curl http://localhost:4000/v1/messages ...
+ccproxy status
+ccproxy status --json
+ccproxy status --proxy --inspect --mcp
 ```
 
-Sets `ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL`, `OPENAI_API_BASE` to `http://{host}:{port}`. The CLI tool must respect these environment variables.
-
-**Use when**: the tool uses an SDK with configurable `base_url` and you want lightweight interception.
-
-### Mode 2: WireGuard namespace jail (`ccproxy run --inspect`)
-
-Creates a rootless Linux network namespace where ALL outbound traffic routes through a WireGuard tunnel into mitmproxy. No `base_url` configuration needed -- every HTTP/HTTPS connection is intercepted.
+For namespace work, also inspect the transparent capture path:
 
 ```bash
-ccproxy run --inspect -- claude
+ccproxy namespace status
+ccproxy namespace status --json
+ccproxy namespace doctor
+ccproxy namespace doctor --json
+```
+
+Interpretation:
+
+- `namespace status` reports implementation facts: permissive mode, generated
+  WireGuard config presence, slirp4netns topology, and required tool paths.
+- `privacy_claim: false` is intentional. ccproxy reports observable runtime
+  behavior; it does not claim that the namespace is a restrictive privacy
+  firewall.
+- `namespace doctor` runs a live probe through the same namespace execution path
+  used by `ccproxy run --inspect`.
+- `namespace doctor` fails for DNS, public IPv4, or ccproxy-localhost
+  reachability failures. IPv6 is reported but is not a failure.
+- `ccproxy namespace wireguard-config` prints raw WireGuard client config and
+  can expose private key material. Do not print or share it casually.
+
+When the task concerns privacy, security language, namespace guarantees,
+keylogs, flow exports, or sharing diagnostics, read `docs/privacy.md`.
+
+## Running Tools Through ccproxy
+
+### Reverse proxy: `ccproxy run`
+
+Use this when the client honors SDK base URL environment variables:
+
+```bash
+ccproxy run -- claude
+ccproxy run -- aider
+ccproxy run -- python my_agent.py
+```
+
+This sets `ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL`, and `OPENAI_API_BASE` to the
+configured ccproxy reverse proxy listener. Only traffic addressed to ccproxy is
+intercepted.
+
+Use for lightweight SDK debugging and normal OpenAI/Anthropic-compatible
+clients.
+
+### WireGuard namespace capture: `ccproxy run --inspect`
+
+Use this when the tool hardcodes provider endpoints, when base URL injection is
+not enough, or when you need reference traffic from a real provider CLI:
+
+```bash
+ccproxy start
+ccproxy run --inspect -- claude -p "hello"
 ccproxy run --inspect -- aider --model claude-sonnet-4-5-20250929
 ccproxy run --inspect -- python my_agent.py
 ```
 
-Injects a combined CA bundle (mitmproxy CA + system CAs) via `SSL_CERT_FILE`, `NODE_EXTRA_CA_CERTS`, `REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE`.
-
-**Use when**: the tool doesn't support `base_url`, you need full traffic capture, or you want to observe reference traffic for shape learning.
-
-### When to use which
-
-| Scenario | Mode |
-|----------|------|
-| SDK client with configurable base_url | `ccproxy run` |
-| Tool that hardcodes API endpoints | `ccproxy run --inspect` |
-| Capturing shapes (`ccproxy flows shape`) | `ccproxy run --inspect` (a real CLI run through the WireGuard jail produces the flow you'll capture) |
-| Quick debugging of SDK integration | `ccproxy run` |
-| Full traffic audit | `ccproxy run --inspect` |
-
-## Understanding flows
-
-### Client request vs forwarded request
-
-Every flow has two views:
-
-**Client request** -- what the client actually sent, captured before any hooks run. This is the ground truth of client intent: original URL, original headers (with sentinel keys, without injected OAuth), original body format.
-
-**Forwarded request** -- what was sent to the upstream provider after the full pipeline ran. May have a different host, different headers (OAuth token injected, beta headers added, shaping headers stamped), different body format (OpenAI -> Anthropic), wrapped body envelope, and injected system prompt.
-
-### The pipeline
-
-```
-Client request (captured as ClientRequest snapshot)
-  │
-  ▼
-Inbound hooks (DAG order)
-  forward_oauth:      sentinel key -> real OAuth token
-  extract_session_id: metadata.user_id -> ctx.metadata.session_id
-  │
-  ▼
-Transform (first matching rule wins)
-  passthrough: forward unchanged
-  redirect:    rewrite host/path/auth, keep body format
-  transform:   full cross-provider body rewrite via lightllm
-  │
-  ▼
-Outbound hooks (DAG order)
-  gemini_cli:               wrap Gemini bodies in v1internal envelope, rewrite to cloudcode-pa
-  inject_mcp_notifications: buffer MCP events into messages
-  verbose_mode:             strip redact-thinking from beta header
-  shape:                    replay captured {provider}.mflow (identity headers, billing, system prefix)
-  commitbee_compat:         last-mile compatibility shim
-  │
-  ▼
-OAuthAddon  (response side: 401-detect -> resolve_oauth_token -> replay)
-  │
-  ▼
-GeminiAddon (response side: capacity fallback + cloudcode-pa envelope unwrap)
-  │
-  ▼
-Forwarded request -> Provider API
-```
-
-### Identifying flow state
-
-| Indicator | Meaning |
-|-----------|---------|
-| `ctx.metadata.oauth_injected` / `metadata_from_flow(flow).oauth_injected` | OAuth token was injected by `forward_oauth` |
-| `ctx.metadata.oauth_provider == "X"` / `metadata_from_flow(flow).oauth_provider == "X"` | Sentinel key resolved to provider X |
-| Host changed (client vs forwarded) | Transform or redirect rewrote the destination |
-| Body identity headers present on forwarded but not client | `shape` hook replayed a captured shape |
-| Body wrapped in `{model, project, request}` envelope | `gemini_cli` hook wrapped the body for cloudcode-pa |
-| Different body keys (messages vs contents) | Cross-provider format transformation via lightllm |
-| `flow.response` replaced after a 429/503 | `GeminiAddon._try_fallback_models` succeeded |
-
-## Inspecting flows
-
-### CLI commands
-
-All `ccproxy flows` subcommands operate on a resolved flow set. The `--jq` flag is repeatable; each filter consumes and produces a JSON array. Default filters from `flows.default_jq_filters` config apply first.
+The subprocess runs in a rootless Linux user+network namespace. ccproxy
+configures a WireGuard client inside that namespace, routes the namespace
+default route through mitmproxy, and injects a combined CA bundle via:
 
 ```bash
-ccproxy flows list                        # Rich table of recent flows
-ccproxy flows list --json                 # Raw JSON array
+SSL_CERT_FILE
+NODE_EXTRA_CA_CERTS
+REQUESTS_CA_BUNDLE
+CURL_CA_BUNDLE
+```
+
+Important behavior:
+
+- The namespace path is permissive by default because ccproxy is a development
+  tool.
+- Unmatched WireGuard traffic passes through to its original destination.
+- Namespace localhost is DNATed through the slirp4netns gateway so tools with
+  hardcoded `127.0.0.1:4000` can still reach ccproxy.
+- A port-forwarding monitor uses the slirp4netns API to expose namespace
+  listeners back to the host, which supports OAuth callback workflows.
+- Do not describe this path as a default deny privacy sandbox.
+
+## Choosing A Capture Mode
+
+| Scenario | Prefer |
+| --- | --- |
+| SDK client supports configurable base URL | `ccproxy run` |
+| CLI hardcodes provider endpoints | `ccproxy run --inspect` |
+| Need native provider CLI reference traffic | `ccproxy run --inspect` |
+| Need minimum moving parts | `ccproxy run` |
+| Need full local network capture for a tool | `ccproxy run --inspect` |
+| Need to explain privacy behavior | `docs/privacy.md` + `ccproxy namespace status --json` |
+
+## Understanding Flow State
+
+Every accepted reverse-proxy or WireGuard flow is `direction="inbound"`. The
+pipeline stage names `inbound`, `transform`, and `outbound` describe processing
+order, not traffic direction.
+
+`InspectorAddon` stamps source metadata:
+
+| Source | Meaning |
+| --- | --- |
+| `reverse` | Request entered through the reverse proxy listener |
+| `wireguard` | Request entered through mitmproxy's WireGuard listener |
+| `unknown` | Default before source is stamped |
+
+Every flow has these useful views:
+
+- **Client request**: pre-pipeline snapshot of what the client sent.
+- **Forwarded request**: post-pipeline request ccproxy intended to send
+  upstream.
+- **Provider response**: raw provider response before response-side transform
+  when captured.
+
+Use these views to distinguish client behavior from ccproxy behavior.
+
+## Pipeline Map
+
+```
+Client request snapshot
+  |
+  v
+Inbound DAG
+  inject_auth: sentinel key -> configured provider credential
+  extract_session_id: body metadata -> ctx.metadata.session_id
+  provider-specific inbound hooks
+  |
+  v
+Transform router
+  passthrough: keep destination/body
+  redirect: rewrite destination/auth, preserve wire format
+  transform: rewrite destination/auth and body via lightllm
+  |
+  v
+Outbound DAG
+  gemini_cli: cloudcode-pa envelope/path/header handling
+  inject_mcp_notifications: buffered MCP events -> synthetic messages
+  verbose_mode: strip redact-thinking beta header
+  shape: replay packaged/local request shape and inner-DAG hooks
+  commitbee_compat: compatibility shim
+  |
+  v
+TransportOverrideAddon
+  optional curl-cffi sidecar for configured fingerprint profiles
+  |
+  v
+AuthAddon
+  401 detect -> credential re-resolve -> replay when token changed
+  |
+  v
+GeminiAddon / PerplexityAddon / EgressSanitizerAddon
+  provider-specific response handling and ccproxy header cleanup
+```
+
+## Inspecting Flows
+
+All `ccproxy flows` commands operate on a resolved flow set:
+
+```
+GET /flows -> config.flows.default_jq_filters -> CLI --jq filters -> final set
+```
+
+Use repeatable `--jq` filters. Each filter must consume and produce a JSON
+array.
+
+```bash
+ccproxy flows list
+ccproxy flows list --json
 ccproxy flows list --jq 'map(select(.request.pretty_host == "api.anthropic.com"))'
 
-# Multi-page HAR export (entries[2i] = forwarded+response, entries[2i+1] = client request+response)
-ccproxy flows dump > all.har                       # Open in Chrome DevTools / Charles / Fiddler
-ccproxy flows dump --jq 'map(.[-1])' > latest.har  # Just the most recent flow
-
-# Sliding-window unified diff across consecutive request bodies in the set
-ccproxy flows diff
-
-# Per-flow client-vs-forwarded diff (URL changes + body diff)
 ccproxy flows compare
-ccproxy flows compare --jq 'map(.[-1])'   # Just the latest flow
+ccproxy flows compare --jq 'map(.[-1])'
 
-# Clear (respects --jq filters; --all bypasses them)
-ccproxy flows clear --jq 'map(select(.response.status_code >= 400))'
+ccproxy flows diff
+ccproxy flows diff --jq 'map(select(.response.status_code >= 400))'
+
+ccproxy flows dump > all.har
+ccproxy flows dump --jq 'map(.[-1])' > latest.har
+
 ccproxy flows clear --all
-
-# Capture a shape from a flow (must match the provider's capture.path_pattern)
-ccproxy flows shape --provider anthropic
+ccproxy flows clear --jq 'map(select(.response.status_code >= 400))'
 ```
 
-### MCP server
+Privacy note: HAR dumps, request/response bodies, flow JSON, and packet
+captures are sensitive. Prefer `flows compare` for local debugging and read
+`docs/privacy.md` before sharing artifacts.
 
-For programmatic access from MCP-aware clients (Claude Code with the
-`ccproxy_mcp` server configured), the same surface is exposed as MCP tools:
-`list_flows`, `get_flow`, `dump_har`, `get_request_body`, `get_response_body`,
-`diff_flows`, `compare_flow`, `clear_flows`, `capture_shape`, `list_shapes`,
-`list_conversations`, `list_models`. Plus resources `proxy://requests` and
-`proxy://status`. Launch via the `ccproxy_mcp` console script.
+## Shape Artifacts
 
-## The shape replay system
+Shape replay uses provider-specific `.mflow` or patch artifacts to reproduce
+known-good SDK request envelopes while injecting live request content.
 
-### What it does
+Capture shape source traffic from a real CLI run:
 
-The shape system replays a captured `mitmproxy.http.HTTPFlow` (a real, known-good request from the target SDK) onto outbound flows that lack the provider's identity envelope. It bridges the gap between a bare SDK call and what the provider API requires for identity verification.
-
-**What gets stamped:**
-
-- Identity headers (e.g. `anthropic-beta`, `anthropic-version`, `user-agent`, `x-stainless-*`)
-- Anthropic billing header (re-signed per request via the `regenerate_billing_header` shape inner-DAG hook)
-- Body envelope fields (e.g. `metadata`, `user_prompt_id`) — regenerated per request
-- System prompt (per `merge_strategies.system`, e.g. `prepend_shape:2` keeps the first 2 shape blocks then appends incoming)
-- Cache breakpoint normalization (caching hooks strip excess `cache_control` and re-insert one at the optimal position)
-
-For Gemini, the cloudcode-pa body wrapping (`{model, project, request: {...}}`) is applied by the separate `gemini_cli` outbound hook, not by shape replay.
-
-### Capturing a shape
-
-1. Start ccproxy: `just up` (or `ccproxy start`)
-2. Run the target CLI through WireGuard so a real, valid flow is captured:
-
-   ```bash
-   ccproxy run --inspect -- claude -p "shape capture"
-   ```
-
-3. Capture the most recent matching flow as the provider's shape:
-
-   ```bash
-   ccproxy flows shape --provider anthropic
-   ```
-
-4. The shape is persisted as `~/.config/ccproxy/shaping/shapes/anthropic.mflow` and immediately active for reverse proxy and OAuth-injected flows.
-
-Re-capture whenever the target CLI version changes — Anthropic identity headers and the system prompt prefix evolve with releases.
-
-### How it fires
-
-The `shape` outbound hook only fires when:
-
-1. The flow came through the **reverse proxy** OR has the `ccproxy.oauth_injected` flag (so WireGuard passthrough flows aren't reshaped)
-2. The flow has a `TransformMeta` (matched a transform/redirect rule, or sentinel-key resolved to a Provider)
-
-### Configuration
-
-```yaml
-shaping:
-  enabled: true                                       # master switch
-  shapes_dir: ~/.config/ccproxy/shaping/shapes        # where .mflow files live
-  providers:
-    anthropic:
-      content_fields: [model, messages, tools, system, max_tokens, ...]
-      merge_strategies:
-        system: "prepend_shape:2"                     # keep first 2 shape system blocks
-      shape_hooks:
-        - ccproxy.shaping.regenerate                  # re-roll user_prompt_id, session_id, billing
-        - hook: ccproxy.shaping.caching.strip
-          params:
-            paths: ["system.*.cache_control"]
-        - hook: ccproxy.shaping.caching.insert
-          params:
-            path: "system.-1.cache_control"
-            value: {type: ephemeral}
-      preserve_headers: [authorization, x-api-key, x-goog-api-key, host]
-      strip_headers: [authorization, x-api-key, x-goog-api-key, content-length, host, transfer-encoding, connection]
-      capture:
-        path_pattern: "^/v1/messages"
-      billing:
-        salt: "${CCPROXY_BILLING_SALT}"               # required for Anthropic
-        seed: "${CCPROXY_BILLING_SEED}"
+```bash
+ccproxy start
+ccproxy run --inspect -- claude -p "shape capture"
+ccproxy flows list
+ccproxy shapes save anthropic
+ccproxy shapes save anthropic --mflow
 ```
 
-See [`docs/shaping.md`](../../docs/shaping.md) for the canonical reference.
+Audit packaged shape invariants:
 
-## Diagnosing flow issues
+```bash
+uv run ccproxy shapes audit
+```
+
+Shape guidance:
+
+- Packaged `.mflow` files must be minimal request-only artifacts.
+- Do not include responses, auth tokens, cookies, flow records, provider
+  responses, client snapshots, or captured TLS fingerprint metadata in packaged
+  defaults.
+- Anthropic and Gemini packaged defaults are distribution artifacts; normal
+  users should not need to capture their own shapes unless a provider SDK
+  behavior changed before a fixed release exists.
+- See `docs/shaping.md` for canonical shape behavior.
+
+## Diagnosing Problems
 
 ```
 Problem?
-│
-├─ Provider returns auth errors (401/403)
-│  ▶ Check: ccproxy flows compare --jq 'map(.[-1])' — what auth header reached upstream?
-│  ▶ Check: ccproxy.oauth_injected metadata / x-ccproxy-oauth-injected — did forward_oauth run?
-│  ▶ Check: providers[name].auth — does the token source resolve manually?
-│  ▶ Check: sentinel key format — sk-ant-oat-ccproxy-{provider} matches a providers entry
-│  ▶ Check: ccproxy logs -f | grep -E 'OAuth|refresh' — did OAuthAddon attempt a refresh+replay?
-│
-├─ Request not being transformed
-│  ▶ Check: ccproxy flows list — is the flow captured?
-│  ▶ Check: inspector.transforms rules — does match_host/match_path/match_model match?
-│  ▶ Check: ccproxy flows compare --jq 'map(.[-1])' — what URL changes were applied?
-│
-├─ Shape not applying (Anthropic 401/400)
-│  ▶ Check: ls ~/.config/ccproxy/shaping/shapes/anthropic.mflow — does the shape file exist?
-│  ▶ Check: ccproxy logs -f | grep -E 'shape|Applied' — did the shape hook fire?
-│  ▶ Check: flow mode — reverse proxy or oauth-injected? (shape_guard skips raw WireGuard)
-│  ▶ Check: TransformMeta — did the flow match a transform/redirect rule (or sentinel-key resolve)?
-│  ▶ Check: ccproxy.yaml — is the `shape` hook in `hooks.outbound`?
-│
-├─ Body format wrong / API rejection
-│  ▶ Run: ccproxy flows compare --jq 'map(.[-1])' — see client vs forwarded body diff
-│  ▶ Check: transform mode — "transform" (full rewrite via lightllm) vs "redirect" (preserve body)
-│  ▶ Check: gemini_cli hook — for cloudcode-pa flows, did the body get wrapped in {model, project, request}?
-│
-└─ System prompt issues
-   ▶ Run: ccproxy flows compare --jq 'map(.[-1])' — was the shape's system block prepended?
-   ▶ Check: merge_strategies.system in shaping config — usually `prepend_shape:N`
-   ▶ Check: client system format — list of blocks vs string vs absent (affects merging)
+|
++- ccproxy not capturing?
+|  -> ccproxy status --json
+|  -> For transparent capture: ccproxy namespace status --json
+|  -> For transparent capture: ccproxy namespace doctor --json
+|  -> Check same CCPROXY_CONFIG_DIR for start/run/status
+|
++- Provider returns 401/403?
+|  -> ccproxy flows compare --jq 'map(.[-1])'
+|  -> Check sentinel key: sk-ant-oat-ccproxy-{provider}
+|  -> Check providers.{name}.auth resolves manually
+|  -> Check ctx.metadata.auth_provider / auth_injected
+|  -> Check ccproxy logs for AuthAddon refresh/replay
+|
++- Request not transformed?
+|  -> ccproxy flows list --json
+|  -> Check inspector.transforms match_host/match_path/match_model
+|  -> Check sentinel key resolved to a Provider
+|  -> ccproxy flows compare --jq 'map(.[-1])'
+|
++- Shape not applied?
+|  -> Check hooks.outbound contains ccproxy.hooks.shape
+|  -> Check ccproxy shapes audit
+|  -> Check transform metadata exists for the flow
+|  -> Check flow source: reverse or auth-injected flows consume shapes
+|
++- Gemini fails?
+|  -> Check gemini_cli outbound hook
+|  -> Check Google auth source refresh behavior
+|  -> Check GeminiAddon capacity fallback logs
+|  -> Inspect forwarded body for cloudcode-pa envelope fields
+|
++- Privacy or artifact-sharing question?
+   -> Read docs/privacy.md
+   -> Prefer ccproxy namespace status --json over raw WireGuard config
+   -> Treat tls.keylog, wg.keylog, HAR files, and .mflow captures as sensitive
 ```
 
-## Reference files
+## Reference Files
 
-- [reference/flow-api-reference.md](reference/flow-api-reference.md) — mitmweb REST API endpoints, flow data model, content views, authentication
-- [docs/inspect.md](../../docs/inspect.md) — Inspector stack architecture
-- [docs/shaping.md](../../docs/shaping.md) — Request shaping system
+- `docs/privacy.md` - privacy model, sensitive artifacts, sharing guidance
+- `docs/inspect.md` - inspector stack architecture
+- `docs/shaping.md` - request shaping system
+- `docs/lightllm.md` - request/response transformation internals
+- `skills/using-ccproxy-inspector/reference/flow-api-reference.md` - mitmweb
+  REST API endpoints, flow data model, content views, authentication

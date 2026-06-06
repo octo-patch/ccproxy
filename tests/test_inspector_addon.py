@@ -121,6 +121,7 @@ class TestWireGuardDirectionDetection:
         flow = _make_wg_flow(host="api.anthropic.com")
         await addon.request(flow)
         assert flow.metadata.get("ccproxy.direction") == "inbound"
+        assert flow.metadata.get("ccproxy.source") == "wireguard"
 
     @pytest.mark.asyncio
     async def test_reverse_direction_is_inbound(self) -> None:
@@ -135,6 +136,7 @@ class TestWireGuardDirectionDetection:
         flow.request.content = None
         await addon.request(flow)
         assert flow.metadata.get("ccproxy.direction") == "inbound"
+        assert flow.metadata.get("ccproxy.source") == "reverse"
 
     @pytest.mark.asyncio
     async def test_wireguard_cli_does_not_forward_non_llm(self) -> None:
@@ -240,6 +242,7 @@ class TestRequestFlowStore:
         await addon.request(flow)
 
         assert flow.metadata.get(InspectorMeta.RECORD) is existing_record
+        assert existing_record.source == "wireguard"
 
 
 class TestResponseAndError:
