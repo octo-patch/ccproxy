@@ -76,12 +76,19 @@ def inject_auth(ctx: Context, _: dict[str, Any]) -> Context:
 
 
 def _get_auth_token(provider: str) -> str | None:
+    """Resolve the provider's token; config failures are fatal, not silent.
+
+    A config that cannot load or resolve must surface as ``AuthConfigError``
+    (the one exception the pipeline executor propagates) rather than letting
+    the request continue unauthenticated toward a deferred upstream 401.
+    """
     try:
         config = get_config()
         return config.resolve_auth_token(provider)
-    except Exception:
-        logger.exception("Failed to load auth config")
-        return None
+    except AuthConfigError:
+        raise
+    except Exception as exc:
+        raise AuthConfigError(f"Failed to load auth config for provider '{provider}': {exc}") from exc
 
 
 def _inject_token(ctx: Context, provider: str, token: str) -> None:

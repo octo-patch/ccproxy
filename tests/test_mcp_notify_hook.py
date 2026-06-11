@@ -126,7 +126,13 @@ def test_injects_pair_for_single_task():
     tr = user.parts[0]
     assert isinstance(tr, ToolReturnPart)
     assert tr.tool_call_id == tc.tool_call_id
-    assert json.loads(tr.content) == events
+    assert json.loads(tr.content) == {
+        "task_id": "task-1",
+        "status": "watching",
+        "session_id": "sess-1",
+        "events": events,
+        "events_count": 3,
+    }
 
     assert isinstance(final, ModelRequest)
     assert isinstance(final.parts[0], UserPromptPart)

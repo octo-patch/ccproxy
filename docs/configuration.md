@@ -456,7 +456,7 @@ ccproxy:
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `enabled` | bool | `false` | Master switch. When false, capacity errors pass through unchanged. |
+| `enabled` | bool | `true` | Master switch. When false, capacity errors pass through unchanged. |
 | `fallback_models` | list | `[]` | Models tried in order after sticky retries on the original are exhausted. |
 | `sticky_retry_attempts` | int | `3` | Same-model retries on the original model before falling through. Range 0–10. |
 | `sticky_retry_max_delay_seconds` | float | `60.0` | Per-attempt cap on `retryDelay`. If the server asks for longer, skip remaining sticky attempts and move to next candidate. |
@@ -526,10 +526,8 @@ ccproxy:
     provider_map:
       api.anthropic.com: anthropic
       api.openai.com: openai
-      generativelanguage.googleapis.com: google_ai_studio
-    readiness:
-      url: "https://1.1.1.1/"   # null to skip
-      timeout_seconds: 5.0
+      generativelanguage.googleapis.com: google
+      openrouter.ai: openrouter
     mitmproxy:
       ssl_insecure: true
       web_host: 127.0.0.1
@@ -569,21 +567,50 @@ The `inspector.mitmproxy` block passes options directly to mitmproxy's `OptManag
 
 ### Startup Readiness Probe
 
-Before ccproxy accepts traffic, it verifies it can reach the open internet. This catches broken routes, DNS failures, missing CA bundles, or namespace egress problems at startup — before any real requests are accepted. Set `url` to `null` to skip (e.g. air-gapped environments).
+Before ccproxy accepts traffic, it verifies it can reach the open internet. This catches broken routes, DNS failures, missing CA bundles, or namespace egress problems at startup — before any real requests are accepted. The probe is configured by three top-level fields (siblings of `host`/`port`, not under `inspector`):
 
 ```yaml
-inspector:
-  readiness:
-    url: "https://1.1.1.1/"   # null to skip
-    timeout_seconds: 5.0
+ccproxy:
+  verify_readiness_on_startup: true   # false to skip (e.g. air-gapped environments)
+  readiness_probe_url: "https://1.1.1.1/"
+  readiness_probe_timeout_seconds: 5.0
 ```
 
 At startup, ccproxy issues `HEAD <url>` via httpx. Any HTTP response (200, 301, 404) proves the full network stack works. Any exception is a **hard failure**: ccproxy refuses to start.
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `url` | string | `https://1.1.1.1/` | Canary URL. `null` skips the probe. Defaults to Cloudflare's 1.1.1.1 DNS (direct IP, globally reliable). |
-| `timeout_seconds` | float | `5.0` | Total timeout budget. Short by design — the probe is trivial. |
+| `verify_readiness_on_startup` | bool | `true` | Master switch. `false` skips the probe entirely. |
+| `readiness_probe_url` | string | `https://1.1.1.1/` | Canary URL. Defaults to Cloudflare's 1.1.1.1 DNS (direct IP, no DNS resolution required, globally reliable). |
+| `readiness_probe_timeout_seconds` | float | `5.0` | Total timeout budget. Short by design — the probe is trivial. |
+
+## MCP Server
+
+The daemon hosts a FastMCP streamable-HTTP server for flow inspection, shape capture, and Perplexity library tools. It binds its own internal port, and the proxy listener also forwards `/mcp` to it — MCP clients can use either `http://{mcp.http.host}:{mcp.http.port}/mcp` directly or `http://{host}:{port}/mcp` on the proxy socket. `POST /mcp/notify` on the proxy socket ingests fire-and-forget MCP terminal events into the notification buffer (drained by the `inject_mcp_notifications` hook; see `docs/mcp.md`).
+
+```yaml
+ccproxy:
+  mcp:
+    http:
+      enabled: true
+      host: 127.0.0.1
+      port: 4030
+      auth: null
+    buffer:
+      max_events_per_task: 65536
+      ttl_seconds: 600
+```
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `http.enabled` | bool | `true` | Host the MCP server (and the `/mcp` forward on the proxy listener). |
+| `http.host` | string | `127.0.0.1` | Internal bind address for the MCP uvicorn server. |
+| `http.port` | int | `4030` | Internal bind port. |
+| `http.auth` | auth source | `null` | Bearer token for MCP clients — plain string, or a `command`/`file` credential source. `null` disables auth. |
+| `buffer.max_events_per_task` | int | `65536` | Notification buffer capacity per task; oldest events drop first on overflow. |
+| `buffer.ttl_seconds` | int | `600` | Buffered events expire after this many seconds. |
+
+`POST /mcp/notify` requires no auth (fire-and-forget contract): it always answers `200`, with `{"status": "ok"}` on ingestion or `{"status": "error"}` for malformed payloads.
 
 ## Shaping Configuration
 

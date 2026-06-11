@@ -59,7 +59,8 @@ ccproxy flows {list,dump,diff,compare,repl,clear}  # Flow inspection
 ccproxy shapes {save,audit}            # Save shape from captured flows / audit packaged .mflow artifacts
 ccproxy namespace {status,doctor,wireguard-config}  # WireGuard namespace transparency tools
 # MCP server: streamable-HTTP, hosted in-daemon on cfg.mcp.http.port (default 4030; dev 4031)
-# clients connect to http://127.0.0.1:<port>/mcp with `Authorization: Bearer <token>`
+# clients connect to http://127.0.0.1:<port>/mcp with `Authorization: Bearer <token>`,
+# or to /mcp on the proxy port itself (forwarded to the same in-process server)
 ```
 
 ### Smoke Test
@@ -252,8 +253,11 @@ cascades into capacity fallback.
     Auth via `configure_auth(token, base_url)` before `streamable_http_app()`.
     Uvicorn lifecycle is in `inspector/process.py:run_inspector()` — `log_config=None` +
     `lifespan="on"` are both mandatory.
-  - `buffer.py` + `routes.py` — `NotificationBuffer` singleton + `POST /mcp/notify` ingestion (50
-    events/task, 600s TTL). **Currently unmounted** — leave untouched.
+  - `buffer.py` — `NotificationBuffer` singleton (default 65536 events/task, 600s TTL, lazy
+    expiry on ingest). Ingestion lives on the proxy listener: `inspector/routes/mcp.py` registers
+    `POST /mcp/notify` (fire-and-forget, 200-always, no auth) plus a `/mcp` rewrite that forwards
+    proxy-listener flows to the in-process FastMCP server — MCP clients can use either
+    `http://127.0.0.1:<mcp.http.port>/mcp` or `/mcp` on the proxy port.
 
 - **`flows.py` (CLI)** — `Flows*` tyro subcommands plus `MitmwebClient` for programmatic mitmweb
   REST access. Auth is Bearer token resolved from `inspector.mitmproxy.web_password`. All subcommands

@@ -1,7 +1,9 @@
 # ccproxy MCP Notification Injection — Implementation Specification
 
-**Version**: 1.0
-**Status**: Contract for implementation
+**Version**: 1.1
+**Status**: Implemented — endpoint at `POST /mcp/notify` on the proxy listener
+(`ccproxy.inspector.routes.mcp`), buffer in `ccproxy.mcp.buffer`, hook in
+`ccproxy.hooks.inject_mcp_notifications`
 **Producer**: mcptty (Go MCP server)
 **Consumer**: ccproxy (transparent LLM API interceptor with hook pipeline)
 
@@ -31,6 +33,9 @@ Claude Code  ──API HTTP───▶  ccproxy
 ### `POST /mcp/notify`
 
 Receives fire-and-forget event notifications from mcptty's `NotifyClient`.
+Served on the proxy listener (`http://{host}:{port}/mcp/notify`, default
+`http://127.0.0.1:4000/mcp/notify`) — the same socket SDK traffic uses. No
+authentication.
 
 **Request body**:
 ```json
@@ -108,10 +113,10 @@ class TaskBuffer:
 
 | Parameter | Value | Rationale |
 |-----------|-------|-----------|
-| Max events per task | 50 | Prevents unbounded growth |
-| Overflow strategy | Drop oldest | Matches mcptty's internal buffer |
-| TTL | 600 seconds (10 min) | Auto-cleanup stale tasks |
-| Cleanup interval | 60 seconds | Background sweep |
+| Max events per task | 65536 (`mcp.buffer.max_events_per_task`) | Prevents unbounded growth |
+| Overflow strategy | Drop oldest; a `ccproxy_buffer_overflow` marker event records the dropped count | Matches mcptty's internal buffer, keeps loss visible |
+| TTL | 600 seconds (`mcp.buffer.ttl_seconds`) | Auto-cleanup stale tasks |
+| Cleanup | Lazy — each `/mcp/notify` ingest sweeps entries idle past the TTL | No background thread needed |
 
 ### Operations
 
@@ -274,23 +279,15 @@ hooks:
   - ccproxy.hooks.inject_mcp_notifications
 
 # Optional — defaults shown
-mcp_notifications:
-  max_events_per_task: 50
-  max_injection_tokens: 2000
-  ttl_seconds: 600
-  coalesce_tier1: true
+mcp:
+  buffer:
+    max_events_per_task: 65536
+    ttl_seconds: 600
 ```
 
 ### Feature Toggle
 
-When `inject_mcp_notifications` is not in the hooks list, the `/mcp/notify` endpoint should still accept and buffer events (allows enabling the hook without restarting mcptty), but the hook never fires.
-
-Alternatively, if the endpoint itself should be gated:
-
-```yaml
-mcp_notifications:
-  enabled: false  # disables both endpoint and hook
-```
+When `inject_mcp_notifications` is not in the hooks list, the `/mcp/notify` endpoint still accepts and buffers events (allows enabling the hook without restarting mcptty), but the hook never fires. The endpoint itself is always live on the proxy listener — there is no separate toggle.
 
 ---
 

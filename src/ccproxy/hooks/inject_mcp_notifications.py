@@ -19,7 +19,7 @@ Integration flow::
        this hook drains all buffered events and synthesizes message pairs::
 
            ModelResponse with ToolCallPart (tasks_get)
-           ModelRequest with ToolReturnPart (events JSON)
+           ModelRequest with ToolReturnPart (tasks_get return-schema JSON)
 
        Pairs are inserted immediately before the final user message.
 
@@ -27,7 +27,7 @@ Integration flow::
        ``extract_session_id`` inbound hook) must match the ``session_id`` from
        the notification POST.
 
-See also: ``ccproxy.mcp.buffer``, ``ccproxy.mcp.routes``.
+See also: ``ccproxy.mcp.buffer``, ``ccproxy.inspector.routes.mcp``.
 """
 
 from __future__ import annotations
@@ -84,11 +84,20 @@ def inject_mcp_notifications(ctx: Context, params: dict[str, Any]) -> Context:
             ]
         )
 
+        # Content mirrors tasks_get's return schema so the injected pair is
+        # indistinguishable from the model having called the tool itself.
+        task_result = {
+            "task_id": task_id,
+            "status": "watching",
+            "session_id": session_id,
+            "events": events,
+            "events_count": len(events),
+        }
         user_msg = ModelRequest(
             parts=[
                 ToolReturnPart(
                     tool_name="tasks_get",
-                    content=json.dumps(events),
+                    content=json.dumps(task_result),
                     tool_call_id=tool_call_id,
                 ),
             ]

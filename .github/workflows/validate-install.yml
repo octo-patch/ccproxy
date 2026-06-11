@@ -12,6 +12,38 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  unit-tests:
+    name: unit tests (Python 3.13)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+      - name: Pin Python 3.13
+        run: uv python install 3.13
+      - name: Sync environment
+        run: uv sync
+      - name: Run test suite (coverage gate from pyproject addopts)
+        run: uv run pytest
+
+  quality:
+    name: lint + typecheck
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+      - name: Pin Python 3.13
+        run: uv python install 3.13
+      - name: Sync environment
+        run: uv sync
+      - name: Ruff
+        run: uv run ruff check .
+      - name: Mypy
+        run: uv run mypy src/ccproxy
+
   nix-check:
     name: nix flake check
     runs-on: ubuntu-24.04

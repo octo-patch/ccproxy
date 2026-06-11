@@ -15,24 +15,12 @@ from unittest.mock import AsyncMock, patch
 import httpx
 import pytest
 
-from ccproxy.transport import UnknownFingerprintProfileError, reset_cache
+from ccproxy.transport import UnknownFingerprintProfileError
 from ccproxy.transport.sidecar import (
     IMPERSONATE_HEADER,
     TARGET_URL_HEADER,
     Sidecar,
 )
-
-# ---------------------------------------------------------------------------
-# Autouse cleanup: reset the dispatch cache between tests.
-# ---------------------------------------------------------------------------
-
-
-@pytest.fixture(autouse=True)
-def _reset_transport_cache():
-    reset_cache()
-    yield
-    reset_cache()
-
 
 # ---------------------------------------------------------------------------
 # Async transport that delegates to a swappable handler.

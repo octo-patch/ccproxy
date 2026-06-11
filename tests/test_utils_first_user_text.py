@@ -250,3 +250,9 @@ GEMINI_TEXT_CASES: list[GeminiTextCase] = [
 def test_extract_first_user_text_gemini(test_case: GeminiTextCase) -> None:
     """Verify Gemini-shape first-user-text extraction."""
     assert extract_first_user_text_gemini(contents=test_case.contents) == test_case.expected
+
+
+def test_extract_first_user_text_gemini_non_dict_part_skipped() -> None:
+    """Non-dict entries in parts are skipped; first text dict wins."""
+    contents = [{"role": "user", "parts": ["not-a-dict", {"text": "real text"}]}]
+    assert extract_first_user_text_gemini(contents=contents) == "real text"

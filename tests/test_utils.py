@@ -1,12 +1,16 @@
 """Tests for ccproxy utilities."""
 
+import io
 import json
 from datetime import timedelta
 from pathlib import Path
+from typing import Any
 from unittest.mock import Mock, patch
 
 import pytest
+from rich.console import Console
 
+import ccproxy.utils as utils_mod
 from ccproxy.utils import calculate_duration_ms, get_template_file, get_templates_dir, parse_session_id
 
 
@@ -235,3 +239,328 @@ class TestParseSessionId:
 
     def test_empty_string(self) -> None:
         assert parse_session_id("") is None
+
+
+# ---------------------------------------------------------------------------
+# Helpers shared by the debug-table tests below
+# ---------------------------------------------------------------------------
+
+
+def _capture(fn: Any, *args: Any, **kwargs: Any) -> str:
+    """Run fn(*args, **kwargs) with the module-level console redirected to a buffer."""
+    buf = io.StringIO()
+    original = utils_mod.console
+    utils_mod.console = Console(file=buf, no_color=True, width=160)
+    try:
+        fn(*args, **kwargs)
+    finally:
+        utils_mod.console = original
+    return buf.getvalue()
+
+
+# ---------------------------------------------------------------------------
+# _format_value — remaining branches
+# ---------------------------------------------------------------------------
+
+
+class TestFormatValueAllBranches:
+    def test_none_returns_dim_markup(self) -> None:
+        from ccproxy.utils import _format_value
+
+        assert _format_value(None) == "[dim]None[/dim]"
+
+    def test_true_returns_green_markup(self) -> None:
+        from ccproxy.utils import _format_value
+
+        assert _format_value(True) == "[green]True[/green]"
+
+    def test_false_returns_red_markup(self) -> None:
+        from ccproxy.utils import _format_value
+
+        assert _format_value(False) == "[red]False[/red]"
+
+    def test_int_returns_cyan_markup(self) -> None:
+        from ccproxy.utils import _format_value
+
+        assert _format_value(42) == "[cyan]42[/cyan]"
+
+    def test_float_returns_cyan_markup(self) -> None:
+        from ccproxy.utils import _format_value
+
+        assert _format_value(3.14) == "[cyan]3.14[/cyan]"
+
+    def test_list_returns_dim_with_length(self) -> None:
+        from ccproxy.utils import _format_value
+
+        result = _format_value([1, 2, 3])
+        assert "list" in result
+        assert "3" in result
+
+    def test_tuple_returns_dim_with_length(self) -> None:
+        from ccproxy.utils import _format_value
+
+        result = _format_value((10, 20))
+        assert "tuple" in result
+        assert "2" in result
+
+    def test_dict_returns_dim_with_length(self) -> None:
+        from ccproxy.utils import _format_value
+
+        result = _format_value({"a": 1, "b": 2})
+        assert "dict" in result
+        assert "2" in result
+
+    def test_callable_returns_magenta_with_parens(self) -> None:
+        from ccproxy.utils import _format_value
+
+        result = _format_value(len)
+        assert "len()" in result
+
+    def test_arbitrary_object_str_representation(self) -> None:
+        from ccproxy.utils import _format_value
+
+        class Obj:
+            def __str__(self) -> str:
+                return "my_obj"
+
+        assert "my_obj" in _format_value(Obj())
+
+    def test_object_truncation_with_max_width(self) -> None:
+        from ccproxy.utils import _format_value
+
+        class Big:
+            def __str__(self) -> str:
+                return "x" * 100
+
+        result = _format_value(Big(), max_width=10)
+        assert "..." in result
+        assert len(result) <= 13  # 10 - 3 + "..." + possible markup
+
+    def test_no_max_width_no_truncation(self) -> None:
+        from ccproxy.utils import _format_value
+
+        long_str = "y" * 200
+        result = _format_value(long_str)
+        assert "..." not in result
+
+    def test_string_with_markup_chars_escaped(self) -> None:
+        from ccproxy.utils import _format_value
+
+        result = _format_value("[bold]text")
+        assert r"\[" in result
+
+
+# ---------------------------------------------------------------------------
+# debug_table and its dispatch branches
+# ---------------------------------------------------------------------------
+
+
+class TestDebugTableDispatch:
+    def test_dict_input_prints_keys(self) -> None:
+        from ccproxy.utils import debug_table
+
+        output = _capture(debug_table, {"alpha": 1, "beta": "two"})
+        assert "alpha" in output
+        assert "beta" in output
+
+    def test_dict_with_title_prints_title(self) -> None:
+        from ccproxy.utils import debug_table
+
+        output = _capture(debug_table, {"k": "v"}, title="MyTitle")
+        assert "MyTitle" in output
+
+    def test_list_input_prints_indices(self) -> None:
+        from ccproxy.utils import debug_table
+
+        output = _capture(debug_table, [10, 20, 30])
+        assert "0" in output
+        assert "1" in output
+        assert "2" in output
+
+    def test_tuple_input_prints_indices(self) -> None:
+        from ccproxy.utils import debug_table
+
+        output = _capture(debug_table, (100, 200))
+        assert "0" in output
+
+    def test_object_with_dict_prints_attributes(self) -> None:
+        from ccproxy.utils import debug_table
+
+        class Obj:
+            def __init__(self) -> None:
+                self.x = 1
+                self.y = "hello"
+
+        output = _capture(debug_table, Obj())
+        assert "x" in output
+        assert "y" in output
+
+    def test_object_with_show_methods_includes_callable(self) -> None:
+        from ccproxy.utils import debug_table
+
+        class Obj:
+            def greet(self) -> str:
+                return "hi"
+
+        output = _capture(debug_table, Obj(), show_methods=True)
+        assert "greet" in output
+
+    def test_fallback_bare_value_printed(self) -> None:
+        from ccproxy.utils import debug_table
+
+        output = _capture(debug_table, 42)
+        assert "42" in output
+
+    def test_compact_false_branch_dict(self) -> None:
+        from ccproxy.utils import debug_table
+
+        output = _capture(debug_table, {"k": "v"}, compact=False)
+        assert "k" in output
+
+    def test_compact_false_branch_list(self) -> None:
+        from ccproxy.utils import debug_table
+
+        output = _capture(debug_table, [1, 2], compact=False)
+        assert "0" in output
+
+    def test_max_width_passed_to_print_dict(self) -> None:
+        from ccproxy.utils import debug_table
+
+        output = _capture(debug_table, {"k": "x" * 200}, max_width=20)
+        assert "k" in output
+
+
+# ---------------------------------------------------------------------------
+# dt (alias)
+# ---------------------------------------------------------------------------
+
+
+class TestDt:
+    def test_dt_is_alias_for_debug_table(self) -> None:
+        from ccproxy.utils import dt
+
+        output = _capture(dt, {"key": "value"})
+        assert "key" in output
+
+
+# ---------------------------------------------------------------------------
+# dv — debug variables
+# ---------------------------------------------------------------------------
+
+
+class TestDv:
+    def test_positional_args_printed(self) -> None:
+        from ccproxy.utils import dv
+
+        output = _capture(dv, 42, "hello")
+        assert "42" in output
+        assert "hello" in output
+
+    def test_kwargs_printed(self) -> None:
+        from ccproxy.utils import dv
+
+        output = _capture(dv, count=5, name="test")
+        assert "count" in output
+        assert "name" in output
+        assert "test" in output
+
+    def test_mixed_positional_and_kwargs(self) -> None:
+        from ccproxy.utils import dv
+
+        output = _capture(dv, 99, label="foo")
+        assert "99" in output
+        assert "label" in output
+        assert "foo" in output
+
+
+# ---------------------------------------------------------------------------
+# d — ultra-compact debug print
+# ---------------------------------------------------------------------------
+
+
+class TestD:
+    def test_dict_dispatches_to_debug_table(self) -> None:
+        from ccproxy.utils import d
+
+        output = _capture(d, {"k": "v"})
+        assert "k" in output
+
+    def test_with_width_parameter(self) -> None:
+        from ccproxy.utils import d
+
+        output = _capture(d, {"k": "x" * 50}, w=20)
+        assert "k" in output
+
+
+# ---------------------------------------------------------------------------
+# p — minimal compact debug print
+# ---------------------------------------------------------------------------
+
+
+class TestP:
+    def test_dict_prints_key_value(self) -> None:
+        from ccproxy.utils import p
+
+        output = _capture(p, {"mykey": "myval"})
+        assert "mykey" in output
+
+    def test_list_prints_indices(self) -> None:
+        from ccproxy.utils import p
+
+        output = _capture(p, [10, 20])
+        assert "0" in output
+
+    def test_tuple_prints_indices(self) -> None:
+        from ccproxy.utils import p
+
+        output = _capture(p, (30, 40))
+        assert "0" in output
+
+    def test_object_with_dict_prints_attrs(self) -> None:
+        from ccproxy.utils import p
+
+        class Obj:
+            def __init__(self) -> None:
+                self.public_attr = "exposed"
+                self._private = "hidden"
+
+        output = _capture(p, Obj())
+        assert "public_attr" in output
+        assert "_private" not in output
+
+    def test_fallback_bare_value_printed(self) -> None:
+        from ccproxy.utils import p
+
+        # A bare int has no __dict__ — falls to console.print(obj)
+        output = _capture(p, 12345)
+        assert "12345" in output
+
+
+class TestPrintObjectEdgeCases:
+    def test_callable_attributes_skipped_when_show_methods_false(self) -> None:
+        from ccproxy.utils import _print_object
+
+        class ObjWithMethod:
+            data = "value"
+
+            def compute(self) -> int:
+                return 42
+
+        output = _capture(_print_object, ObjWithMethod(), "Title", None, False, True)
+        assert "data" in output
+        assert "compute" not in output
+
+    def test_attribute_raising_exception_stored_as_placeholder(self) -> None:
+        from ccproxy.utils import _print_object
+
+        class Tricky:
+            @property
+            def explodes(self) -> str:
+                raise RuntimeError("access denied")
+
+            normal = "ok"
+
+        output = _capture(_print_object, Tricky(), "Tricky", None, False, True)
+        assert "normal" in output
+        assert "explodes" in output
+        assert "unable to access" in output

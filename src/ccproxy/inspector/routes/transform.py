@@ -504,5 +504,15 @@ def register_transform_routes(router: InspectorRouter) -> None:
                 meta.model,
                 inbound_enum.value,
             )
-        except Exception:
-            logger.warning("Response transform failed, passing through raw response", exc_info=True)
+        except Exception as exc:
+            # Passing the untransformed provider body through would hand the
+            # client the wrong wire format; fail loudly in the format it expects.
+            logger.warning("Response transform failed, returning 500 to client", exc_info=True)
+            flow.response.status_code = 500
+            flow.response.content = _openai_error(
+                f"ccproxy response transform failed: {exc}",
+                error_type="api_error",
+                code=500,
+            )
+            flow.response.headers["content-type"] = "application/json"
+            flow.response.headers.pop("content-encoding", None)  # type: ignore[no-untyped-call]

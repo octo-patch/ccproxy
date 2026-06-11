@@ -113,6 +113,7 @@ def _make_transform_router() -> Any:
     # deferred: heavy mitmproxy router chain
     from ccproxy.inspector.router import InspectorRouter
     from ccproxy.inspector.routes.health import register_health_routes
+    from ccproxy.inspector.routes.mcp import register_mcp_routes
     from ccproxy.inspector.routes.models import register_models_routes
     from ccproxy.inspector.routes.pplx import register_pplx_routes
     from ccproxy.inspector.routes.transform import register_transform_routes
@@ -126,6 +127,7 @@ def _make_transform_router() -> Any:
     # catch-all so they win on exact match.
     register_models_routes(router)
     register_health_routes(router)
+    register_mcp_routes(router)
     register_pplx_routes(router)
     register_transform_routes(router)
     return router

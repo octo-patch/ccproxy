@@ -53,10 +53,14 @@ healthy, 3 if both are down.
 ### View logs
 
 ```bash
-ccproxy logs              # auto-discovers: systemd journal, process-compose, or log file
+ccproxy logs              # tail the daemon log file ($CCPROXY_CONFIG_DIR/ccproxy.log)
 ccproxy logs -f           # follow
 ccproxy logs -n 50        # last 50 lines
 ```
+
+For journal-routed logging (`use_journal: true`) read `journalctl --user -t <identifier>`
+directly; for a process-compose-supervised dev instance use
+`process-compose process logs ccproxy`.
 
 * * *
 
@@ -129,44 +133,47 @@ default. On Windows, this path is supported only inside WSL2; use the
 Every request passes through a fixed addon chain:
 
 ```
-┌────────────────┐
-│  ReadySignal   │  Startup synchronization
-└───────┬────────┘
-        │
-┌───────▼────────┐
-│ InspectorAddon │  Flow capture, OTel spans, client request snapshot, SSE streaming
-└───────┬────────┘
-        │
-┌───────▼────────┐
-│ MultiHARSaver  │  ccproxy.dump command (multi-page HAR export)
-└───────┬────────┘
-        │
-┌───────▼────────┐
-│ ShapeCapturer  │  ccproxy.shape command (validate + persist .mflow)
-└───────┬────────┘
-        │
-┌───────▼────────┐
-│ Inbound Hooks  │  OAuth token injection, session ID extraction
-└───────┬────────┘
-        │
-┌───────▼────────┐
-│   Transform    │  Route matching, provider dispatch (passthrough / redirect / transform)
-└───────┬────────┘
-        │
-┌───────▼────────┐
-│ Outbound Hooks │  Gemini envelope wrap, MCP notification injection, verbose mode, shape replay, commitbee compat
-└───────┬────────┘
-        │
-┌───────▼────────┐
-│   AuthAddon    │  401-detect → refresh → replay (for auth-injected flows)
-└───────┬────────┘
-        │
-┌───────▼────────┐
-│  GeminiAddon   │  Gemini capacity fallback + cloudcode-pa envelope unwrap
-└───────┬────────┘
-        │
-        ▼
-   Provider API
+┌─────────────────────────┐
+│       ReadySignal       │  Startup synchronization
+└────────────┬────────────┘
+┌────────────▼────────────┐
+│     InspectorAddon      │  Flow capture, OTel spans, client request snapshot, SSE streaming
+└────────────┬────────────┘
+┌────────────▼────────────┐
+│ FingerprintCaptureAddon │  TLS ClientHello capture (JA3/JA4 material for shapes)
+└────────────┬────────────┘
+┌────────────▼────────────┐
+│      MultiHARSaver      │  ccproxy.dump command (multi-page HAR export)
+└────────────┬────────────┘
+┌────────────▼────────────┐
+│      ShapeCapturer      │  ccproxy.shape command (validate + persist .mflow)
+└────────────┬────────────┘
+┌────────────▼────────────┐
+│      Inbound Hooks      │  Auth token injection, session ID extraction, Perplexity ingest
+└────────────┬────────────┘
+┌────────────▼────────────┐
+│        Transform        │  Route matching, provider dispatch (passthrough / redirect / transform)
+└────────────┬────────────┘
+┌────────────▼────────────┐
+│     Outbound Hooks      │  Gemini envelope wrap, Perplexity headers, MCP notification injection, verbose mode, shape replay, commitbee compat
+└────────────┬────────────┘
+┌────────────▼────────────┐
+│ TransportOverrideAddon  │  Reroute fingerprint-profile providers through the curl-cffi sidecar
+└────────────┬────────────┘
+┌────────────▼────────────┐
+│        AuthAddon        │  401-detect → refresh → replay (for auth-injected flows)
+└────────────┬────────────┘
+┌────────────▼────────────┐
+│       GeminiAddon       │  Gemini capacity fallback + cloudcode-pa envelope unwrap
+└────────────┬────────────┘
+┌────────────▼────────────┐
+│     PerplexityAddon     │  Perplexity SSE patching + thread bookkeeping
+└────────────┬────────────┘
+┌────────────▼────────────┐
+│  EgressSanitizerAddon   │  Strip ccproxy-internal headers before egress
+└────────────┬────────────┘
+             ▼
+        Provider API
 ```
 
 ### InspectorAddon
@@ -510,15 +517,26 @@ flows:
 
 * * *
 
-## 8. MCP Notification Buffer
+## 8. MCP Server & Notification Buffer
 
-ccproxy exposes a `POST /mcp/notify` endpoint that accepts MCP terminal events:
+The daemon hosts a FastMCP streamable-HTTP server (flow inspection, shape
+capture, conversation grouping, model catalog, Perplexity tools). MCP clients
+connect to `http://127.0.0.1:4030/mcp` (the `mcp.http` bind) or to
+`/mcp` on the proxy port itself — the proxy listener forwards it to the same
+in-process server. Bearer auth is configured at `mcp.http.auth`.
 
-```json
-{"task_id": "...", "session_id": "...", "event": {...}}
+The proxy listener also exposes `POST /mcp/notify`, which accepts MCP terminal
+events fire-and-forget (no auth, always answers 200):
+
+```bash
+curl -X POST http://127.0.0.1:4000/mcp/notify \
+  -H 'Content-Type: application/json' \
+  -d '{"task_id": "...", "session_id": "...", "event": {...}}'
 ```
 
-Events are buffered per task (max 50, FIFO, 600s TTL). The
+Events are buffered per task (default max 65536 events, FIFO drop on
+overflow, 600s TTL — see `mcp.buffer` in
+[docs/configuration.md](docs/configuration.md)). The
 `inject_mcp_notifications` outbound hook drains the buffer for the current
 session and injects events as synthetic tool_use/tool_result pairs before the
 final user message in the conversation.

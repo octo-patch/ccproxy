@@ -16,7 +16,6 @@ from ccproxy.hooks.gemini_cli import (
     gemini_cli,
     gemini_cli_guard,
     prewarm_project,
-    reset_cache,
 )
 from ccproxy.pipeline.context import Context
 
@@ -45,13 +44,6 @@ def _make_ctx(
         flow.metadata["ccproxy.conversation_id"] = conversation_id
     flow.metadata[InspectorMeta.RECORD] = FlowRecord(direction="inbound")
     return Context.from_flow(flow)
-
-
-@pytest.fixture(autouse=True)
-def reset_project_cache():
-    reset_cache()
-    yield
-    reset_cache()
 
 
 class TestGuard:

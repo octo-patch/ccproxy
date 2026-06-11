@@ -752,7 +752,7 @@ class TestResponseTransformExceptionHandling:
         "ccproxy.lightllm.graph.buffered.transform_buffered_response_sync",
         side_effect=RuntimeError("transform exploded"),
     )
-    def test_transform_exception_passes_through(self, _mock_transform: MagicMock) -> None:
+    def test_transform_exception_returns_500_error(self, _mock_transform: MagicMock) -> None:
         config = CCProxyConfig()
         set_config_instance(config)
 
@@ -785,8 +785,12 @@ class TestResponseTransformExceptionHandling:
         flow.metadata = {InspectorMeta.DIRECTION: "inbound", InspectorMeta.RECORD: record}
         flow.server_conn = MagicMock()
 
-        original_content = flow.response.content
         router.response(flow)
 
-        # Response content unchanged — exception was caught
-        assert flow.response.content == original_content
+        # The untransformed provider body would be the wrong wire format for
+        # the client — the route replaces it with an OpenAI-shape 500 error.
+        assert flow.response.status_code == 500
+        error = json.loads(flow.response.content)["error"]
+        assert error["type"] == "api_error"
+        assert error["code"] == 500
+        assert "transform exploded" in error["message"]
