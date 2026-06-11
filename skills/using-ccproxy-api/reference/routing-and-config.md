@@ -71,7 +71,7 @@ ccproxy:
 
   shaping:
     enabled: true
-    shapes_dir: ~/.config/ccproxy/shaping/shapes
+    shapes_dir: ~/.config/ccproxy/shapes
 
   inspector:
     port: 8083

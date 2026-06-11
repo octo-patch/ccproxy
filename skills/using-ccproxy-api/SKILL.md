@@ -219,7 +219,7 @@ ccproxy:
 
   shaping:
     enabled: true
-    shapes_dir: ~/.config/ccproxy/shaping/shapes
+    shapes_dir: ~/.config/ccproxy/shapes
 
   inspector:
     port: 8083
@@ -283,13 +283,13 @@ hooks:
 
 ### Shape replay -- where identity comes from
 
-ccproxy does **not** synthesize Claude Code identity headers in code. Anthropic-bound traffic depends on a captured shape: a real `mitmproxy.http.HTTPFlow` from the Claude CLI persisted as `~/.config/ccproxy/shaping/shapes/anthropic.mflow`. The `shape` hook replays it on every outbound flow, providing user-agent, anthropic-beta, x-stainless-*, the signed `x-anthropic-billing-header`, and the system prompt prefix.
+ccproxy does **not** synthesize Claude Code identity headers in code. Anthropic-bound traffic depends on a shape: a real `mitmproxy.http.HTTPFlow` from the Claude CLI persisted as a `.mflow` file. ccproxy ships a packaged default shape for Anthropic; a user-captured shape at `~/.config/ccproxy/shapes/anthropic.mflow` overrides it. The `shape` hook replays the shape on every outbound flow, providing user-agent, anthropic-beta, x-stainless-*, the signed `x-anthropic-billing-header`, and the system prompt prefix.
 
-If no shape exists for the `anthropic` provider -- or if the captured shape is from an outdated Claude CLI release -- Anthropic will reject the request with 401/400. Capture (or refresh) the shape with:
+If the shape in effect is from an outdated Claude CLI release, Anthropic will reject the request with 401/400. Capture (or refresh) a local override with:
 
 ```bash
 ccproxy run --inspect -- claude -p "shape capture"
-ccproxy flows shape --provider anthropic
+ccproxy shapes save anthropic
 ```
 
 See [`docs/shaping.md`](../../docs/shaping.md) for the canonical reference (capture workflow, shape inner-DAG hooks, billing salt configuration, custom hooks).
@@ -468,7 +468,7 @@ ccproxy logs -n 50          # Last 50 lines
 
 ## Known limitations (upstream flake issues)
 
-1. **Captured shape required for Anthropic** — there is no synthetic-identity fallback. If `~/.config/ccproxy/shaping/shapes/anthropic.mflow` is missing or from an outdated Claude CLI release, requests fail with 401/400. Capture via `ccproxy flows shape --provider anthropic`.
+1. **Shape required for Anthropic** — there is no synthetic-identity fallback. If the packaged default (or a user-captured override at `~/.config/ccproxy/shapes/anthropic.mflow`) is stale for the current Claude CLI release, requests fail with 401/400. Refresh via `ccproxy shapes save anthropic`.
 2. **`devConfig` overwrites `inspector` atomically** — top-level `//` merge on `inspector` drops sub-keys not re-specified. Deep merge each nested attrset explicitly: `defaults.inspector // { ... }`.
 3. **`supportedSystems` limited** — only `x86_64-linux` and `aarch64-linux`; `aarch64-darwin` not supported.
 

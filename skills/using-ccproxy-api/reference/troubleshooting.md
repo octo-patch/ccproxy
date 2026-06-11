@@ -46,14 +46,14 @@ ccproxy flows compare --jq 'map(.[-1])'   # client-vs-forwarded for the latest f
 1. Confirm a shape file exists:
 
    ```bash
-   ls -la ~/.config/ccproxy/shaping/shapes/anthropic.mflow
+   ls -la ~/.config/ccproxy/shapes/anthropic.mflow
    ```
 
 2. Capture (or refresh) a shape from a real Claude CLI run:
 
    ```bash
    ccproxy run --inspect -- claude -p "shape capture"
-   ccproxy flows shape --provider anthropic
+   ccproxy shapes save anthropic
    ```
 
 3. Verify the `shape` hook is in `hooks.outbound` in your `ccproxy.yaml`. Without it the shape is never replayed.

@@ -13,7 +13,7 @@ Cross-provider request and response transformation is handled by `lightllm`, a
 surgical adapter and streaming-FSM layer inside ccproxy — no LiteLLM proxy
 subprocess, no gateway server.
 
-**New in 2.0 beta**: DeepSeek V4 routing support — redirect Anthropic-format
+**New in 2.0**: DeepSeek V4 routing support — redirect Anthropic-format
 requests to DeepSeek’s `/anthropic/v1/messages` endpoint with a single transform
 rule. See [Configuration](#configuration) for the routing setup.
 

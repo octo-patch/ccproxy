@@ -55,7 +55,9 @@ ccproxy run [--inspect] -- <cmd>       # Run command with proxy env vars / WireG
 ccproxy status [--proxy] [--inspect] [--mcp] [--mermaid]  # Health check (bitmask exit codes: 1=proxy, 2=inspect, 4=mcp); --mermaid emits hook DAGs as stateDiagram-v2
 ccproxy init [--force]                 # Initialize ~/.config/ccproxy/ccproxy.yaml
 ccproxy logs [-f] [-n LINES]           # Tail $CCPROXY_CONFIG_DIR/ccproxy.log
-ccproxy flows {list,dump,diff,compare,clear,shape}  # Flow inspection
+ccproxy flows {list,dump,diff,compare,repl,clear}  # Flow inspection
+ccproxy shapes {save,audit}            # Save shape from captured flows / audit packaged .mflow artifacts
+ccproxy namespace {status,doctor,wireguard-config}  # WireGuard namespace transparency tools
 # MCP server: streamable-HTTP, hosted in-daemon on cfg.mcp.http.port (default 4030; dev 4031)
 # clients connect to http://127.0.0.1:<port>/mcp with `Authorization: Bearer <token>`
 ```

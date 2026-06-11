@@ -158,7 +158,7 @@ Every request passes through a fixed addon chain:
 └───────┬────────┘
         │
 ┌───────▼────────┐
-│  OAuthAddon    │  401-detect → refresh → replay (for oauth-injected flows)
+│   AuthAddon    │  401-detect → refresh → replay (for auth-injected flows)
 └───────┬────────┘
         │
 ┌───────▼────────┐
@@ -192,11 +192,16 @@ responses with `content-type: text/event-stream`.
 Run before the transform stage.
 Default hooks:
 
-- **`forward_oauth`** — Detects sentinel API keys (see
+- **`inject_auth`** — Detects sentinel API keys (see
   [OAuth](#5-oauth-and-sentinel-keys)) and substitutes real tokens from
   configured credential sources.
 - **`extract_session_id`** — Parses `metadata.user_id` from the request body and
   stores the session ID for downstream hooks (MCP notification injection).
+- **`extract_pplx_files`** — For Perplexity Pro traffic, uploads `image_url`
+  attachments through Perplexity's S3 batch chain and rewrites the body to
+  reference the uploaded files.
+- **`pplx_thread_inject`** — Resolves Perplexity Pro thread continuation
+  (explicit body session_id, organic L1 cache hit, or pass-through).
 
 ### Transform
 
@@ -212,6 +217,10 @@ Default hooks:
 - **`gemini_cli`** — For Gemini sentinel-key traffic, wraps the body in the
   `v1internal` envelope, conditionally masquerades `google-genai-sdk/*` UAs as
   the Gemini CLI, and rewrites the path to `cloudcode-pa.googleapis.com`.
+- **`pplx_stamp_headers`** — For Perplexity Pro traffic, swaps Bearer auth for
+  the browser-shape Cookie + UA + Origin + sec-fetch-* header bundle.
+- **`pplx_preflight`** — Best-effort `GET /search/new?q=...` warm-up before a
+  Perplexity Pro ask.
 - **`inject_mcp_notifications`** — Drains buffered MCP terminal events for the
   current session and injects them as synthetic tool_use/tool_result message
   pairs before the final user message.
@@ -226,8 +235,8 @@ Default hooks:
 - **`commitbee_compat`** — Last-mile compatibility shim for the commitbee
   tool — appends a raw-JSON instruction to its system prompt.
 
-`OAuthAddon` and `GeminiAddon` run after this stage as full mitmproxy addons
-(not pipeline hooks): `OAuthAddon` handles 401 detection / refresh / replay,
+`AuthAddon` and `GeminiAddon` run after this stage as full mitmproxy addons
+(not pipeline hooks): `AuthAddon` handles 401 detection / refresh / replay,
 and `GeminiAddon` handles Gemini capacity fallback (sticky retry on 429/503
 plus walking `gemini_capacity.fallback_models`) and cloudcode-pa envelope
 unwrapping for streaming and buffered responses.
@@ -238,7 +247,7 @@ Hooks declare data dependencies (`reads` and `writes`) and are sorted into a DAG
 via topological sort.
 Hooks that don't depend on each other can run in parallel.
 Errors in one hook don't block others — the sole exception is
-`OAuthConfigError`, which is fatal and propagates through the pipeline.
+`AuthConfigError`, which is fatal and propagates through the pipeline.
 
 Hooks can be configured per-request via the `x-ccproxy-hooks` header:
 
@@ -255,7 +264,7 @@ x-ccproxy-hooks: +extra_hook,-verbose_mode
 Transform rules — `TransformOverride` entries under `inspector.transforms` —
 are an optional override layer on top of sentinel-driven Provider routing.
 The default list is empty; most routing comes from `providers` via
-`forward_oauth`'s sentinel detection. Override rules cover edge cases:
+`inject_auth`'s sentinel detection. Override rules cover edge cases:
 forcing a specific destination for a path/model/host combination, bypassing
 auth for a specific host, etc.
 Rules are evaluated in order; first match wins.
@@ -350,7 +359,7 @@ credential from a configured source.
 sk-ant-oat-ccproxy-{provider}
 ```
 
-For example, `sk-ant-oat-ccproxy-anthropic` tells the `forward_oauth` hook to
+For example, `sk-ant-oat-ccproxy-anthropic` tells the `inject_auth` hook to
 resolve the real token from `providers.anthropic.auth`.
 
 ### Configuring providers
@@ -363,15 +372,15 @@ providers:
       command: "cat ~/.anthropic/oauth_token"
     host: api.anthropic.com
     path: /v1/messages
-    provider: anthropic
+    type: anthropic
 
   gemini:
     auth:
       type: file
-      path: "~/.config/gemini/oauth_token"
+      file: "~/.config/gemini/oauth_token"
     host: cloudcode-pa.googleapis.com
     path: "/v1internal:{action}"
-    provider: gemini
+    type: gemini
 
   openai:
     auth:
@@ -380,10 +389,10 @@ providers:
       header: "authorization"
     host: api.openai.com
     path: /v1/chat/completions
-    provider: openai
+    type: openai
 ```
 
-Each `auth` block is a discriminated `OAuthSource` — `command`, `file`,
+Each `auth` block is a discriminated `AnyAuthSource` — `command`, `file`,
 `anthropic_oauth`, or `google_oauth`. A bare YAML string under `auth:`
 auto-coerces to a `command` source.
 Optional `auth.header` overrides the target header name (default:
@@ -391,9 +400,9 @@ Optional `auth.header` overrides the target header name (default:
 
 ### 401 retry
 
-When a response returns 401 and the request used an OAuth-injected token
-(`metadata_from_flow(flow).oauth_injected`), `OAuthAddon.response()` calls
-`config.resolve_oauth_token(provider)` to re-resolve the credential source.
+When a response returns 401 and the request used an injected token
+(`metadata_from_flow(flow).auth_injected`), `AuthAddon.response()` calls
+`config.resolve_auth_token(provider)` to re-resolve the credential source.
 For OAuth-source providers (`anthropic_oauth`, `google_oauth`) this triggers
 another in-process refresh attempt; for static `command` / `file` loaders it
 just re-reads the source. The request is then replayed with whatever token
@@ -423,7 +432,7 @@ Capture or refresh a shape any time the target CLI version changes:
 
 ```bash
 ccproxy run --inspect -- claude -p "shape capture"
-ccproxy flows shape --provider anthropic
+ccproxy shapes save anthropic
 ```
 
 ### Where to learn more
@@ -729,7 +738,7 @@ providers:
       command: "cat ~/.anthropic/oauth_token"
     host: api.anthropic.com
     path: /v1/messages
-    provider: anthropic
+    type: anthropic
 
   deepseek:
     auth:
@@ -738,42 +747,54 @@ providers:
       header: x-api-key
     host: api.deepseek.com
     path: /anthropic/v1/messages
-    provider: anthropic
+    type: anthropic
 ```
 
 Per-entry fields:
 
-- `auth` — discriminated `OAuthSource` (`command` / `file` / `anthropic_oauth`
+- `auth` — discriminated `AnyAuthSource` (`command` / `file` / `anthropic_oauth`
   / `google_oauth`). A bare string auto-coerces to a `command` source.
   Optional `auth.header` overrides the target auth header name.
 - `host` — single destination hostname.
 - `path` — destination path. Supports `{model}` and `{action}` templating.
-- `provider` — LiteLLM provider identifier (`anthropic`, `gemini`, `openai`,
-  `deepseek`, …) driving format dispatch.
+- `type` — adapter-family name (`anthropic`, `openai`, `google`, `gemini`,
+  `vertex_ai`, `vertex_ai_beta`, `perplexity_pro`) driving wire-format
+  dispatch. Anthropic-compatible forks like DeepSeek and Z.AI use
+  `type: anthropic`.
+- `fingerprint_profile` — optional curl-cffi browser impersonation profile
+  (e.g. `chrome131`); routes the provider through the TLS fingerprint sidecar.
 
 ### `hooks`
 
 ```yaml
 hooks:
   inbound:
-    - ccproxy.hooks.forward_oauth
+    - ccproxy.hooks.inject_auth
     - ccproxy.hooks.extract_session_id
+    - ccproxy.hooks.extract_pplx_files
+    - ccproxy.hooks.pplx_thread_inject
   outbound:
     - ccproxy.hooks.gemini_cli
+    - ccproxy.hooks.pplx_stamp_headers
+    - ccproxy.hooks.pplx_preflight
     - ccproxy.hooks.inject_mcp_notifications
     - ccproxy.hooks.verbose_mode
-    - ccproxy.hooks.shape
     - ccproxy.hooks.commitbee_compat
+    - ccproxy.hooks.shape
 ```
 
-Hooks can also be specified with parameters:
+Entries can also be `{hook, params}` dicts. The same form works for the shape
+inner-DAG hooks under `shaping.providers.{name}.shape_hooks`:
 
 ```yaml
-hooks:
-  inbound:
-    - hook: ccproxy.hooks.forward_oauth
-      params:
-        strict: true
+shaping:
+  providers:
+    anthropic:
+      shape_hooks:
+        - ccproxy.shaping.regenerate
+        - hook: ccproxy.shaping.caching.strip
+          params:
+            paths: ["system.*.cache_control"]
 ```
 
 ### `otel`
@@ -789,7 +810,7 @@ hooks:
 | Field | Default | Description |
 | --- | --- | --- |
 | `enabled` | `true` | Master switch for shape storage and application |
-| `shapes_dir` | `{config_dir}/shaping/shapes` | Directory holding per-provider `{provider}.mflow` shape files |
+| `shapes_dir` | `~/.config/ccproxy/shapes` | Directory holding per-provider `{provider}.mflow` shape files and patch series |
 | `providers` | `{}` | Per-provider shaping profiles (`content_fields`, `merge_strategies`, `shape_hooks`, `preserve_headers`, `strip_headers`, `capture.path_pattern`, optional `billing` for Anthropic) — see [docs/shaping.md](docs/shaping.md) |
 
 ### `flows`
