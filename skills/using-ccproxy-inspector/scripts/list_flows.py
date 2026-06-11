@@ -79,6 +79,7 @@ def _enrich_flow(client, flow: dict[str, Any], *, fetch_model: bool = False) -> 
     """Extract structured fields from a raw mitmweb flow dict."""
     req = flow["request"]
     res = flow.get("response") or {}
+    metadata = flow.get("metadata") or {}
     flow_id = flow["id"]
 
     record: dict[str, Any] = {
@@ -90,7 +91,9 @@ def _enrich_flow(client, flow: dict[str, Any], *, fetch_model: bool = False) -> 
         "path": req["path"],
         "user_agent": _header_value(req.get("headers", []), "user-agent"),
         "content_type": _header_value(req.get("headers", []), "content-type"),
-        "oauth_injected": bool(_header_value(req.get("headers", []), "x-ccproxy-oauth-injected")),
+        "auth_injected": bool(
+            metadata.get("ccproxy.auth_injected") or _header_value(req.get("headers", []), "x-ccproxy-auth-injected")
+        ),
         "timestamp": flow.get("client_conn", {}).get("timestamp_start"),
     }
 
@@ -122,12 +125,12 @@ def _print_table(flows: list[dict[str, Any]]) -> None:
     table.add_column("Host", max_width=35)
     table.add_column("Path", max_width=50)
     table.add_column("Model", max_width=30)
-    table.add_column("OAuth", width=5)
+    table.add_column("Auth", width=5)
 
     for f in flows:
         code = str(f["status"] or "-")
         code_style = "green" if code.startswith("2") else "red" if code != "-" else "dim"
-        oauth = "[green]yes[/green]" if f["oauth_injected"] else "[dim]-[/dim]"
+        auth = "[green]yes[/green]" if f["auth_injected"] else "[dim]-[/dim]"
         model = f.get("model") or "[dim]-[/dim]"
 
         table.add_row(
@@ -137,7 +140,7 @@ def _print_table(flows: list[dict[str, Any]]) -> None:
             f["host"],
             f["path"][:50],
             str(model)[:30],
-            oauth,
+            auth,
         )
 
     console.print(table)

@@ -18,7 +18,7 @@ Client request (model: "claude-sonnet-4-5-20250929")
   │
   ▼
 ccproxy_inbound (DAG hooks)
-  forward_oauth: Detects sentinel key, substitutes real OAuth token.
+  inject_auth: Detects sentinel key, substitutes real provider token.
   extract_session_id: Parses session_id from metadata.user_id.
   │
   ▼
@@ -62,7 +62,7 @@ ccproxy:
 
   hooks:
     inbound:
-      - ccproxy.hooks.forward_oauth
+      - ccproxy.hooks.inject_auth
       - ccproxy.hooks.extract_session_id
     outbound:
       - ccproxy.hooks.inject_mcp_notifications
@@ -92,7 +92,7 @@ Hooks accept params via dict form:
 hooks:
   inbound:
     # Simple (no params)
-    - ccproxy.hooks.forward_oauth
+    - ccproxy.hooks.inject_auth
 
     # With params
     - hook: ccproxy.hooks.some_hook
@@ -193,8 +193,8 @@ Provider fields:
 
 ### Token refresh
 
-OAuth-source providers (`anthropic_oauth`, `google_oauth`) refresh in-process via `AuthSource.resolve()` whenever the cached access token is within 60s of expiry — at startup (`_load_credentials()`) and on each header injection. On a 401 from upstream, `OAuthAddon.response()` calls `config.resolve_oauth_token(provider)` to re-resolve the credential source and replays the request with whatever token the resolver returns. Static `command` / `file` loaders have no refresh capability and rely on whichever secret manager owns rotation.
+OAuth-source providers (`anthropic_oauth`, `google_oauth`) refresh in-process via `AuthSource.resolve()` whenever the cached access token is within 60s of expiry — at startup (`_load_credentials()`) and on each header injection. On a 401 from upstream, `AuthAddon.response()` calls `config.resolve_auth_token(provider)` to re-resolve the credential source and replays the request with whatever token the resolver returns. Static `command` / `file` loaders have no refresh capability and rely on whichever secret manager owns rotation.
 
 ### Provider resolution
 
-Provider resolution is sentinel-driven, not destination-driven. `forward_oauth` reads the `x-api-key` / `Authorization` header, parses the `sk-ant-oat-ccproxy-{name}` suffix, and looks up `providers[name]`. When no sentinel is present, it walks `config.providers` in dict insertion order and uses the first entry with a cached token as a fallback. `Provider.host` is a single value — there is no destinations-pattern matching layer. (`inspector.provider_map` is unrelated: it's a hostname → `gen_ai.system` mapping for OTel attribution only.)
+Provider resolution is sentinel-driven, not destination-driven. `inject_auth` reads the `x-api-key` / `Authorization` header, parses the `sk-ant-oat-ccproxy-{name}` suffix, and looks up `providers[name]`. When no sentinel is present, it walks `config.providers` in dict insertion order and uses the first entry with a cached token as a fallback. `Provider.host` is a single value — there is no destinations-pattern matching layer. (`inspector.provider_map` is unrelated: it's a hostname → `gen_ai.system` mapping for OTel attribution only.)

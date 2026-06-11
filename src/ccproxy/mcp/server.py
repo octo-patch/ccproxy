@@ -105,14 +105,19 @@ def _flows_with_optional_filter(client: MitmwebClient, jq_filter: str | None) ->
 
 @mcp.tool()
 def list_flows(jq_filter: str | None = None) -> list[dict[str, Any]]:
-    """List captured HTTP flows. Optional ``jq_filter`` consumes/produces a JSON array."""
+    """List captured ccproxy HTTP flows.
+
+    Optional ``jq_filter`` must consume and return a JSON array. Use this for
+    flow inventory, status triage, and selecting candidate flow ids before
+    calling body, diff, compare, shape, or clear tools.
+    """
     with _make_client() as client:
         return _flows_with_optional_filter(client, jq_filter)
 
 
 @mcp.tool()
 def get_flow(flow_id: str) -> dict[str, Any] | None:
-    """Return a single flow by id, or None if not present."""
+    """Return one captured flow metadata object by exact flow id."""
     with _make_client() as client:
         for flow in client.list_flows():
             if flow.get("id") == flow_id:
@@ -122,7 +127,12 @@ def get_flow(flow_id: str) -> dict[str, Any] | None:
 
 @mcp.tool()
 async def dump_har(flow_ids: list[str], ctx: Context) -> str:
-    """Render the given flow ids as a multi-page HAR 1.2 JSON string."""
+    """Export selected flows as a HAR 1.2 JSON string.
+
+    The export includes forwarded requests and provider responses, plus
+    ccproxy's client-request snapshots when present. Treat the returned HAR as
+    sensitive because it can contain prompts, headers, and provider payloads.
+    """
     await ctx.info(f"dumping HAR for {len(flow_ids)} flow(s)")
 
     def _do() -> str:
@@ -134,7 +144,7 @@ async def dump_har(flow_ids: list[str], ctx: Context) -> str:
 
 @mcp.tool()
 def get_request_body(flow_id: str) -> str:
-    """Return the request body for a single flow (UTF-8 decoded best-effort)."""
+    """Return a flow's forwarded request body as best-effort UTF-8 text."""
     with _make_client() as client:
         body = client.get_request_body(flow_id)
     return body.decode("utf-8", errors="replace")
@@ -142,7 +152,7 @@ def get_request_body(flow_id: str) -> str:
 
 @mcp.tool()
 def get_response_body(flow_id: str) -> str:
-    """Return the response body for a single flow (UTF-8 decoded best-effort)."""
+    """Return a flow's provider response body as best-effort UTF-8 text."""
     with _make_client() as client:
         body = client.get_response_body(flow_id)
     return body.decode("utf-8", errors="replace")
@@ -150,9 +160,10 @@ def get_response_body(flow_id: str) -> str:
 
 @mcp.tool()
 async def diff_flows(flow_ids: list[str], ctx: Context) -> str:
-    """Return a sliding-window unified diff of request bodies across the given flows.
+    """Return a sliding-window unified diff of forwarded request bodies.
 
-    Requires at least two ids. Returns the concatenated diff text.
+    Requires at least two flow ids. Use this to compare how similar requests
+    changed across retries, fallback attempts, or different client runs.
     """
     if len(flow_ids) < 2:
         raise ValueError("diff_flows: need at least two flow ids")
@@ -182,10 +193,11 @@ async def diff_flows(flow_ids: list[str], ctx: Context) -> str:
 
 @mcp.tool()
 async def compare_flow(flow_id: str, ctx: Context) -> dict[str, Any]:
-    """Diff client-request vs forwarded-request for a single flow.
+    """Compare a flow's client request snapshot against its forwarded request.
 
-    Returns ``{client_request, forwarded_request, diff}`` where ``diff`` is
-    a unified diff text. Both bodies decoded best-effort as UTF-8.
+    Returns ``{client_request, forwarded_request, diff}``. Use this first when
+    debugging ccproxy behavior: it isolates what the client sent from what the
+    inbound hooks, transform router, outbound hooks, and addons produced.
     """
     import difflib
 
@@ -221,7 +233,11 @@ async def compare_flow(flow_id: str, ctx: Context) -> dict[str, Any]:
 
 @mcp.tool()
 def clear_flows(jq_filter: str | None = None) -> int:
-    """Delete flows matching ``jq_filter`` (or all if filter omitted). Returns the count deleted."""
+    """Delete captured flows and return the number deleted.
+
+    When ``jq_filter`` is omitted, all flows are cleared. When supplied, the
+    filter must consume and return a JSON array of flow objects.
+    """
     with _make_client() as client:
         if jq_filter is None:
             count = len(client.list_flows())
@@ -235,7 +251,12 @@ def clear_flows(jq_filter: str | None = None) -> int:
 
 @mcp.tool()
 async def capture_shape(flow_id: str, provider: str, ctx: Context) -> dict[str, Any]:
-    """Generate a shape patch for ``provider`` from a captured flow."""
+    """Create a request-shape patch for a provider from one captured flow.
+
+    Use this for local shape development after capturing known-good provider
+    CLI traffic. Do not use it to package public defaults until the artifact has
+    been audited for auth tokens, cookies, responses, and flow metadata.
+    """
     await ctx.info(f"capturing shape {provider!r} from flow {flow_id!r}")
 
     def _do() -> dict[str, Any]:
@@ -247,16 +268,16 @@ async def capture_shape(flow_id: str, provider: str, ctx: Context) -> dict[str, 
 
 @mcp.tool()
 def list_shapes() -> list[str]:
-    """Return providers that have at least one captured shape on disk."""
+    """List providers with at least one local shape artifact on disk."""
     return get_store().list_providers()
 
 
 @mcp.tool()
 def list_conversations() -> dict[str, list[str]]:
-    """Group captured flows by ``conversation_id`` (first 12 hex of sha256(first user message text)).
+    """Group captured flow ids by ccproxy conversation id.
 
-    Returns ``{conversation_id: [flow_id, ...]}`` for flows whose ccproxy
-    metadata carries a conversation id.
+    Conversation ids are derived from the first user text when available. Use
+    this to follow multi-request sessions before comparing or exporting flows.
     """
     grouped: dict[str, list[str]] = {}
     with _make_client() as client:
@@ -272,11 +293,14 @@ def list_conversations() -> dict[str, list[str]]:
 
 @mcp.tool()
 async def list_models(ctx: Context, refresh: bool = False) -> dict[str, Any]:
-    """Return ccproxy's OpenAI-shaped model catalog. ``refresh=True`` queries upstream providers."""
+    """Return ccproxy's OpenAI-compatible model catalog.
+
+    With ``refresh=True``, ccproxy queries configured upstream providers and
+    unions those ids with the static floor catalog.
+    """
     if refresh:
         await ctx.info("refreshing model catalog from upstream providers")
     return await asyncio.to_thread(lambda: build_catalog(refresh=refresh))
-
 
 
 @mcp.resource("proxy://requests")

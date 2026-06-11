@@ -210,7 +210,7 @@ ccproxy:
 
   hooks:
     inbound:
-      - ccproxy.hooks.forward_oauth
+      - ccproxy.hooks.inject_auth
       - ccproxy.hooks.extract_session_id
     outbound:
       - ccproxy.hooks.inject_mcp_notifications
@@ -238,7 +238,7 @@ See [reference/routing-and-config.md](reference/routing-and-config.md) for trans
 
 **OAuth mode** (subscription accounts -- Claude Max, Team, Enterprise):
 1. Client sends sentinel key `sk-ant-oat-ccproxy-{provider}` as API key
-2. `forward_oauth` hook detects sentinel prefix, looks up real token from `providers[name].auth`
+2. `inject_auth` hook detects sentinel prefix, looks up real token from `providers[name].auth`
 3. `shape` hook replays a captured `{provider}.mflow` shape: strips configured headers, injects `content_fields` from the incoming request, runs shape inner-DAG hooks (UUID regeneration, Anthropic billing-header re-signing, cache breakpoint normalization), stamps the result onto the outbound flow
 4. Request reaches provider API with valid OAuth Bearer token and full identity envelope (user-agent, anthropic-beta, x-stainless-*, billing header, system prompt prefix)
 
@@ -261,7 +261,7 @@ Where `{provider}` matches a key in `providers` config. Common values:
 ```yaml
 hooks:
   inbound:
-    - ccproxy.hooks.forward_oauth
+    - ccproxy.hooks.inject_auth
     - ccproxy.hooks.extract_session_id
   outbound:
     - ccproxy.hooks.gemini_cli
@@ -271,7 +271,7 @@ hooks:
     - ccproxy.hooks.commitbee_compat
 ```
 
-- `forward_oauth` -- substitutes sentinel key with real token, sets `Authorization: Bearer {token}` (or the custom `auth.header`), clears other auth headers
+- `inject_auth` -- substitutes sentinel key with real token, sets `Authorization: Bearer {token}` (or the custom `auth.header`), clears other auth headers, and stamps ccproxy auth metadata for routing/retry
 - `extract_session_id` -- parses `metadata.user_id` for MCP notification routing
 - `gemini_cli` -- wraps Gemini sentinel-key bodies in the `v1internal` envelope, conditionally masquerades `google-genai-sdk/*` UAs, rewrites paths to `cloudcode-pa.googleapis.com`
 - `inject_mcp_notifications` -- injects buffered MCP terminal events as tool_use/tool_result pairs
@@ -279,7 +279,7 @@ hooks:
 - `shape` -- replays a captured shape (`{provider}.mflow`) onto the outbound flow, stamping identity headers, billing header, and system prompt prefix
 - `commitbee_compat` -- last-mile compatibility shim for the commitbee tool
 
-`OAuthAddon` and `GeminiAddon` are full mitmproxy addons (not pipeline hooks) registered after the outbound stage: `OAuthAddon` handles 401 detection / refresh / replay; `GeminiAddon` handles capacity fallback + cloudcode-pa envelope unwrap.
+`AuthAddon` and `GeminiAddon` are full mitmproxy addons (not pipeline hooks) registered after the outbound stage: `AuthAddon` handles 401 detection / refresh / replay; `GeminiAddon` handles capacity fallback + cloudcode-pa envelope unwrap.
 
 ### Shape replay -- where identity comes from
 

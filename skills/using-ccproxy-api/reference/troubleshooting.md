@@ -109,7 +109,7 @@ jq -r '.claudeAiOauth.accessToken' ~/.claude/.credentials.json
 claude
 ```
 
-ccproxy auto-retries on 401: `OAuthAddon.response()` detects HTTP 401 on flows where `forward_oauth` injected an OAuth token (`metadata_from_flow(flow).oauth_injected`), calls `config.resolve_oauth_token(provider)`, and replays the request with whatever the resolver returns.
+ccproxy auto-retries on 401: `AuthAddon.response()` detects HTTP 401 on flows where `inject_auth` injected a token (`metadata_from_flow(flow).auth_injected`), calls `config.resolve_auth_token(provider)`, and replays the request with whatever the resolver returns.
 
 ### Wrong sentinel key provider name
 
@@ -129,10 +129,10 @@ providers:
     provider: gemini
 ```
 
-Using `sk-ant-oat-ccproxy-claude` when the providers entry is named `anthropic` raises a fatal `OAuthConfigError`:
+Using `sk-ant-oat-ccproxy-claude` when the providers entry is named `anthropic` raises a fatal `AuthConfigError`:
 
 ```
-OAuthConfigError: Sentinel key for provider 'claude' but no matching providers entry. Add 'providers.claude' to ccproxy.yaml.
+AuthConfigError: Sentinel key for provider 'claude' but no matching providers entry. Add 'providers.claude' to ccproxy.yaml.
 ```
 
 ### providers[name].auth source failing
@@ -157,7 +157,7 @@ ccproxy logs -f | grep -E 'OAuth|refresh'
 
 ### Auth header injection
 
-`forward_oauth` injects auth via the configured header:
+`inject_auth` injects auth via the configured header:
 
 - Default: `Authorization: Bearer {token}`
 - If `providers.{provider}.auth.header` is set: uses that header name with raw token value (e.g. `x-api-key: {token}`)
@@ -204,17 +204,17 @@ Common causes:
 With `log_level: DEBUG` in `ccproxy.yaml`, logs show each hook's execution and the OAuth/Gemini addon decisions:
 
 ```
-ccproxy.pipeline:DEBUG: Executing hook forward_oauth
-ccproxy.hooks.forward_oauth:INFO: OAuth token injected for provider 'anthropic' (sentinel)
+ccproxy.pipeline:DEBUG: Executing hook inject_auth
+ccproxy.hooks.inject_auth:INFO: Auth token injected for provider 'anthropic' (sentinel)
 ccproxy.pipeline:DEBUG: Executing hook shape
 ccproxy.hooks.shape:INFO: Applied shape from <shape-id> for provider anthropic
-ccproxy.inspector.oauth_addon:INFO: OAuth 401 for provider 'anthropic' — token refreshed, retrying request
+ccproxy.inspector.auth_addon:INFO: 401 for provider 'anthropic' — token refreshed, retrying request
 ```
 
 If a hook is not firing:
 
 - Check that it's in the `hooks.inbound` or `hooks.outbound` list in `ccproxy.yaml`
-- Check the guard condition — e.g. `shape_guard` requires `ReverseMode` *or* `ccproxy.oauth_injected`, plus a `TransformMeta` on the record
+- Check the guard condition — e.g. `shape_guard` requires `ReverseMode` *or* `ctx.metadata.auth_injected`, plus transform metadata on the record
 - Check per-request overrides via the `x-ccproxy-hooks` header (`+hook,-other`)
 
 ### Verify transform routing
@@ -254,7 +254,7 @@ The inspector UI runs at `http://127.0.0.1:{inspector.port}/?token={web_token}`.
 - Requires a fresh, signed `x-anthropic-billing-header` — re-signed per-request by the `regenerate_billing_header` shape inner-DAG hook (needs the salt + seed configured under `shaping.providers.anthropic.billing`)
 - Both the shape itself and the billing constants must be set up — see [`docs/shaping.md`](../../../docs/shaping.md)
 - OAuth tokens have `sk-ant-oat` prefix
-- On 401: `OAuthAddon` re-resolves and retries automatically
+- On 401: `AuthAddon` re-resolves and retries automatically
 
 ### Google (Gemini / cloudcode-pa)
 
@@ -267,5 +267,5 @@ The inspector UI runs at `http://127.0.0.1:{inspector.port}/?token={web_token}`.
 ### Other providers
 
 - Each provider entry binds an auth source, a single destination (`host` + `path`), and a LiteLLM `provider` identifier (drives format dispatch)
-- Provider resolution is sentinel-driven: `forward_oauth` parses the `sk-ant-oat-ccproxy-{name}` suffix and looks up `providers[name]`. With no sentinel it walks `config.providers` in dict insertion order and falls back to the first entry with a cached token. The transform handler then chooses `redirect` vs `transform` based on whether the incoming format matches the destination's `provider` field. (`inspector.provider_map` is unrelated — it maps hostnames to OTel `gen_ai.system` attributes for span attribution only.)
+- Provider resolution is sentinel-driven: `inject_auth` parses the `sk-ant-oat-ccproxy-{name}` suffix and looks up `providers[name]`. With no sentinel it walks `config.providers` in dict insertion order and falls back to the first entry with a cached token. The transform handler then chooses `redirect` vs `transform` based on whether the incoming format matches the destination's `provider` field. (`inspector.provider_map` is unrelated — it maps hostnames to OTel `gen_ai.system` attributes for span attribution only.)
 - Cross-provider format conversion happens via `lightllm` when `inspector.transforms` rule matches (or when sentinel-resolved Provider's `provider` field differs from the incoming format)

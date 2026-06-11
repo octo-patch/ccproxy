@@ -110,7 +110,7 @@ The token is:
 - Resolved from a `CredentialSource` (if set as `command`/`file`)
 - Auto-generated on startup (if not set) — printed to logs with the mitmweb URL
 
-The built-in `ccproxy flows` CLI resolves the token automatically from config via `get_config()`. The `ccproxy_mcp` MCP server tools do the same.
+The built-in `ccproxy flows` CLI resolves the token automatically from config via `get_config()`. ccproxy's FastMCP tools use the same config when the user has explicitly registered that MCP server in their client.
 
 ---
 

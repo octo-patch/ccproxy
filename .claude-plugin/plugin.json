@@ -1,6 +1,6 @@
 {
   "name": "ccproxy",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "Guides users through ccproxy — a mitmproxy-based LLM API interceptor — with SDK integration, OAuth authentication, sentinel key substitution, transform routing, and troubleshooting.",
   "author": {
     "name": "***",

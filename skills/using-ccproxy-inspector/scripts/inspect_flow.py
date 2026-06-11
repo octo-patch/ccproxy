@@ -174,11 +174,11 @@ def _compute_changes(
             }
         )
 
-    if fwd_headers.get("x-ccproxy-oauth-injected"):
+    if fwd_headers.get("x-ccproxy-auth-injected"):
         changes.append(
             {
-                "type": "oauth_injected",
-                "description": "OAuth token was injected by forward_oauth hook",
+                "type": "auth_injected",
+                "description": "Provider auth token was injected by inject_auth hook",
             }
         )
 

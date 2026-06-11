@@ -278,6 +278,14 @@ def test_expected_tool_set_registered() -> None:
     assert expected.issubset(registered)
 
 
+def test_registered_tools_have_explicit_descriptions() -> None:
+    """Published MCP tools should carry actionable descriptions."""
+    for tool in server.mcp._tool_manager.list_tools():  # type: ignore[attr-defined]
+        description = (tool.description or "").strip()
+        assert description, f"tool {tool.name!r} has no description"
+        assert "TODO" not in description
+
+
 def test_fastmcp_instructions_block_configured() -> None:
     """The FastMCP server advertises ccproxy-specific guidance to calling LLMs."""
     instructions = getattr(server.mcp, "instructions", "") or ""

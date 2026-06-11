@@ -425,7 +425,7 @@ handle_pipeline (RouteType.REQUEST)
 
 The `PipelineExecutor` resolves hook dependencies via `HookDAG` (Kahn's algorithm), runs hooks in
 topological order, and calls `ctx.commit()` to flush body mutations. Hook errors are isolated — one
-failing hook does not block others. `OAuthConfigError` is the sole exception to this rule (it
+failing hook does not block others. `AuthConfigError` is the sole exception to this rule (it
 propagates through the pipeline and is treated as fatal).
 
 ---
