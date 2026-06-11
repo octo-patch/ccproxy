@@ -152,7 +152,7 @@ def _print_rich(
         if shape_status["active"]:
             console.print(
                 "[yellow]Anthropic v0 shape is ACTIVE[/yellow] — no user-captured profile has superseded it yet. "
-                "Run `ccproxy flows shape --provider anthropic` with captured flows."
+                "Run `ccproxy shapes save anthropic` with captured flows."
             )
         else:
             console.print(
