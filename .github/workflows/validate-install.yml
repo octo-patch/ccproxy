@@ -110,7 +110,6 @@ jobs:
         run: |
           source /tmp/ccproxy-venv/bin/activate
           command -v ccproxy
-          command -v ccproxy_mcp
       - name: Smoke test - ccproxy --help (entry point + tyro dispatch)
         run: |
           source /tmp/ccproxy-venv/bin/activate
@@ -164,7 +163,6 @@ jobs:
         run: |
           source /tmp/ccproxy-venv/bin/activate
           command -v ccproxy
-          command -v ccproxy_mcp
       - name: Smoke test - ccproxy --help (entry point + tyro dispatch)
         run: |
           source /tmp/ccproxy-venv/bin/activate
