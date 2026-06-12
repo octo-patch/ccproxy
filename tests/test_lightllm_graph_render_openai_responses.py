@@ -135,9 +135,7 @@ class TestEmptyStream:
         assert _event_sequence(events) == ["response.completed"]
         assert events[0]["data"]["response"]["status"] == "completed"
 
-    def test_response_completed_carries_response_id(
-        self, render_factory: _RenderFactory
-    ) -> None:
+    def test_response_completed_carries_response_id(self, render_factory: _RenderFactory) -> None:
         render = render_factory()
         out = render.close()
         events = _parse_events(out)
@@ -152,9 +150,7 @@ class TestEmptyStream:
 
 
 class TestTextPart:
-    def test_part_start_emits_created_item_and_content_part(
-        self, render_factory: _RenderFactory
-    ) -> None:
+    def test_part_start_emits_created_item_and_content_part(self, render_factory: _RenderFactory) -> None:
         events = [PartStartEvent(index=0, part=TextPart(content="Hello"))]
         render = render_factory()
         out = _render_all(render, events)
@@ -173,9 +169,7 @@ class TestTextPart:
         ]
         assert _seq_numbers(decoded) == list(range(8))
 
-    def test_text_delta_accumulates_into_done_text(
-        self, render_factory: _RenderFactory
-    ) -> None:
+    def test_text_delta_accumulates_into_done_text(self, render_factory: _RenderFactory) -> None:
         events: list[ModelResponseStreamEvent] = [
             PartStartEvent(index=0, part=TextPart(content="")),
             PartDeltaEvent(index=0, delta=TextPartDelta(content_delta="Hello, ")),
@@ -189,14 +183,10 @@ class TestTextPart:
         deltas = [e for e in decoded if e["event"] == "response.output_text.delta"]
         assert [d["data"]["delta"] for d in deltas] == ["Hello, ", "world!"]
 
-        done_text = next(
-            e for e in decoded if e["event"] == "response.output_text.done"
-        )["data"]["text"]
+        done_text = next(e for e in decoded if e["event"] == "response.output_text.done")["data"]["text"]
         assert done_text == "Hello, world!"
 
-    def test_message_item_done_carries_full_content(
-        self, render_factory: _RenderFactory
-    ) -> None:
+    def test_message_item_done_carries_full_content(self, render_factory: _RenderFactory) -> None:
         events: list[ModelResponseStreamEvent] = [
             PartStartEvent(index=0, part=TextPart(content="Greetings.")),
             PartEndEvent(index=0, part=TextPart(content="")),
@@ -204,9 +194,7 @@ class TestTextPart:
         render = render_factory()
         out = _render_all(render, events)
         decoded = _parse_events(out)
-        item_done = next(
-            e for e in decoded if e["event"] == "response.output_item.done"
-        )
+        item_done = next(e for e in decoded if e["event"] == "response.output_item.done")
         item = item_done["data"]["item"]
         assert item["type"] == "message"
         assert item["status"] == "completed"
@@ -220,9 +208,7 @@ class TestTextPart:
 
 
 class TestFunctionCallPart:
-    def test_function_call_emits_args_delta_and_done(
-        self, render_factory: _RenderFactory
-    ) -> None:
+    def test_function_call_emits_args_delta_and_done(self, render_factory: _RenderFactory) -> None:
         events: list[ModelResponseStreamEvent] = [
             PartStartEvent(
                 index=0,
@@ -243,22 +229,21 @@ class TestFunctionCallPart:
         assert "response.function_call_arguments.done" in seq
         assert "response.output_item.done" in seq
 
-        added = next(
-            e for e in decoded if e["event"] == "response.output_item.added"
-        )
+        added = next(e for e in decoded if e["event"] == "response.output_item.added")
         item = added["data"]["item"]
         assert item["type"] == "function_call"
         assert item["call_id"] == "call_1"
         assert item["name"] == "get_weather"
 
-        done = next(
-            e for e in decoded if e["event"] == "response.function_call_arguments.done"
-        )
+        done = next(e for e in decoded if e["event"] == "response.function_call_arguments.done")
         assert json.loads(done["data"]["arguments"]) == {"city": "SF"}
+        assert done["data"]["name"] == "get_weather"
 
-    def test_function_call_streamed_args_via_deltas(
-        self, render_factory: _RenderFactory
-    ) -> None:
+        item_done = next(e for e in decoded if e["event"] == "response.output_item.done")
+        assert item_done["data"]["item"]["call_id"] == "call_1"
+        assert item_done["data"]["item"]["name"] == "get_weather"
+
+    def test_function_call_streamed_args_via_deltas(self, render_factory: _RenderFactory) -> None:
         events: list[ModelResponseStreamEvent] = [
             PartStartEvent(
                 index=0,
@@ -275,13 +260,9 @@ class TestFunctionCallPart:
         render = render_factory()
         out = _render_all(render, events)
         decoded = _parse_events(out)
-        args_deltas = [
-            e for e in decoded if e["event"] == "response.function_call_arguments.delta"
-        ]
+        args_deltas = [e for e in decoded if e["event"] == "response.function_call_arguments.delta"]
         assert [d["data"]["delta"] for d in args_deltas] == ['{"msg":', '"hi"}']
-        done = next(
-            e for e in decoded if e["event"] == "response.function_call_arguments.done"
-        )
+        done = next(e for e in decoded if e["event"] == "response.function_call_arguments.done")
         assert done["data"]["arguments"] == '{"msg":"hi"}'
 
 
@@ -291,9 +272,7 @@ class TestFunctionCallPart:
 
 
 class TestReasoningPart:
-    def test_reasoning_emits_text_delta_and_done(
-        self, render_factory: _RenderFactory
-    ) -> None:
+    def test_reasoning_emits_text_delta_and_done(self, render_factory: _RenderFactory) -> None:
         events: list[ModelResponseStreamEvent] = [
             PartStartEvent(
                 index=0,
@@ -306,22 +285,16 @@ class TestReasoningPart:
         decoded = _parse_events(out)
         seq = _event_sequence(decoded)
         assert "response.output_item.added" in seq
-        assert "response.reasoning.text.delta" in seq
-        assert "response.reasoning.text.done" in seq
+        assert "response.reasoning_text.delta" in seq
+        assert "response.reasoning_text.done" in seq
 
-        added = next(
-            e for e in decoded if e["event"] == "response.output_item.added"
-        )
+        added = next(e for e in decoded if e["event"] == "response.output_item.added")
         assert added["data"]["item"]["type"] == "reasoning"
 
-        done = next(
-            e for e in decoded if e["event"] == "response.reasoning.text.done"
-        )
+        done = next(e for e in decoded if e["event"] == "response.reasoning_text.done")
         assert done["data"]["text"] == "Reasoning step."
 
-    def test_reasoning_text_accumulates_across_deltas(
-        self, render_factory: _RenderFactory
-    ) -> None:
+    def test_reasoning_text_accumulates_across_deltas(self, render_factory: _RenderFactory) -> None:
         events: list[ModelResponseStreamEvent] = [
             PartStartEvent(
                 index=0,
@@ -340,9 +313,7 @@ class TestReasoningPart:
         render = render_factory()
         out = _render_all(render, events)
         decoded = _parse_events(out)
-        done = next(
-            e for e in decoded if e["event"] == "response.reasoning.text.done"
-        )
+        done = next(e for e in decoded if e["event"] == "response.reasoning_text.done")
         assert done["data"]["text"] == "Step 1: examine input."
 
 
@@ -352,40 +323,30 @@ class TestReasoningPart:
 
 
 class TestMultiPart:
-    def test_multiple_parts_get_distinct_output_indices(
-        self, render_factory: _RenderFactory
-    ) -> None:
+    def test_multiple_parts_get_distinct_output_indices(self, render_factory: _RenderFactory) -> None:
         events: list[ModelResponseStreamEvent] = [
             PartStartEvent(index=0, part=TextPart(content="Hello.")),
             PartEndEvent(index=0, part=TextPart(content="")),
             PartStartEvent(
                 index=1,
-                part=ToolCallPart(
-                    tool_name="ping", args={}, tool_call_id="c1"
-                ),
+                part=ToolCallPart(tool_name="ping", args={}, tool_call_id="c1"),
             ),
             PartEndEvent(index=1, part=TextPart(content="")),
         ]
         render = render_factory()
         out = _render_all(render, events)
         decoded = _parse_events(out)
-        item_added = [
-            e for e in decoded if e["event"] == "response.output_item.added"
-        ]
+        item_added = [e for e in decoded if e["event"] == "response.output_item.added"]
         indices = [e["data"]["output_index"] for e in item_added]
         assert indices == [0, 1]
 
-    def test_sequence_numbers_remain_monotonic_across_parts(
-        self, render_factory: _RenderFactory
-    ) -> None:
+    def test_sequence_numbers_remain_monotonic_across_parts(self, render_factory: _RenderFactory) -> None:
         events: list[ModelResponseStreamEvent] = [
             PartStartEvent(index=0, part=TextPart(content="A")),
             PartEndEvent(index=0, part=TextPart(content="")),
             PartStartEvent(
                 index=1,
-                part=ToolCallPart(
-                    tool_name="t", args={}, tool_call_id="c"
-                ),
+                part=ToolCallPart(tool_name="t", args={}, tool_call_id="c"),
             ),
             PartEndEvent(index=1, part=TextPart(content="")),
         ]
@@ -403,9 +364,7 @@ class TestMultiPart:
 
 
 class TestLazyOpen:
-    def test_text_delta_without_prior_start_opens_message(
-        self, render_factory: _RenderFactory
-    ) -> None:
+    def test_text_delta_without_prior_start_opens_message(self, render_factory: _RenderFactory) -> None:
         """Some upstream FSMs stream deltas without a prior start event."""
         events: list[ModelResponseStreamEvent] = [
             PartDeltaEvent(index=0, delta=TextPartDelta(content_delta="hi")),

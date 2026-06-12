@@ -21,7 +21,9 @@ from ccproxy.lightllm.graph import (
     UnsupportedUpstreamError,
     dispatch_dump,
     dispatch_dump_sync,
+    dispatch_intake,
 )
+from ccproxy.lightllm.graph.openai_responses_intake import OpenAIResponsesIntakeFSM
 from ccproxy.lightllm.parsed import ParsedRequest
 
 
@@ -47,6 +49,7 @@ def _make_parsed(
         ("deepseek", "deepseek-chat"),
         ("zai", "glm-4"),
         ("openai", "gpt-4o"),
+        ("openai_responses", "gpt-5"),
         ("google", "gemini-1.5-pro"),
         ("gemini", "gemini-1.5-pro"),
         ("vertex_ai", "gemini-1.5-pro"),
@@ -91,3 +94,12 @@ def test_dispatch_dump_sync_raises_for_unknown_provider() -> None:
     parsed = _make_parsed()
     with pytest.raises(UnsupportedUpstreamError, match="no outbound renderer"):
         dispatch_dump_sync(parsed, provider_type="not-a-real-provider")
+
+
+def test_dispatch_intake_openai_responses() -> None:
+    intake = dispatch_intake(
+        provider_type="openai_responses",
+        model="gpt-5",
+        request_params=ModelRequestParameters(),
+    )
+    assert isinstance(intake, OpenAIResponsesIntakeFSM)

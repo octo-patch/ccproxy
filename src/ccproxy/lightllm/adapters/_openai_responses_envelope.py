@@ -43,6 +43,7 @@ from pydantic_ai.messages import (
     UserPromptPart,
 )
 from pydantic_ai.settings import ModelSettings
+from pydantic_ai.tools import ToolDefinition
 from pydantic_ai.ui import MessagesBuilder
 
 logger = logging.getLogger(__name__)
@@ -127,6 +128,53 @@ def _apply_responses_settings(body: dict[str, Any], settings: Mapping[str, Any])
     for key in ("temperature", "top_p"):
         if key in settings:
             body[key] = settings[key]
+
+
+def _parse_responses_tools(raw_tools: Sequence[Any]) -> list[ToolDefinition]:
+    """Parse Responses ``tools[]`` entries into :class:`ToolDefinition`."""
+    tools: list[ToolDefinition] = []
+    for tool in raw_tools:
+        if not isinstance(tool, Mapping):
+            continue
+        if tool.get("type") != "function":
+            continue
+
+        name = tool.get("name")
+        if not isinstance(name, str) or not name:
+            continue
+
+        parameters = tool.get("parameters")
+        if not isinstance(parameters, dict):
+            parameters = {"type": "object", "properties": {}}
+
+        description = tool.get("description")
+        strict = tool.get("strict")
+        tools.append(
+            ToolDefinition(
+                name=name,
+                parameters_json_schema=cast(dict[str, Any], parameters),
+                description=description if isinstance(description, str) else None,
+                strict=strict if isinstance(strict, bool) else None,
+            )
+        )
+    return tools
+
+
+def _format_responses_tools(tools: Sequence[ToolDefinition]) -> list[dict[str, Any]]:
+    """Format :class:`ToolDefinition` entries into Responses ``tools[]`` dicts."""
+    out: list[dict[str, Any]] = []
+    for tool in tools:
+        item: dict[str, Any] = {
+            "type": "function",
+            "name": tool.name,
+            "parameters": tool.parameters_json_schema or {"type": "object", "properties": {}},
+        }
+        if tool.description:
+            item["description"] = tool.description
+        if tool.strict is not None:
+            item["strict"] = tool.strict
+        out.append(item)
+    return out
 
 
 def _build_tool_call_id_index(input_items: Sequence[Mapping[str, Any]]) -> dict[str, str]:

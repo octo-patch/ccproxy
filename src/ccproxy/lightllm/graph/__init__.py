@@ -6,7 +6,7 @@ return per-provider async FSM instances; the persistent-loop bridge in
 mitmproxy's sync stream callable.
 
 The request-side :func:`dispatch_dump_sync` routes all providers (Anthropic,
-OpenAI, Google, Perplexity) to the new :mod:`ccproxy.lightllm.adapters`
+OpenAI, OpenAI Responses, Google, Perplexity) to the new :mod:`ccproxy.lightllm.adapters`
 ``render`` classmethods. Each accepts an :class:`LLMRenderInput` (Protocol;
 :class:`ccproxy.pipeline.context.Context` satisfies it).
 """
@@ -18,6 +18,7 @@ from ccproxy.lightllm.graph.anthropic_render import AnthropicResponseRenderFSM
 from ccproxy.lightllm.graph.google_intake import GoogleResponseIntakeFSM
 from ccproxy.lightllm.graph.openai_intake import OpenAIResponseIntakeFSM
 from ccproxy.lightllm.graph.openai_render import OpenAIResponseRenderFSM
+from ccproxy.lightllm.graph.openai_responses_intake import OpenAIResponsesIntakeFSM
 from ccproxy.lightllm.graph.openai_responses_render import OpenAIResponsesRenderFSM
 from ccproxy.lightllm.graph.perplexity_intake import PerplexityResponseIntakeFSM
 from ccproxy.lightllm.parsed import InboundFormat
@@ -47,11 +48,13 @@ _GOOGLE_COMPATIBLE = frozenset({"google", "gemini", "vertex_ai", "vertex_ai_beta
 # :class:`SSEPipeline` types its ``intake`` / ``render`` parameters against
 # these so any FSM the dispatchers can produce is acceptable.
 AnyAsyncIntakeFSM = (
-    AnthropicResponseIntakeFSM | OpenAIResponseIntakeFSM | GoogleResponseIntakeFSM | PerplexityResponseIntakeFSM
+    AnthropicResponseIntakeFSM
+    | OpenAIResponseIntakeFSM
+    | OpenAIResponsesIntakeFSM
+    | GoogleResponseIntakeFSM
+    | PerplexityResponseIntakeFSM
 )
-AnyAsyncRenderFSM = (
-    AnthropicResponseRenderFSM | OpenAIResponseRenderFSM | OpenAIResponsesRenderFSM
-)
+AnyAsyncRenderFSM = AnthropicResponseRenderFSM | OpenAIResponseRenderFSM | OpenAIResponsesRenderFSM
 
 
 class UnsupportedUpstreamError(ValueError):
@@ -80,9 +83,9 @@ def dispatch_intake(
     """Dispatch to the right per-upstream response intake FSM.
 
     Routes Anthropic-compatible providers (anthropic / deepseek / zai) to the
-    Anthropic intake FSM, OpenAI to the OpenAI intake FSM, Google family
-    (google / gemini / vertex_ai / vertex_ai_beta) to the Google intake FSM,
-    and Perplexity Pro to its own intake FSM. Raises
+    Anthropic intake FSM, OpenAI to the OpenAI intake FSM, OpenAI Responses
+    to the Responses intake FSM, Google family (google / gemini / vertex_ai /
+    vertex_ai_beta) to the Google intake FSM, and Perplexity Pro to its own intake FSM. Raises
     :class:`UnsupportedUpstreamError` for anything else — there's no fallback,
     because an unknown upstream means we have no idea how to parse its SSE.
     """
@@ -90,6 +93,8 @@ def dispatch_intake(
         return AnthropicResponseIntakeFSM(model=model, request_params=request_params)
     if provider_type == "openai":
         return OpenAIResponseIntakeFSM(model=model, request_params=request_params)
+    if provider_type == "openai_responses":
+        return OpenAIResponsesIntakeFSM(model=model, request_params=request_params)
     if provider_type in _GOOGLE_COMPATIBLE:
         return GoogleResponseIntakeFSM(model=model, request_params=request_params)
     if provider_type == "perplexity_pro":
@@ -130,6 +135,10 @@ def dispatch_dump_sync(req: "LLMRenderInput", *, provider_type: str) -> bytes:
         from ccproxy.lightllm.adapters.openai_chat import OpenAIChatAdapter
 
         return OpenAIChatAdapter.render(req)
+    if provider_type == "openai_responses":
+        from ccproxy.lightllm.adapters.openai_responses import OpenAIResponsesAdapter
+
+        return OpenAIResponsesAdapter.render(req)
     if provider_type in _GOOGLE_COMPATIBLE:
         from ccproxy.lightllm.adapters.google import GoogleAdapter
 

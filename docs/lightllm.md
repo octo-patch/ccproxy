@@ -653,18 +653,18 @@ verbose-form wire body, which is semantically identical for upstreams.
 **Buffered output arm**: ``InboundFormat.OPENAI_RESPONSES`` is wired
 into ``buffered.py:transform_buffered_response_sync`` via the
 ``_parts_to_openai_responses`` helper. Any upstream provider
-(Anthropic, OpenAI Chat, Google, Perplexity) can satisfy a
-``/v1/responses`` request — the buffered transform synthesizes the
-upstream's SSE shape, drains the existing intake FSM, then renders
+(Anthropic, OpenAI Chat, OpenAI Responses, Google, Perplexity) can
+satisfy a ``/v1/responses`` request — the buffered transform synthesizes
+the upstream's SSE shape, drains the existing intake FSM, then renders
 ``parts_manager.get_parts()`` into the ``Response`` envelope JSON
 returned to the listener.
 
 **Streaming render**: ``InboundFormat.OPENAI_RESPONSES`` is wired into
 ``dispatch_render`` via ``OpenAIResponsesRenderFSM``, so a Responses-shaped
 listener can receive rendered Responses SSE when the upstream intake produces
-response IR. ccproxy still does not ship a configured live Codex/OpenAI
-Responses provider by default, and there is no ``openai_responses`` upstream
-intake branch in ``dispatch_intake``.
+response IR. ``dispatch_intake`` now also accepts
+``provider_type="openai_responses"`` and routes Responses SSE through
+``OpenAIResponsesIntakeFSM``.
 
 **Same-format Codex passthrough (the canonical path)**: When a
 listener `/v1/responses` request resolves (via sentinel) to a Provider

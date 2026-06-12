@@ -57,6 +57,7 @@ from ccproxy.lightllm.adapters._openai_responses_envelope import (
 )
 from ccproxy.lightllm.adapters._openai_responses_envelope import (
     _parse_responses_settings,
+    _parse_responses_tools,
 )
 from ccproxy.lightllm.adapters.anthropic import AnthropicAdapter
 from ccproxy.lightllm.adapters.openai_chat import OpenAIChatAdapter
@@ -216,10 +217,10 @@ def _parse_openai_responses(body: dict[str, Any]) -> _ParsedFields:
     """Parse a ``/v1/responses`` request body into typed IR fields.
 
     Handles the bare-string ``input`` shorthand by wrapping into a
-    single user message. Tools share the Chat shape, so we reuse
-    :func:`_openai_parse_tools`. Settings use Responses-specific
-    naming (``max_output_tokens`` vs Chat's ``max_completion_tokens``)
-    so a dedicated :func:`_parse_responses_settings` runs.
+    single user message. Tools use Responses' top-level function tool
+    schema. Settings use Responses-specific naming
+    (``max_output_tokens`` vs Chat's ``max_completion_tokens``), so a
+    dedicated :func:`_parse_responses_settings` runs.
     """
     raw_input: Any = body.get("input")
     if isinstance(raw_input, str):
@@ -239,7 +240,7 @@ def _parse_openai_responses(body: dict[str, Any]) -> _ParsedFields:
     )
 
     raw_tools = cast(list[Any], body.get("tools", []) or [])
-    function_tools = _openai_parse_tools(raw_tools)
+    function_tools = _parse_responses_tools(raw_tools)
     settings = _parse_responses_settings(body)
     request_parameters = ModelRequestParameters(function_tools=function_tools)
 

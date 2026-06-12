@@ -1,7 +1,7 @@
 """Buffered (non-streaming) cross-provider response transform via FSM.
 
-Reuses the four per-upstream intake FSMs (Anthropic / OpenAI / Google /
-Perplexity) shipped under :mod:`ccproxy.lightllm.graph`.
+Reuses the per-upstream intake FSMs (Anthropic / OpenAI / OpenAI Responses /
+Google / Perplexity) shipped under :mod:`ccproxy.lightllm.graph`.
 
 Two structural cases per upstream:
 
@@ -27,9 +27,11 @@ Per-provider conversion strategy:
   block's full content + a ``content_block_stop``, then ``message_delta``
   + ``message_stop``. Encode each synthesized event as an SSE frame and
   feed the whole batch.
-* **OpenAI**: parse ``ChatCompletion`` JSON, build a single
+* **OpenAI Chat**: parse ``ChatCompletion`` JSON, build a single
   ``ChatCompletionChunk``-shaped frame whose ``delta`` carries the entire
   ``message.content`` + ``tool_calls`` + ``finish_reason``. Single SSE frame.
+* **OpenAI Responses**: pass concatenated Responses SSE through directly, or
+  synthesize a Responses event stream from a buffered ``Response`` JSON body.
 * **Google / Gemini / Vertex AI**: the buffered body is already a
   ``GenerateContentResponse`` — the same shape the streaming intake parses
   (``cloudcode-pa`` envelope unwrap is folded into the intake). Wrap as
@@ -227,11 +229,7 @@ def _synthesize_anthropic_sse(body: dict[str, Any]) -> bytes:
             # Wire deltas carry the JSON-serialized args as ``partial_json``.
             input_obj = block.get("input") or {}
             input_json = json.dumps(input_obj, separators=(",", ":"))
-            delta_event = (
-                {"type": "input_json_delta", "partial_json": input_json}
-                if input_obj
-                else None
-            )
+            delta_event = {"type": "input_json_delta", "partial_json": input_json} if input_obj else None
         else:
             # Unknown block — pass through as a content_block_start with the
             # original payload; the intake's discriminated TypeAdapter will
@@ -365,6 +363,338 @@ def _synthesize_openai_sse(body: dict[str, Any]) -> bytes:
     return _frame(chunk_dict) + b"data: [DONE]\n\n"
 
 
+# ── OpenAI Responses: Response → synthetic Responses event stream ──────────
+
+
+def _synthesize_openai_responses_sse(body: dict[str, Any]) -> bytes:
+    """Convert a buffered ``Response`` JSON dict into Responses SSE bytes."""
+    sequence_number = 0
+
+    def next_seq() -> int:
+        nonlocal sequence_number
+        seq = sequence_number
+        sequence_number += 1
+        return seq
+
+    response_id = body.get("id", "resp_buffered")
+    created_at = body.get("created_at", int(time.time()))
+    model = body.get("model", "unknown")
+    output_items = [item for item in body.get("output") or [] if isinstance(item, dict)]
+
+    response_base = {
+        **body,
+        "id": response_id,
+        "object": body.get("object", "response"),
+        "created_at": created_at,
+        "model": model,
+        "status": "in_progress",
+        "output": [],
+    }
+    frames: list[bytes] = [
+        _frame(
+            {
+                "type": "response.created",
+                "response": response_base,
+                "sequence_number": next_seq(),
+            },
+            event_name="response.created",
+        )
+    ]
+
+    for output_index, item in enumerate(output_items):
+        item_type = item.get("type")
+        item_id = item.get("id") or f"item_{output_index}"
+
+        if item_type == "message":
+            added_item = {
+                "id": item_id,
+                "type": "message",
+                "status": "in_progress",
+                "content": [],
+                "role": item.get("role", "assistant"),
+            }
+        elif item_type == "function_call":
+            added_item = {**item, "arguments": "", "status": "in_progress"}
+        elif item_type == "reasoning":
+            added_item = {
+                "id": item_id,
+                "type": "reasoning",
+                "status": "in_progress",
+                "summary": [],
+                "content": [],
+            }
+        else:
+            added_item = item
+
+        frames.append(
+            _frame(
+                {
+                    "type": "response.output_item.added",
+                    "output_index": output_index,
+                    "item": added_item,
+                    "sequence_number": next_seq(),
+                },
+                event_name="response.output_item.added",
+            )
+        )
+
+        if item_type == "message":
+            frames.extend(
+                _synthesize_openai_responses_message_content(
+                    item=item,
+                    item_id=item_id,
+                    output_index=output_index,
+                    next_seq=next_seq,
+                )
+            )
+        elif item_type == "function_call":
+            args = item.get("arguments") or ""
+            if args:
+                frames.append(
+                    _frame(
+                        {
+                            "type": "response.function_call_arguments.delta",
+                            "item_id": item_id,
+                            "output_index": output_index,
+                            "delta": args,
+                            "sequence_number": next_seq(),
+                        },
+                        event_name="response.function_call_arguments.delta",
+                    )
+                )
+            frames.append(
+                _frame(
+                    {
+                        "type": "response.function_call_arguments.done",
+                        "item_id": item_id,
+                        "output_index": output_index,
+                        "name": item.get("name", ""),
+                        "arguments": args,
+                        "sequence_number": next_seq(),
+                    },
+                    event_name="response.function_call_arguments.done",
+                )
+            )
+        elif item_type == "reasoning":
+            frames.extend(
+                _synthesize_openai_responses_reasoning_content(
+                    item=item,
+                    item_id=item_id,
+                    output_index=output_index,
+                    next_seq=next_seq,
+                )
+            )
+
+        frames.append(
+            _frame(
+                {
+                    "type": "response.output_item.done",
+                    "output_index": output_index,
+                    "item": item,
+                    "sequence_number": next_seq(),
+                },
+                event_name="response.output_item.done",
+            )
+        )
+
+    response_done = {
+        **body,
+        "id": response_id,
+        "object": body.get("object", "response"),
+        "created_at": created_at,
+        "model": model,
+        "status": body.get("status", "completed"),
+        "output": output_items,
+    }
+    frames.append(
+        _frame(
+            {
+                "type": "response.completed",
+                "response": response_done,
+                "sequence_number": next_seq(),
+            },
+            event_name="response.completed",
+        )
+    )
+    return b"".join(frames)
+
+
+def _synthesize_openai_responses_message_content(
+    *,
+    item: dict[str, Any],
+    item_id: str,
+    output_index: int,
+    next_seq: Any,
+) -> list[bytes]:
+    frames: list[bytes] = []
+    for content_index, part in enumerate(item.get("content") or []):
+        if not isinstance(part, dict):
+            continue
+        part_type = part.get("type")
+        if part_type == "output_text":
+            text = part.get("text") or ""
+            empty_part = {**part, "text": ""}
+            frames.append(
+                _frame(
+                    {
+                        "type": "response.content_part.added",
+                        "item_id": item_id,
+                        "output_index": output_index,
+                        "content_index": content_index,
+                        "part": empty_part,
+                        "sequence_number": next_seq(),
+                    },
+                    event_name="response.content_part.added",
+                )
+            )
+            if text:
+                frames.append(
+                    _frame(
+                        {
+                            "type": "response.output_text.delta",
+                            "item_id": item_id,
+                            "output_index": output_index,
+                            "content_index": content_index,
+                            "delta": text,
+                            "logprobs": [],
+                            "sequence_number": next_seq(),
+                        },
+                        event_name="response.output_text.delta",
+                    )
+                )
+            frames.append(
+                _frame(
+                    {
+                        "type": "response.output_text.done",
+                        "item_id": item_id,
+                        "output_index": output_index,
+                        "content_index": content_index,
+                        "text": text,
+                        "logprobs": part.get("logprobs") or [],
+                        "sequence_number": next_seq(),
+                    },
+                    event_name="response.output_text.done",
+                )
+            )
+            frames.append(
+                _frame(
+                    {
+                        "type": "response.content_part.done",
+                        "item_id": item_id,
+                        "output_index": output_index,
+                        "content_index": content_index,
+                        "part": part,
+                        "sequence_number": next_seq(),
+                    },
+                    event_name="response.content_part.done",
+                )
+            )
+        elif part_type == "refusal":
+            refusal = part.get("refusal") or ""
+            if refusal:
+                frames.append(
+                    _frame(
+                        {
+                            "type": "response.refusal.delta",
+                            "item_id": item_id,
+                            "output_index": output_index,
+                            "content_index": content_index,
+                            "delta": refusal,
+                            "sequence_number": next_seq(),
+                        },
+                        event_name="response.refusal.delta",
+                    )
+                )
+            frames.append(
+                _frame(
+                    {
+                        "type": "response.refusal.done",
+                        "item_id": item_id,
+                        "output_index": output_index,
+                        "content_index": content_index,
+                        "refusal": refusal,
+                        "sequence_number": next_seq(),
+                    },
+                    event_name="response.refusal.done",
+                )
+            )
+    return frames
+
+
+def _synthesize_openai_responses_reasoning_content(
+    *,
+    item: dict[str, Any],
+    item_id: str,
+    output_index: int,
+    next_seq: Any,
+) -> list[bytes]:
+    frames: list[bytes] = []
+    for summary_index, summary in enumerate(item.get("summary") or []):
+        if not isinstance(summary, dict):
+            continue
+        text = summary.get("text") or ""
+        if text:
+            frames.append(
+                _frame(
+                    {
+                        "type": "response.reasoning_summary_text.delta",
+                        "item_id": item_id,
+                        "output_index": output_index,
+                        "summary_index": summary_index,
+                        "delta": text,
+                        "sequence_number": next_seq(),
+                    },
+                    event_name="response.reasoning_summary_text.delta",
+                )
+            )
+        frames.append(
+            _frame(
+                {
+                    "type": "response.reasoning_summary_text.done",
+                    "item_id": item_id,
+                    "output_index": output_index,
+                    "summary_index": summary_index,
+                    "text": text,
+                    "sequence_number": next_seq(),
+                },
+                event_name="response.reasoning_summary_text.done",
+            )
+        )
+
+    for content_index, content in enumerate(item.get("content") or []):
+        if not isinstance(content, dict) or content.get("type") != "reasoning_text":
+            continue
+        text = content.get("text") or ""
+        if text:
+            frames.append(
+                _frame(
+                    {
+                        "type": "response.reasoning_text.delta",
+                        "item_id": item_id,
+                        "output_index": output_index,
+                        "content_index": content_index,
+                        "delta": text,
+                        "sequence_number": next_seq(),
+                    },
+                    event_name="response.reasoning_text.delta",
+                )
+            )
+        frames.append(
+            _frame(
+                {
+                    "type": "response.reasoning_text.done",
+                    "item_id": item_id,
+                    "output_index": output_index,
+                    "content_index": content_index,
+                    "text": text,
+                    "sequence_number": next_seq(),
+                },
+                event_name="response.reasoning_text.done",
+            )
+        )
+    return frames
+
+
 # ── Google: GenerateContentResponse → single SSE frame ─────────────────────
 
 
@@ -408,11 +738,7 @@ def _parts_to_openai_chat_completion(
                 content_chunks.append(part.content)
         elif isinstance(part, ToolCallPart):
             args = part.args
-            args_str = (
-                args
-                if isinstance(args, str)
-                else json.dumps(args or {}, separators=(",", ":"))
-            )
+            args_str = args if isinstance(args, str) else json.dumps(args or {}, separators=(",", ":"))
             out_tool_calls.append(
                 {
                     "id": part.tool_call_id,
@@ -425,7 +751,7 @@ def _parts_to_openai_chat_completion(
             )
 
     content_str = "".join(content_chunks) if content_chunks else None
-    resolved_finish = finish_reason or ("tool_calls" if out_tool_calls else "stop")
+    resolved_finish = "tool_calls" if out_tool_calls and finish_reason in (None, "stop") else finish_reason or "stop"
     message: dict[str, Any] = {
         "role": "assistant",
         "content": content_str,
@@ -478,9 +804,7 @@ def _parts_to_openai_responses(
                 {
                     "type": "message",
                     "role": "assistant",
-                    "content": [
-                        {"type": "output_text", "text": "".join(text_chunks)}
-                    ],
+                    "content": [{"type": "output_text", "text": "".join(text_chunks)}],
                 }
             )
             text_chunks.clear()
@@ -512,9 +836,7 @@ def _parts_to_openai_responses(
                 {
                     "type": "reasoning",
                     "summary": [],
-                    "content": [
-                        {"type": "reasoning_text", "text": part.content or ""}
-                    ],
+                    "content": [{"type": "reasoning_text", "text": part.content or ""}],
                 }
             )
     flush_text()
@@ -547,9 +869,7 @@ def _parts_to_anthropic_message(
                 blocks.append({"type": "text", "text": part.content})
         elif isinstance(part, ThinkingPart):
             if part.id == "redacted_thinking":
-                blocks.append(
-                    {"type": "redacted_thinking", "data": part.signature or ""}
-                )
+                blocks.append({"type": "redacted_thinking", "data": part.signature or ""})
             else:
                 blocks.append(
                     {
@@ -570,9 +890,7 @@ def _parts_to_anthropic_message(
                 }
             )
 
-    resolved_stop = stop_reason or (
-        "tool_use" if any(b.get("type") == "tool_use" for b in blocks) else "end_turn"
-    )
+    resolved_stop = stop_reason or ("tool_use" if any(b.get("type") == "tool_use" for b in blocks) else "end_turn")
     return {
         "id": provider_response_id or f"msg_{uuid.uuid4().hex[:24]}",
         "type": "message",
@@ -604,6 +922,8 @@ def transform_buffered_response_sync(
       ``BetaMessage`` JSON → synthesize SSE → feed Anthropic intake FSM.
     * OpenAI → parse ``ChatCompletion`` JSON → synthesize one
       ``ChatCompletionChunk`` SSE frame → feed OpenAI intake FSM.
+    * OpenAI Responses → pass SSE through or synthesize one Responses stream
+      from buffered ``Response`` JSON.
     * Google family (google / gemini / vertex_ai / vertex_ai_beta) → parse
       ``GenerateContentResponse`` JSON → wrap as one SSE frame → feed
       Google intake FSM (folds cloudcode-pa envelope unwrap internally).
@@ -620,15 +940,19 @@ def transform_buffered_response_sync(
     elif provider_type == "openai":
         body = _parse_json_body(raw_bytes)
         synthetic_sse = _synthesize_openai_sse(body) if isinstance(body, dict) else b""
+    elif provider_type == "openai_responses":
+        if _looks_like_sse(raw_bytes):
+            synthetic_sse = raw_bytes
+        else:
+            body = _parse_json_body(raw_bytes)
+            synthetic_sse = _synthesize_openai_responses_sse(body) if isinstance(body, dict) else b""
     elif provider_type in _GOOGLE_COMPATIBLE:
         body = _parse_json_body(raw_bytes)
         synthetic_sse = _synthesize_google_sse(body) if isinstance(body, dict) else b""
     elif provider_type == "perplexity_pro":
         synthetic_sse = raw_bytes
     else:
-        raise UnsupportedUpstreamError(
-            f"no buffered transform for provider_type={provider_type!r}"
-        )
+        raise UnsupportedUpstreamError(f"no buffered transform for provider_type={provider_type!r}")
 
     intake = dispatch_intake(
         provider_type=provider_type,
@@ -654,9 +978,7 @@ def transform_buffered_response_sync(
             finish_reason=_intake_finish_reason(intake),
         )
     else:
-        raise UnsupportedListenerError(
-            f"no buffered renderer for inbound_format={inbound_format}"
-        )
+        raise UnsupportedListenerError(f"no buffered renderer for inbound_format={inbound_format}")
 
     return json.dumps(out_dict, separators=(",", ":")).encode()
 
@@ -672,6 +994,11 @@ def _parse_json_body(raw_bytes: bytes) -> Any:
     except (ValueError, TypeError):
         logger.debug("buffered transform: unparseable upstream body; treating as empty")
         return {}
+
+
+def _looks_like_sse(raw_bytes: bytes) -> bool:
+    stripped = raw_bytes.lstrip()
+    return stripped.startswith(b"data:") or stripped.startswith(b"event:")
 
 
 def _intake_provider_response_id(intake: AnyAsyncIntakeFSM) -> str | None:

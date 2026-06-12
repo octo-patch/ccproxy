@@ -405,6 +405,9 @@ class Context:
     _cached_raw_extras: dict[str, Any] | None = field(default=None, repr=False)
     """Lazy-parsed raw_extras (wire fields not absorbed into IR), populated by parse_sync()."""
 
+    _parsed_dirty: bool = field(default=False, repr=False)
+    """True when typed IR setters require listener-format re-render on commit."""
+
     def invalidate_parsed(self) -> None:
         """Drop cached parse state so the next access re-parses from ``_body``."""
         self._cached_messages = None
@@ -412,6 +415,7 @@ class Context:
         self._cached_request_parameters = None
         self._cached_settings = None
         self._cached_raw_extras = None
+        self._parsed_dirty = False
 
     def parse_sync(self) -> None:
         """Parse ``self._body`` via the listener-format-matched parser.
@@ -500,6 +504,7 @@ class Context:
     def messages(self, value: list[ModelMessage]) -> None:
         self.parse_sync()
         self._cached_messages = value
+        self._parsed_dirty = True
 
     @property
     def request_parameters(self) -> ModelRequestParameters:
@@ -511,6 +516,7 @@ class Context:
     def request_parameters(self, value: ModelRequestParameters) -> None:
         self.parse_sync()
         self._cached_request_parameters = value
+        self._parsed_dirty = True
 
     @property
     def settings(self) -> ModelSettings:
@@ -522,6 +528,7 @@ class Context:
     def settings(self, value: ModelSettings) -> None:
         self.parse_sync()
         self._cached_settings = value
+        self._parsed_dirty = True
 
     @property
     def raw_extras(self) -> dict[str, Any]:
@@ -533,6 +540,7 @@ class Context:
     def raw_extras(self, value: dict[str, Any]) -> None:
         self.parse_sync()
         self._cached_raw_extras = value
+        self._parsed_dirty = True
 
     @property
     def stream(self) -> bool:
@@ -563,6 +571,7 @@ class Context:
     def system(self, value: list[SystemPromptPart]) -> None:
         self.parse_sync()
         self._cached_system = value
+        self._parsed_dirty = True
 
     @property
     def tools(self) -> list[ToolDefinition]:
@@ -576,6 +585,7 @@ class Context:
         self._cached_request_parameters = _dataclass_replace(
             self._cached_request_parameters, function_tools=list(value)
         )
+        self._parsed_dirty = True
 
     @property
     def tool_choice(self) -> Any:
@@ -732,14 +742,9 @@ class Context:
         upstream APIs reject unknown fields (e.g. Google: "Unknown name
         metadata").
         """
-        if (
-            self._cached_messages is not None
-            or self._cached_system is not None
-            or self._cached_request_parameters is not None
-            or self._cached_settings is not None
-            or self._cached_raw_extras is not None
-        ):
+        if self._parsed_dirty:
             self._flush_parsed_to_body()
+            self._parsed_dirty = False
         body = self._body
         if "metadata" in body and isinstance(body["metadata"], dict) and not body["metadata"]:
             del body["metadata"]

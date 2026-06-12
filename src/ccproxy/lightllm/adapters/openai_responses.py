@@ -36,10 +36,10 @@ from pydantic_ai.messages import (
 )
 from pydantic_ai.ui import MessagesBuilder
 
-from ccproxy.lightllm.adapters._openai_envelope import _format_tools as _openai_format_tools
 from ccproxy.lightllm.adapters._openai_responses_envelope import (
     _apply_responses_settings,
     _build_tool_call_id_index,
+    _format_responses_tools,
     _format_user_content,
     _stitch_raw_extras_top_level,
     parse_input_item,
@@ -145,11 +145,8 @@ class OpenAIResponsesAdapter:
         if instructions:
             body["instructions"] = instructions
 
-        tools_wire = _openai_format_tools(req.request_parameters.function_tools)
+        tools_wire = _format_responses_tools(req.request_parameters.function_tools)
         if tools_wire:
-            # Responses uses the same tool shape as Chat
-            # ({type: "function", function: {...}}); _openai_format_tools
-            # produces that shape directly.
             body["tools"] = tools_wire
 
         _apply_responses_settings(body, settings_dict)

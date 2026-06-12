@@ -14,7 +14,7 @@ chunks stream via ``response.output_text.delta`` and conclude with
 ``response.output_text.done`` carrying the accumulated text. Function
 calls stream their JSON arguments via
 ``response.function_call_arguments.delta``; reasoning items stream via
-``response.reasoning.text.delta``. The stream prelude is a single
+``response.reasoning_text.delta``. The stream prelude is a single
 ``response.created`` event with a Response envelope snapshot; the
 postlude is ``response.completed`` with final usage.
 
@@ -109,6 +109,12 @@ class _OpenItemState:
 
     args_buffer: str = ""
     """Accumulated JSON argument string for function_call items."""
+
+    tool_name: str = ""
+    """Function tool name for function_call ``.done`` events."""
+
+    tool_call_id: str = ""
+    """Function call id for function_call ``output_item.done`` events."""
 
     content_part_opened: bool = False
     """True after ``response.content_part.added`` was emitted (message items only)."""
@@ -293,6 +299,8 @@ def _open_function_call_item(
         item_type="function_call",
         item_id=item_id,
         output_index=output_index,
+        tool_name=part.tool_name,
+        tool_call_id=part.tool_call_id or "",
     )
     state.open_items[output_index] = item
     state.part_to_output_index[ir_index] = output_index
@@ -416,6 +424,7 @@ def _close_item(
                 "type": "response.function_call_arguments.done",
                 "item_id": item.item_id,
                 "output_index": item.output_index,
+                "name": item.tool_name,
                 "arguments": item.args_buffer,
                 "sequence_number": _bump_seq(state),
             },
@@ -429,8 +438,8 @@ def _close_item(
                     "id": item.item_id,
                     "type": "function_call",
                     "status": "completed",
-                    "call_id": "",  # filled in by caller-side state if needed
-                    "name": "",
+                    "call_id": item.tool_call_id,
+                    "name": item.tool_name,
                     "arguments": item.args_buffer,
                 },
                 "sequence_number": _bump_seq(state),
@@ -438,9 +447,9 @@ def _close_item(
         )
     elif item.item_type == "reasoning":
         state.out += _emit_event(
-            "response.reasoning.text.done",
+            "response.reasoning_text.done",
             {
-                "type": "response.reasoning.text.done",
+                "type": "response.reasoning_text.done",
                 "item_id": item.item_id,
                 "output_index": item.output_index,
                 "content_index": 0,
@@ -539,9 +548,9 @@ async def handle_part_start(
         if part.content:
             item.text_buffer += part.content
             state.out += _emit_event(
-                "response.reasoning.text.delta",
+                "response.reasoning_text.delta",
                 {
-                    "type": "response.reasoning.text.delta",
+                    "type": "response.reasoning_text.delta",
                     "item_id": item.item_id,
                     "output_index": item.output_index,
                     "content_index": 0,
@@ -578,9 +587,7 @@ async def handle_part_delta(
                 args=delta.args_delta if isinstance(delta.args_delta, str | dict) else None,
                 tool_call_id=delta.tool_call_id or "",
             )
-            item = _open_function_call_item(
-                state, ir_index=event.index, part=synthetic
-            )
+            item = _open_function_call_item(state, ir_index=event.index, part=synthetic)
         elif isinstance(delta, ThinkingPartDelta):
             item = _open_reasoning_item(state, ir_index=event.index)
         else:
@@ -627,9 +634,9 @@ async def handle_part_delta(
         if text_delta:
             item.text_buffer += text_delta
             state.out += _emit_event(
-                "response.reasoning.text.delta",
+                "response.reasoning_text.delta",
                 {
-                    "type": "response.reasoning.text.delta",
+                    "type": "response.reasoning_text.delta",
                     "item_id": item.item_id,
                     "output_index": item.output_index,
                     "content_index": 0,

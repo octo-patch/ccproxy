@@ -256,6 +256,38 @@ class TestCommit:
         assert written["messages"][0]["role"] == "user"
         assert written["messages"][1]["role"] == "assistant"
 
+    def test_commit_after_reading_responses_ir_preserves_tools(self):
+        body = {
+            "model": "gpt-5.5",
+            "instructions": "Be direct.",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "hi"}],
+                }
+            ],
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "shell_command",
+                    "description": "Run a shell command.",
+                    "strict": False,
+                    "parameters": {"type": "object", "properties": {}},
+                }
+            ],
+            "stream": True,
+        }
+        flow = _make_flow(body=body)
+        flow.request.path = "/backend-api/codex/responses"
+        ctx = Context.from_flow(flow)
+
+        assert ctx.messages
+        ctx.commit()
+
+        written = json.loads(flow.request.content)
+        assert written["tools"] == body["tools"]
+
     def test_header_mutations_do_not_require_commit(self):
         flow = _make_flow(headers={"x-orig": "a"})
         ctx = Context.from_flow(flow)

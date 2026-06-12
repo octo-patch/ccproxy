@@ -1,0 +1,581 @@
+"""OpenAI Responses SSE bytes -> pydantic-ai IR events via FSM."""
+
+from __future__ import annotations
+
+import logging
+from collections import deque
+from collections.abc import Iterator
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any
+
+from openai.types import responses
+from pydantic import TypeAdapter, ValidationError
+from pydantic_ai._parts_manager import ModelResponsePartsManager
+from pydantic_ai.messages import ModelResponseStreamEvent
+from pydantic_graph import GraphBuilder, StepContext
+
+if TYPE_CHECKING:
+    from pydantic_ai.messages import FinishReason
+    from pydantic_ai.models import ModelRequestParameters
+
+logger = logging.getLogger(__name__)
+
+
+_EVENT_ADAPTER: TypeAdapter[Any] = TypeAdapter(responses.ResponseStreamEvent)
+
+_RESPONSES_FINISH_REASON_MAP: dict[str, FinishReason] = {
+    "max_output_tokens": "length",
+    "content_filter": "content_filter",
+    "completed": "stop",
+    "cancelled": "error",
+    "failed": "error",
+}
+
+
+@dataclass(frozen=True)
+class _ResponseEnvelopeEvent:
+    event: Any
+
+
+@dataclass(frozen=True)
+class _OutputItemAddedEvent:
+    event: responses.ResponseOutputItemAddedEvent
+
+
+@dataclass(frozen=True)
+class _OutputItemDoneEvent:
+    event: responses.ResponseOutputItemDoneEvent
+
+
+@dataclass(frozen=True)
+class _TextDeltaEvent:
+    event: responses.ResponseTextDeltaEvent
+
+
+@dataclass(frozen=True)
+class _TextDoneEvent:
+    event: responses.ResponseTextDoneEvent
+
+
+@dataclass(frozen=True)
+class _FunctionArgumentsDeltaEvent:
+    event: responses.ResponseFunctionCallArgumentsDeltaEvent
+
+
+@dataclass(frozen=True)
+class _FunctionArgumentsDoneEvent:
+    event: responses.ResponseFunctionCallArgumentsDoneEvent
+
+
+@dataclass(frozen=True)
+class _ReasoningSummaryPartAddedEvent:
+    event: responses.ResponseReasoningSummaryPartAddedEvent
+
+
+@dataclass(frozen=True)
+class _ReasoningSummaryTextDeltaEvent:
+    event: responses.ResponseReasoningSummaryTextDeltaEvent
+
+
+@dataclass(frozen=True)
+class _ReasoningTextDeltaEvent:
+    event: responses.ResponseReasoningTextDeltaEvent
+
+
+@dataclass(frozen=True)
+class _RefusalDeltaEvent:
+    event: responses.ResponseRefusalDeltaEvent
+
+
+@dataclass(frozen=True)
+class _RefusalDoneEvent:
+    event: responses.ResponseRefusalDoneEvent
+
+
+@dataclass(frozen=True)
+class _NoOpEvent:
+    event_type: str
+
+
+class _FeedDone:
+    """Marker returned by the router when the events queue is exhausted."""
+
+
+@dataclass
+class _OpenAIResponsesIntakeState:
+    parts_manager: ModelResponsePartsManager
+    model: str
+    provider_response_id: str | None = None
+    provider_details: dict[str, object] | None = None
+    finish_reason: FinishReason | None = None
+    has_refusal: bool = False
+    refusal_text: str = ""
+    phase_by_item: dict[str, str] = field(default_factory=dict)
+    events_queue: deque[Any] = field(default_factory=deque)
+    out_events: list[ModelResponseStreamEvent] = field(default_factory=list)
+
+
+_g: GraphBuilder[_OpenAIResponsesIntakeState, None, None, list[ModelResponseStreamEvent]] = GraphBuilder(
+    state_type=_OpenAIResponsesIntakeState,
+    output_type=list[ModelResponseStreamEvent],
+)
+
+
+@_g.step
+async def frame_next_event(
+    ctx: StepContext[_OpenAIResponsesIntakeState, None, None],
+) -> Any:
+    if not ctx.state.events_queue:
+        return _FeedDone()
+    return ctx.state.events_queue.popleft()
+
+
+def _response_from_event(event: Any) -> Any:
+    return getattr(event, "response", None)
+
+
+def _record_response_metadata(state: _OpenAIResponsesIntakeState, event: Any) -> None:
+    response = _response_from_event(event)
+    if response is None:
+        return
+
+    if getattr(response, "id", None):
+        state.provider_response_id = response.id
+    if getattr(response, "model", None):
+        state.model = response.model
+
+    conversation = getattr(response, "conversation", None)
+    if conversation is not None and getattr(conversation, "id", None):
+        state.provider_details = {
+            **(state.provider_details or {}),
+            "conversation_id": conversation.id,
+        }
+
+    raw_finish_reason = None
+    if isinstance(
+        event,
+        (
+            responses.ResponseCompletedEvent,
+            responses.ResponseFailedEvent,
+            responses.ResponseIncompleteEvent,
+        ),
+    ):
+        incomplete_details = getattr(response, "incomplete_details", None)
+        raw_finish_reason = (
+            incomplete_details.reason
+            if incomplete_details is not None and getattr(incomplete_details, "reason", None)
+            else getattr(response, "status", None)
+        )
+
+    if raw_finish_reason and not state.has_refusal:
+        state.provider_details = {
+            **(state.provider_details or {}),
+            "finish_reason": raw_finish_reason,
+        }
+        state.finish_reason = _RESPONSES_FINISH_REASON_MAP.get(raw_finish_reason)
+
+
+@_g.step
+async def handle_response_envelope(
+    ctx: StepContext[_OpenAIResponsesIntakeState, None, _ResponseEnvelopeEvent],
+) -> None:
+    _record_response_metadata(ctx.state, ctx.inputs.event)
+
+
+@_g.step
+async def handle_output_item_added(
+    ctx: StepContext[_OpenAIResponsesIntakeState, None, _OutputItemAddedEvent],
+) -> None:
+    state = ctx.state
+    item = ctx.inputs.event.item
+
+    if isinstance(item, responses.ResponseFunctionToolCall):
+        provider_details: dict[str, object] | None = None
+        if item.namespace:
+            provider_details = {"namespace": item.namespace}
+        state.out_events.append(
+            state.parts_manager.handle_tool_call_part(
+                vendor_part_id=item.id,
+                tool_name=item.name,
+                args=item.arguments,
+                tool_call_id=item.call_id,
+                id=item.id,
+                provider_name="openai",
+                provider_details=provider_details,
+            )
+        )
+        return
+
+    if isinstance(item, responses.ResponseOutputMessage):
+        phase = getattr(item, "phase", None)
+        if phase is not None:
+            state.phase_by_item[item.id] = phase
+        return
+
+    if isinstance(item, responses.ResponseToolSearchCall) and item.execution == "client":
+        state.out_events.append(
+            state.parts_manager.handle_tool_call_part(
+                vendor_part_id=item.id,
+                tool_name=getattr(item, "name", "tool_search"),
+                args=None,
+                tool_call_id=item.call_id or item.id,
+                id=item.id,
+                provider_name="openai",
+            )
+        )
+
+
+@_g.step
+async def handle_output_item_done(
+    ctx: StepContext[_OpenAIResponsesIntakeState, None, _OutputItemDoneEvent],
+) -> None:
+    state = ctx.state
+    item = ctx.inputs.event.item
+
+    if isinstance(item, responses.ResponseReasoningItem):
+        if item.encrypted_content:
+            state.out_events.extend(
+                state.parts_manager.handle_thinking_delta(
+                    vendor_part_id=item.id,
+                    id=item.id,
+                    signature=item.encrypted_content,
+                    provider_name="openai",
+                )
+            )
+        return
+
+    if isinstance(item, responses.ResponseToolSearchCall) and item.execution == "client":
+        maybe_event = state.parts_manager.handle_tool_call_delta(
+            vendor_part_id=item.id,
+            args={},
+            tool_call_id=item.call_id or item.id,
+            provider_name="openai",
+        )
+        if maybe_event is not None:
+            state.out_events.append(maybe_event)
+
+
+@_g.step
+async def handle_text_delta(
+    ctx: StepContext[_OpenAIResponsesIntakeState, None, _TextDeltaEvent],
+) -> None:
+    event = ctx.inputs.event
+    if event.delta is None:
+        return
+    ctx.state.out_events.extend(
+        ctx.state.parts_manager.handle_text_delta(
+            vendor_part_id=event.item_id,
+            content=event.delta,
+            id=event.item_id,
+            provider_name="openai",
+        )
+    )
+
+
+@_g.step
+async def handle_text_done(
+    ctx: StepContext[_OpenAIResponsesIntakeState, None, _TextDoneEvent],
+) -> None:
+    state = ctx.state
+    event = ctx.inputs.event
+    provider_details: dict[str, object] = {}
+    phase = state.phase_by_item.get(event.item_id)
+    if phase is not None:
+        provider_details["phase"] = phase
+    if provider_details:
+        state.out_events.extend(
+            state.parts_manager.handle_text_delta(
+                vendor_part_id=event.item_id,
+                content="",
+                provider_name="openai",
+                provider_details=provider_details,
+            )
+        )
+
+
+@_g.step
+async def handle_function_arguments_delta(
+    ctx: StepContext[_OpenAIResponsesIntakeState, None, _FunctionArgumentsDeltaEvent],
+) -> None:
+    event = ctx.inputs.event
+    maybe_event = ctx.state.parts_manager.handle_tool_call_delta(
+        vendor_part_id=event.item_id,
+        args=event.delta,
+        provider_name="openai",
+    )
+    if maybe_event is not None:
+        ctx.state.out_events.append(maybe_event)
+
+
+@_g.step
+async def handle_function_arguments_done(
+    ctx: StepContext[_OpenAIResponsesIntakeState, None, _FunctionArgumentsDoneEvent],
+) -> None:
+    del ctx
+
+
+@_g.step
+async def handle_reasoning_summary_part_added(
+    ctx: StepContext[_OpenAIResponsesIntakeState, None, _ReasoningSummaryPartAddedEvent],
+) -> None:
+    event = ctx.inputs.event
+    vendor_id = event.item_id if event.summary_index == 0 else f"{event.item_id}-{event.summary_index}"
+    text = getattr(event.part, "text", "")
+    if text:
+        ctx.state.out_events.extend(
+            ctx.state.parts_manager.handle_thinking_delta(
+                vendor_part_id=vendor_id,
+                content=text,
+                id=event.item_id,
+                provider_name="openai",
+            )
+        )
+
+
+@_g.step
+async def handle_reasoning_summary_text_delta(
+    ctx: StepContext[_OpenAIResponsesIntakeState, None, _ReasoningSummaryTextDeltaEvent],
+) -> None:
+    event = ctx.inputs.event
+    vendor_id = event.item_id if event.summary_index == 0 else f"{event.item_id}-{event.summary_index}"
+    ctx.state.out_events.extend(
+        ctx.state.parts_manager.handle_thinking_delta(
+            vendor_part_id=vendor_id,
+            content=event.delta,
+            id=event.item_id,
+            provider_name="openai",
+        )
+    )
+
+
+@_g.step
+async def handle_reasoning_text_delta(
+    ctx: StepContext[_OpenAIResponsesIntakeState, None, _ReasoningTextDeltaEvent],
+) -> None:
+    event = ctx.inputs.event
+    ctx.state.out_events.extend(
+        ctx.state.parts_manager.handle_thinking_delta(
+            vendor_part_id=event.item_id,
+            content=event.delta,
+            id=event.item_id,
+            provider_name="openai",
+        )
+    )
+
+
+@_g.step
+async def handle_refusal_delta(
+    ctx: StepContext[_OpenAIResponsesIntakeState, None, _RefusalDeltaEvent],
+) -> None:
+    state = ctx.state
+    state.has_refusal = True
+    state.finish_reason = "content_filter"
+    state.refusal_text += ctx.inputs.event.delta
+
+
+@_g.step
+async def handle_refusal_done(
+    ctx: StepContext[_OpenAIResponsesIntakeState, None, _RefusalDoneEvent],
+) -> None:
+    state = ctx.state
+    state.has_refusal = True
+    state.finish_reason = "content_filter"
+    state.refusal_text = ctx.inputs.event.refusal
+
+
+@_g.step
+async def handle_noop(
+    ctx: StepContext[_OpenAIResponsesIntakeState, None, _NoOpEvent],
+) -> None:
+    logger.debug("openai responses intake: no-op event %s", ctx.inputs.event_type)
+
+
+@_g.step
+async def emit_done(
+    ctx: StepContext[_OpenAIResponsesIntakeState, None, _FeedDone],
+) -> list[ModelResponseStreamEvent]:
+    out = ctx.state.out_events
+    ctx.state.out_events = []
+    return out
+
+
+_g.add(
+    _g.edge_from(_g.start_node).to(frame_next_event),
+    _g.edge_from(frame_next_event).to(
+        _g.decision()
+        .branch(_g.match(_FeedDone).to(emit_done))
+        .branch(_g.match(_ResponseEnvelopeEvent).to(handle_response_envelope))
+        .branch(_g.match(_OutputItemAddedEvent).to(handle_output_item_added))
+        .branch(_g.match(_OutputItemDoneEvent).to(handle_output_item_done))
+        .branch(_g.match(_TextDeltaEvent).to(handle_text_delta))
+        .branch(_g.match(_TextDoneEvent).to(handle_text_done))
+        .branch(_g.match(_FunctionArgumentsDeltaEvent).to(handle_function_arguments_delta))
+        .branch(_g.match(_FunctionArgumentsDoneEvent).to(handle_function_arguments_done))
+        .branch(_g.match(_ReasoningSummaryPartAddedEvent).to(handle_reasoning_summary_part_added))
+        .branch(_g.match(_ReasoningSummaryTextDeltaEvent).to(handle_reasoning_summary_text_delta))
+        .branch(_g.match(_ReasoningTextDeltaEvent).to(handle_reasoning_text_delta))
+        .branch(_g.match(_RefusalDeltaEvent).to(handle_refusal_delta))
+        .branch(_g.match(_RefusalDoneEvent).to(handle_refusal_done))
+        .branch(_g.match(_NoOpEvent).to(handle_noop))
+    ),
+    _g.edge_from(
+        handle_response_envelope,
+        handle_output_item_added,
+        handle_output_item_done,
+        handle_text_delta,
+        handle_text_done,
+        handle_function_arguments_delta,
+        handle_function_arguments_done,
+        handle_reasoning_summary_part_added,
+        handle_reasoning_summary_text_delta,
+        handle_reasoning_text_delta,
+        handle_refusal_delta,
+        handle_refusal_done,
+        handle_noop,
+    ).to(frame_next_event),
+    _g.edge_from(emit_done).to(_g.end_node),
+)
+
+
+_intake_graph = _g.build()
+
+
+class OpenAIResponsesIntakeFSM:
+    """Async pydantic-graph-driven OpenAI Responses SSE intake."""
+
+    name = "openai_responses"
+
+    def __init__(self, *, model: str, request_params: ModelRequestParameters) -> None:
+        self._request_params = request_params
+        self._sse_buffer = bytearray()
+        self.upstream_raw_bytes = bytearray()
+        self._terminated = False
+        self._state = _OpenAIResponsesIntakeState(
+            parts_manager=ModelResponsePartsManager(model_request_parameters=request_params),
+            model=model,
+        )
+
+    @property
+    def parts_manager(self) -> ModelResponsePartsManager:
+        return self._state.parts_manager
+
+    @property
+    def _model(self) -> str:
+        return self._state.model
+
+    @property
+    def _has_refusal(self) -> bool:
+        return self._state.has_refusal
+
+    @property
+    def _refusal_text(self) -> str:
+        return self._state.refusal_text
+
+    @property
+    def provider_response_id(self) -> str | None:
+        return self._state.provider_response_id
+
+    @property
+    def provider_details(self) -> dict[str, object] | None:
+        return self._state.provider_details
+
+    @property
+    def finish_reason(self) -> FinishReason | None:
+        return self._state.finish_reason
+
+    async def feed(self, data: bytes) -> list[ModelResponseStreamEvent]:
+        self.upstream_raw_bytes.extend(data)
+        if self._terminated:
+            return []
+        self._sse_buffer.extend(data)
+        for envelope in self._drain_sse_envelopes():
+            self._state.events_queue.append(envelope)
+        if not self._state.events_queue:
+            return []
+        result = await _intake_graph.run(state=self._state)
+        return result
+
+    async def close(self) -> list[ModelResponseStreamEvent]:
+        if self._state.refusal_text:
+            self._state.provider_details = {
+                **(self._state.provider_details or {}),
+                "refusal": self._state.refusal_text,
+            }
+        return []
+
+    def _drain_sse_envelopes(self) -> Iterator[Any]:
+        while True:
+            if self._terminated:
+                return
+            crlf = self._sse_buffer.find(b"\r\n\r\n")
+            lf = self._sse_buffer.find(b"\n\n")
+            if crlf == -1 and lf == -1:
+                return
+            if crlf != -1 and (lf == -1 or crlf < lf):
+                sep_idx, sep_len = crlf, 4
+            else:
+                sep_idx, sep_len = lf, 2
+            frame = bytes(self._sse_buffer[:sep_idx])
+            del self._sse_buffer[: sep_idx + sep_len]
+            payload = _extract_data_payload(frame)
+            if payload is None:
+                continue
+            if payload == b"[DONE]":
+                self._terminated = True
+                return
+            try:
+                event = _EVENT_ADAPTER.validate_json(payload)
+            except ValidationError:
+                logger.debug("openai responses intake: skipping unparseable frame: %r", payload)
+                continue
+            yield _classify_event(event)
+
+
+def _classify_event(event: Any) -> Any:
+    if isinstance(
+        event,
+        (
+            responses.ResponseCreatedEvent,
+            responses.ResponseQueuedEvent,
+            responses.ResponseInProgressEvent,
+            responses.ResponseCompletedEvent,
+            responses.ResponseFailedEvent,
+            responses.ResponseIncompleteEvent,
+        ),
+    ):
+        return _ResponseEnvelopeEvent(event=event)
+    if isinstance(event, responses.ResponseOutputItemAddedEvent):
+        return _OutputItemAddedEvent(event=event)
+    if isinstance(event, responses.ResponseOutputItemDoneEvent):
+        return _OutputItemDoneEvent(event=event)
+    if isinstance(event, responses.ResponseTextDeltaEvent):
+        return _TextDeltaEvent(event=event)
+    if isinstance(event, responses.ResponseTextDoneEvent):
+        return _TextDoneEvent(event=event)
+    if isinstance(event, responses.ResponseFunctionCallArgumentsDeltaEvent):
+        return _FunctionArgumentsDeltaEvent(event=event)
+    if isinstance(event, responses.ResponseFunctionCallArgumentsDoneEvent):
+        return _FunctionArgumentsDoneEvent(event=event)
+    if isinstance(event, responses.ResponseReasoningSummaryPartAddedEvent):
+        return _ReasoningSummaryPartAddedEvent(event=event)
+    if isinstance(event, responses.ResponseReasoningSummaryTextDeltaEvent):
+        return _ReasoningSummaryTextDeltaEvent(event=event)
+    if isinstance(event, responses.ResponseReasoningTextDeltaEvent):
+        return _ReasoningTextDeltaEvent(event=event)
+    if isinstance(event, responses.ResponseRefusalDeltaEvent):
+        return _RefusalDeltaEvent(event=event)
+    if isinstance(event, responses.ResponseRefusalDoneEvent):
+        return _RefusalDoneEvent(event=event)
+    return _NoOpEvent(event_type=getattr(event, "type", type(event).__name__))
+
+
+def _extract_data_payload(frame: bytes) -> bytes | None:
+    data_lines: list[bytes] = []
+    for line in frame.splitlines():
+        stripped = line.strip()
+        if stripped.startswith(b"data:"):
+            data_lines.append(stripped[5:].strip())
+    if not data_lines:
+        return None
+    payload = b"\n".join(data_lines).strip()
+    return payload or None

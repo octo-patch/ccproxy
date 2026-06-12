@@ -368,21 +368,20 @@ class TestSettingsAndTools:
         assert settings["temperature"] == 0.4
         assert settings["top_p"] == 0.9
 
-    def test_function_tools_share_chat_shape(self, parse: Parse) -> None:
+    def test_function_tools_parse_responses_shape(self, parse: Parse) -> None:
         body = {
             "model": "gpt-5",
             "input": "hi",
             "tools": [
                 {
                     "type": "function",
-                    "function": {
-                        "name": "get_weather",
-                        "description": "Look up weather",
-                        "parameters": {
-                            "type": "object",
-                            "properties": {"city": {"type": "string"}},
-                        },
+                    "name": "get_weather",
+                    "description": "Look up weather",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}},
                     },
+                    "strict": False,
                 }
             ],
         }
@@ -391,6 +390,7 @@ class TestSettingsAndTools:
         assert len(tools) == 1
         assert tools[0].name == "get_weather"
         assert tools[0].description == "Look up weather"
+        assert tools[0].strict is False
 
     def test_unknown_top_level_keys_preserved_in_raw_extras(self, parse: Parse) -> None:
         body = {
@@ -510,17 +510,18 @@ class TestRenderRoundTrip:
             "tools": [
                 {
                     "type": "function",
-                    "function": {
-                        "name": "ping",
-                        "parameters": {"type": "object", "properties": {}},
-                    },
+                    "name": "ping",
+                    "parameters": {"type": "object", "properties": {}},
+                    "strict": False,
                 }
             ],
         }
         result = parse(body)
         rendered = render_request(result, inbound_format=InboundFormat.OPENAI_RESPONSES)
         out = json.loads(rendered)
-        assert out["tools"][0]["function"]["name"] == "ping"
+        assert out["tools"][0]["name"] == "ping"
+        assert out["tools"][0]["parameters"] == {"type": "object", "properties": {}}
+        assert out["tools"][0]["strict"] is False
 
     def test_image_in_user_message_round_trips(self, parse: Parse) -> None:
         body = {

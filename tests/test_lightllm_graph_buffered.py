@@ -7,6 +7,8 @@ Covers the four provider paths in
   OpenAI ``ChatCompletion`` JSON.
 * **OpenAI buffered** — ``ChatCompletion`` JSON → synthetic SSE → FSM intake →
   Anthropic ``BetaMessage`` JSON (the other direction).
+* **OpenAI Responses buffered** — ``Response`` JSON → synthetic Responses SSE →
+  FSM intake → listener JSON.
 * **Google buffered** — ``GenerateContentResponse`` JSON → one SSE frame →
   FSM intake → OpenAI ``ChatCompletion`` JSON.
 * **Perplexity buffered** — concatenated SSE → fed directly → FSM intake →
@@ -264,6 +266,81 @@ class TestOpenAIBufferedToAnthropic:
         assert out["stop_reason"] == "tool_use"
 
 
+# ── OpenAI Responses buffered → OpenAI Chat / Anthropic ───────────────────
+
+
+def _make_openai_responses_body() -> bytes:
+    return json.dumps(
+        {
+            "id": "resp_buf_test",
+            "object": "response",
+            "created_at": 1700000000,
+            "model": "gpt-5",
+            "status": "completed",
+            "output": [
+                {
+                    "id": "msg_001",
+                    "type": "message",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": "Responses text",
+                            "annotations": [],
+                        }
+                    ],
+                },
+                {
+                    "id": "fc_001",
+                    "type": "function_call",
+                    "call_id": "call_1",
+                    "name": "lookup",
+                    "arguments": '{"q":"hi"}',
+                    "status": "completed",
+                },
+            ],
+            "parallel_tool_calls": True,
+            "tool_choice": "auto",
+            "tools": [],
+        }
+    ).encode()
+
+
+class TestOpenAIResponsesBuffered:
+    def test_to_openai_chat(self) -> None:
+        out_bytes = transform_buffered_response_sync(
+            raw_bytes=_make_openai_responses_body(),
+            provider_type="openai_responses",
+            inbound_format=InboundFormat.OPENAI_CHAT,
+            model="gpt-5",
+            request_params=ModelRequestParameters(),
+        )
+        out = json.loads(out_bytes)
+        choice = out["choices"][0]
+        assert choice["message"]["content"] == "Responses text"
+        [tool_call] = choice["message"]["tool_calls"]
+        assert tool_call["function"]["name"] == "lookup"
+        assert json.loads(tool_call["function"]["arguments"]) == {"q": "hi"}
+        assert choice["finish_reason"] == "tool_calls"
+
+    def test_to_anthropic(self) -> None:
+        out_bytes = transform_buffered_response_sync(
+            raw_bytes=_make_openai_responses_body(),
+            provider_type="openai_responses",
+            inbound_format=InboundFormat.ANTHROPIC_MESSAGES,
+            model="gpt-5",
+            request_params=ModelRequestParameters(),
+        )
+        out = json.loads(out_bytes)
+        assert out["type"] == "message"
+        assert out["content"][0] == {"type": "text", "text": "Responses text"}
+        tool_block = out["content"][1]
+        assert tool_block["type"] == "tool_use"
+        assert tool_block["name"] == "lookup"
+        assert tool_block["input"] == {"q": "hi"}
+
+
 # ── Google buffered → OpenAI ChatCompletion ────────────────────────────────
 
 
@@ -365,9 +442,7 @@ def _make_perplexity_sse(answer_text: str) -> bytes:
             ],
         },
     ]
-    return b"".join(
-        f"data: {json.dumps(e, separators=(',', ':'))}\n\n".encode() for e in events
-    )
+    return b"".join(f"data: {json.dumps(e, separators=(',', ':'))}\n\n".encode() for e in events)
 
 
 class TestPerplexityBufferedToOpenAI:
