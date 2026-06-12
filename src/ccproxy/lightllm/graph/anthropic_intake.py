@@ -138,9 +138,7 @@ type _RoutedEvent = (
 # ── Graph ──────────────────────────────────────────────────────────────────
 
 
-_g: GraphBuilder[
-    _AnthropicIntakeState, None, None, list[ModelResponseStreamEvent]
-] = GraphBuilder(
+_g: GraphBuilder[_AnthropicIntakeState, None, None, list[ModelResponseStreamEvent]] = GraphBuilder(
     state_type=_AnthropicIntakeState,
     output_type=list[ModelResponseStreamEvent],
 )
@@ -180,9 +178,7 @@ async def handle_content_block_start(
     pm = state.parts_manager
 
     if isinstance(current_block, BetaTextBlock) and current_block.text:
-        state.out_events.extend(
-            pm.handle_text_delta(vendor_part_id=event.index, content=current_block.text)
-        )
+        state.out_events.extend(pm.handle_text_delta(vendor_part_id=event.index, content=current_block.text))
         return
     if isinstance(current_block, BetaThinkingBlock):
         state.out_events.extend(
@@ -217,9 +213,7 @@ async def handle_content_block_start(
     if isinstance(current_block, BetaServerToolUseBlock):
         call_part = _map_server_tool_use_block(current_block, provider_name)
         state.builtin_tool_calls[call_part.tool_call_id] = call_part
-        state.out_events.append(
-            pm.handle_part(vendor_part_id=event.index, part=call_part)
-        )
+        state.out_events.append(pm.handle_part(vendor_part_id=event.index, part=call_part))
         return
     if isinstance(current_block, BetaWebSearchToolResultBlock):
         state.out_events.append(
@@ -252,13 +246,9 @@ async def handle_content_block_start(
         args_json = call_part.args_as_json_str()
         # Drop the final ``{}}`` so we can add tool args deltas
         args_json_delta = args_json[:-3]
-        assert args_json_delta.endswith('"tool_args":'), (
-            f'Expected {args_json_delta!r} to end in `"tool_args":`'
-        )
+        assert args_json_delta.endswith('"tool_args":'), f'Expected {args_json_delta!r} to end in `"tool_args":`'
 
-        state.out_events.append(
-            pm.handle_part(vendor_part_id=event.index, part=replace(call_part, args=None))
-        )
+        state.out_events.append(pm.handle_part(vendor_part_id=event.index, part=replace(call_part, args=None)))
         maybe_event = pm.handle_tool_call_delta(
             vendor_part_id=event.index,
             args=args_json_delta,
@@ -271,9 +261,7 @@ async def handle_content_block_start(
         state.out_events.append(
             pm.handle_part(
                 vendor_part_id=event.index,
-                part=_map_mcp_server_result_block(
-                    current_block, mcp_call_part, provider_name
-                ),
+                part=_map_mcp_server_result_block(current_block, mcp_call_part, provider_name),
             )
         )
         return
@@ -281,9 +269,7 @@ async def handle_content_block_start(
         state.out_events.append(
             pm.handle_part(
                 vendor_part_id=event.index,
-                part=CompactionPart(
-                    content=current_block.content, provider_name=provider_name
-                ),
+                part=CompactionPart(content=current_block.content, provider_name=provider_name),
             )
         )
         return
@@ -301,9 +287,7 @@ async def handle_content_block_delta(
     delta = event.delta
 
     if isinstance(delta, BetaTextDelta):
-        state.out_events.extend(
-            pm.handle_text_delta(vendor_part_id=event.index, content=delta.text)
-        )
+        state.out_events.extend(pm.handle_text_delta(vendor_part_id=event.index, content=delta.text))
         return
     if isinstance(delta, BetaThinkingDelta):
         state.out_events.extend(
@@ -336,9 +320,7 @@ async def handle_content_block_delta(
             state.out_events.append(
                 pm.handle_part(
                     vendor_part_id=event.index,
-                    part=CompactionPart(
-                        content=delta.content, provider_name=provider_name
-                    ),
+                    part=CompactionPart(content=delta.content, provider_name=provider_name),
                 )
             )
         return

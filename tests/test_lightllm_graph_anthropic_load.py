@@ -38,6 +38,7 @@ def parse() -> Parse:
 
     return _parse
 
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -56,9 +57,7 @@ def _wrap(messages: list[dict[str, Any]], **extras: Any) -> dict[str, Any]:
 
 class TestParseSystem:
     def test_string(self, parse: Parse) -> None:
-        parsed = parse(
-            _wrap(messages=[{"role": "user", "content": "hi"}], system="Be helpful.")
-        )
+        parsed = parse(_wrap(messages=[{"role": "user", "content": "hi"}], system="Be helpful."))
         first = parsed.messages[0]
         assert isinstance(first, ModelRequest)
         assert isinstance(first.parts[0], SystemPromptPart)
@@ -248,9 +247,7 @@ class TestParseMessages:
         assert cp.ttl == "1h"
 
     def test_assistant_text(self, parse: Parse) -> None:
-        parsed = parse(
-            _wrap([{"role": "assistant", "content": [{"type": "text", "text": "hi"}]}])
-        )
+        parsed = parse(_wrap([{"role": "assistant", "content": [{"type": "text", "text": "hi"}]}]))
         first = parsed.messages[0]
         assert isinstance(first, ModelResponse)
         assert isinstance(first.parts[0], TextPart)
@@ -552,9 +549,7 @@ class TestEdgeCases:
         assert isinstance(req.parts[1], ToolReturnPart)
 
     def test_unknown_assistant_block_text_includes_json(self, parse: Parse) -> None:
-        parsed = parse(
-            _wrap([{"role": "assistant", "content": [{"type": "custom", "data": "x"}]}])
-        )
+        parsed = parse(_wrap([{"role": "assistant", "content": [{"type": "custom", "data": "x"}]}]))
         resp = parsed.messages[0]
         assert isinstance(resp, ModelResponse)
         text_part = resp.parts[0]
@@ -640,9 +635,7 @@ class TestSettings:
         assert parsed.raw_extras["service_tier"] == "standard_only"
 
     def test_model_name(self, parse: Parse) -> None:
-        parsed = parse(
-            {"model": "claude-3-5-haiku-20241022", "messages": [{"role": "user", "content": "x"}]}
-        )
+        parsed = parse({"model": "claude-3-5-haiku-20241022", "messages": [{"role": "user", "content": "x"}]})
         assert parsed.model == "claude-3-5-haiku-20241022"
 
 

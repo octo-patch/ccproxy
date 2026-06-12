@@ -107,9 +107,7 @@ def intake_factory() -> _IntakeFactory:
     """Factory for the FSM intake wrapped in a sync adapter."""
 
     def _make(*, model: str = "perplexity/best") -> _IntakeLike:
-        return _PerplexityFSMAdapter(
-            model=model, request_params=ModelRequestParameters()
-        )
+        return _PerplexityFSMAdapter(model=model, request_params=ModelRequestParameters())
 
     return _make
 

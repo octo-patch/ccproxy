@@ -54,6 +54,8 @@ class AuthAddon:
         target_header = (config.get_auth_header(provider) or "authorization").lower()
         new_value = f"Bearer {new_token}" if target_header == "authorization" else new_token
         flow.request.headers[target_header] = new_value
+        for header, value in config.get_auth_extra_headers(provider).items():
+            flow.request.headers[header] = value
 
         logger.info("Auth 401 for provider '%s' — token refreshed, retrying request", provider)
 

@@ -130,9 +130,7 @@ _IR_OWNED_TOP_LEVEL: frozenset[str] = frozenset(
 )
 
 
-def _parse_system(
-    raw_system: Any, *, settings: ModelSettings, raw_extras: dict[str, Any]
-) -> list[SystemPromptPart]:
+def _parse_system(raw_system: Any, *, settings: ModelSettings, raw_extras: dict[str, Any]) -> list[SystemPromptPart]:
     """Extract the top-level Anthropic ``system`` field into SystemPromptParts.
 
     Cache control on system blocks is normalized:
@@ -175,9 +173,7 @@ def _parse_system(
     return parts
 
 
-def _attach_system_prompts(
-    messages: list[ModelMessage], system_parts: list[SystemPromptPart]
-) -> list[ModelMessage]:
+def _attach_system_prompts(messages: list[ModelMessage], system_parts: list[SystemPromptPart]) -> list[ModelMessage]:
     """Prepend ``system_parts`` to the first ``ModelRequest`` in ``messages``.
 
     If no ``ModelRequest`` exists, a new one is created at position 0.

@@ -238,9 +238,7 @@ BOUNDARY_CASES: list[BoundaryCase] = [
 
 class TestChunkBoundaryRobustness:
     @pytest.mark.parametrize("case", [pytest.param(c, id=c.name) for c in BOUNDARY_CASES])
-    def test_text_stream_invariant(
-        self, case: BoundaryCase, intake_factory: _IntakeFactory
-    ) -> None:
+    def test_text_stream_invariant(self, case: BoundaryCase, intake_factory: _IntakeFactory) -> None:
         stream = _build_stream(
             [
                 _chunk(parts=[{"text": "abc"}], finish_reason=None),
@@ -545,12 +543,8 @@ class TestEnvelopeUnwrap:
         bare = _chunk(parts=[{"text": "Hello"}], finish_reason="STOP")
         wrapped = _envelope(bare)
 
-        bare_intake = _GoogleFSMAdapter(
-            model="gemini-2.5-flash", request_params=ModelRequestParameters()
-        )
-        wrapped_intake = _GoogleFSMAdapter(
-            model="gemini-2.5-flash", request_params=ModelRequestParameters()
-        )
+        bare_intake = _GoogleFSMAdapter(model="gemini-2.5-flash", request_params=ModelRequestParameters())
+        wrapped_intake = _GoogleFSMAdapter(model="gemini-2.5-flash", request_params=ModelRequestParameters())
 
         bare_events = _feed_all(bare_intake, _sse(bare))
         wrapped_events = _feed_all(wrapped_intake, _sse(wrapped))
@@ -584,9 +578,7 @@ class TestEnvelopeUnwrap:
         )
         wrapped = _envelope(bare)
 
-        intake = _GoogleFSMAdapter(
-            model="gemini-2.5-flash", request_params=ModelRequestParameters()
-        )
+        intake = _GoogleFSMAdapter(model="gemini-2.5-flash", request_params=ModelRequestParameters())
         events = _feed_all(intake, _sse(wrapped))
 
         starts = [e for e in events if isinstance(e, PartStartEvent)]
@@ -604,22 +596,14 @@ class TestEnvelopeUnwrap:
         wrapped_a = _envelope(bare_a)
         stream = _sse(wrapped_a) + _sse(bare_b)
 
-        intake = _GoogleFSMAdapter(
-            model="gemini-2.5-flash", request_params=ModelRequestParameters()
-        )
+        intake = _GoogleFSMAdapter(model="gemini-2.5-flash", request_params=ModelRequestParameters())
         events = _feed_all(intake, stream)
 
-        text_starts = [
-            e for e in events if isinstance(e, PartStartEvent) and isinstance(e.part, TextPart)
-        ]
-        text_deltas = [
-            e for e in events if isinstance(e, PartDeltaEvent) and isinstance(e.delta, TextPartDelta)
-        ]
+        text_starts = [e for e in events if isinstance(e, PartStartEvent) and isinstance(e.part, TextPart)]
+        text_deltas = [e for e in events if isinstance(e, PartDeltaEvent) and isinstance(e.delta, TextPartDelta)]
         assert len(text_starts) == 1
         first = text_starts[0].part
         assert isinstance(first, TextPart)
         assert first.content == "abc"
-        delta_contents = [
-            d.delta.content_delta for d in text_deltas if isinstance(d.delta, TextPartDelta)
-        ]
+        delta_contents = [d.delta.content_delta for d in text_deltas if isinstance(d.delta, TextPartDelta)]
         assert delta_contents == ["def"]

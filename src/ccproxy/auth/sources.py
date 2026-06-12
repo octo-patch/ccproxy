@@ -29,11 +29,13 @@ strings and dict-without-type forms are resolved via ``parse_auth_source``.
 
 from __future__ import annotations
 
+import base64
 import copy
 import json
 import logging
 import subprocess
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
@@ -109,6 +111,10 @@ class AuthFields(BaseModel):
     """Target header name (e.g. ``x-api-key``). When set, the resolved token
     is injected as a raw value into this header. ``None`` (default) sends
     ``Authorization: Bearer {token}``."""
+
+    def extra_headers(self, label: str = "Auth") -> dict[str, str]:
+        """Provider-specific companion auth headers stamped with the token."""
+        return {}
 
 
 class CommandAuthSource(AuthFields):
@@ -355,8 +361,153 @@ class GoogleAuthSource(AuthSource):
         }
 
 
+class CodexAuthSource(AuthFields):
+    """Refreshes Codex ChatGPT OAuth tokens from Codex's ``auth.json``.
+
+    Codex's first-party backend uses the ChatGPT bearer token plus account
+    routing headers derived from the same auth file. The bearer token remains
+    the value returned by ``resolve()``; companion headers are exposed through
+    ``extra_headers()`` so the generic ``inject_auth`` hook can stamp them
+    without packaging any account-specific values into shapes.
+    """
+
+    type: Literal["codex_oauth"] = "codex_oauth"
+    file_path: str = "~/.codex/auth.json"
+    endpoint: str = "https://auth.openai.com/oauth/token"
+    client_id: str = "app_EMoamEEZ73f0CkXaXp7hrann"
+    access_path: str = "tokens.access_token"
+    refresh_path: str = "tokens.refresh_token"
+    identity_jwt_path: str = "tokens.id_token"
+    account_id_path: str = "tokens.account_id"
+    last_refresh_path: str = "last_refresh"
+
+    def resolve(self, label: str = "Auth") -> str | None:
+        path = Path(self.file_path).expanduser()
+        creds = self._read_json(path, label)
+        if creds is None:
+            return None
+
+        access = _glom_default(creds, self.access_path)
+        if isinstance(access, str) and access and not _jwt_needs_refresh(access):
+            return access
+
+        refresh = _glom_default(creds, self.refresh_path)
+        if not isinstance(refresh, str) or not refresh:
+            logger.error("%s missing refresh_token at %r in %s", label, self.refresh_path, path)
+            return None
+
+        logger.info("%s refreshing Codex access_token", label)
+        payload = self._refresh_token(refresh)
+        if payload is None:
+            return None
+
+        new_access = payload.get("access_token")
+        if not isinstance(new_access, str) or not new_access:
+            logger.error("%s refresh response missing access_token", label)
+            return None
+
+        new_refresh = payload.get("refresh_token") or refresh
+        merged = copy.deepcopy(creds)
+        assign(merged, self.access_path, new_access, missing=dict)
+        assign(merged, self.refresh_path, new_refresh, missing=dict)
+        id_token = payload.get("id_token")
+        if isinstance(id_token, str) and id_token:
+            assign(merged, self.identity_jwt_path, id_token, missing=dict)
+            account_id = _chatgpt_account_id_from_jwt(id_token)
+            if account_id:
+                assign(merged, self.account_id_path, account_id, missing=dict)
+        assign(merged, self.last_refresh_path, _utc_now_rfc3339(), missing=dict)
+        atomic_write_back(path, merged)
+        return new_access
+
+    def extra_headers(self, label: str = "Auth") -> dict[str, str]:
+        path = Path(self.file_path).expanduser()
+        creds = self._read_json(path, label)
+        if creds is None:
+            return {}
+
+        headers: dict[str, str] = {}
+        account_id = self._account_id(creds)
+        if account_id:
+            headers["ChatGPT-Account-ID"] = account_id
+        if self._is_fedramp(creds):
+            headers["X-OpenAI-Fedramp"] = "true"
+        return headers
+
+    def _refresh_token(
+        self,
+        refresh_token: str,
+        *,
+        transport: httpx.BaseTransport | None = None,
+    ) -> dict[str, Any] | None:
+        body = {
+            "client_id": self.client_id,
+            "grant_type": "refresh_token",
+            "refresh_token": refresh_token,
+        }
+        try:
+            client_kwargs: dict[str, Any] = {
+                "timeout": _auth_runtime_value("refresh_timeout_seconds", _REFRESH_TIMEOUT_SEC)
+            }
+            if transport is not None:
+                client_kwargs["transport"] = transport
+            with httpx.Client(**client_kwargs) as client:
+                resp = client.post(self.endpoint, json=body)
+        except httpx.HTTPError as exc:
+            logger.error("Codex OAuth refresh failed: %s", exc)
+            return None
+
+        if resp.status_code != 200:
+            logger.error("Codex OAuth refresh returned %d", resp.status_code)
+            return None
+
+        try:
+            payload = resp.json()
+        except (json.JSONDecodeError, ValueError) as exc:
+            logger.error("Codex OAuth refresh returned non-JSON: %s", exc)
+            return None
+
+        if not isinstance(payload, dict) or "access_token" not in payload:
+            logger.error("Codex OAuth refresh response missing access_token")
+            return None
+        return payload
+
+    def _read_json(self, path: Path, label: str) -> dict[str, Any] | None:
+        if not path.is_file():
+            logger.error("%s credential file not found: %s", label, path)
+            return None
+        try:
+            data = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError) as exc:
+            logger.error("%s could not read %s: %s", label, path, exc)
+            return None
+        if not isinstance(data, dict):
+            logger.error("%s credential file must contain a JSON object: %s", label, path)
+            return None
+        return data
+
+    def _account_id(self, creds: dict[str, Any]) -> str | None:
+        direct = _glom_default(creds, self.account_id_path)
+        if isinstance(direct, str) and direct:
+            return direct
+        for path in (self.identity_jwt_path, self.access_path):
+            token = _glom_default(creds, path)
+            if isinstance(token, str):
+                account_id = _chatgpt_account_id_from_jwt(token)
+                if account_id:
+                    return account_id
+        return None
+
+    def _is_fedramp(self, creds: dict[str, Any]) -> bool:
+        for path in (self.identity_jwt_path, self.access_path):
+            token = _glom_default(creds, path)
+            if isinstance(token, str) and _chatgpt_fedramp_from_jwt(token):
+                return True
+        return False
+
+
 AnyAuthSource = Annotated[
-    CommandAuthSource | FileAuthSource | AnthropicAuthSource | GoogleAuthSource,
+    CommandAuthSource | FileAuthSource | AnthropicAuthSource | GoogleAuthSource | CodexAuthSource,
     Field(discriminator="type"),
 ]
 
@@ -380,13 +531,15 @@ def parse_auth_source(raw: str | dict[str, Any] | AuthFields) -> AuthFields:
             return AnthropicAuthSource(**raw)
         if type_ == "google_oauth":
             return GoogleAuthSource(**raw)
+        if type_ == "codex_oauth":
+            return CodexAuthSource(**raw)
         if type_ == "file" or ("file" in raw and "type" not in raw):
             return FileAuthSource(**raw)
         if type_ == "command" or ("command" in raw and "type" not in raw):
             return CommandAuthSource(**raw)
         raise ValueError(
             f"Cannot infer AuthSource type from keys {list(raw.keys())!r}; "
-            f"specify 'type: command|file|anthropic_oauth|google_oauth'",
+            f"specify 'type: command|file|anthropic_oauth|google_oauth|codex_oauth'",
         )
     raise TypeError(f"Unsupported auth entry: {type(raw).__name__}")
 
@@ -433,3 +586,58 @@ def needs_refresh(expiry_ms: float, now_ms: float | None = None) -> bool:
         now_ms = time.time() * 1000
     headroom_ms = _auth_runtime_value("refresh_headroom_seconds", _REFRESH_HEADROOM_SECONDS) * 1000
     return (expiry_ms - now_ms) <= headroom_ms
+
+
+def _glom_default(data: dict[str, Any], path: str) -> Any:
+    try:
+        return glom(data, path)
+    except PathAccessError:
+        return None
+
+
+def _decode_jwt_payload(token: str) -> dict[str, Any] | None:
+    parts = token.split(".")
+    if len(parts) < 2 or not parts[1]:
+        return None
+    payload = parts[1]
+    padding = "=" * (-len(payload) % 4)
+    try:
+        decoded = base64.urlsafe_b64decode((payload + padding).encode())
+        parsed = json.loads(decoded)
+    except (ValueError, json.JSONDecodeError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _jwt_expiry_ms(token: str) -> float | None:
+    payload = _decode_jwt_payload(token)
+    if payload is None:
+        return None
+    exp = payload.get("exp")
+    if isinstance(exp, int | float):
+        return float(exp) * 1000
+    return None
+
+
+def _jwt_needs_refresh(token: str) -> bool:
+    expiry = _jwt_expiry_ms(token)
+    return expiry is None or needs_refresh(expiry)
+
+
+def _chatgpt_auth_claims(token: str) -> dict[str, Any]:
+    payload = _decode_jwt_payload(token)
+    auth = payload.get("https://api.openai.com/auth") if payload else None
+    return auth if isinstance(auth, dict) else {}
+
+
+def _chatgpt_account_id_from_jwt(token: str) -> str | None:
+    account_id = _chatgpt_auth_claims(token).get("chatgpt_account_id")
+    return account_id if isinstance(account_id, str) and account_id else None
+
+
+def _chatgpt_fedramp_from_jwt(token: str) -> bool:
+    return bool(_chatgpt_auth_claims(token).get("chatgpt_account_is_fedramp"))
+
+
+def _utc_now_rfc3339() -> str:
+    return datetime.now(UTC).isoformat().replace("+00:00", "Z")

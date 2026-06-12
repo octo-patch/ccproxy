@@ -224,9 +224,7 @@ def _parse_openai_responses(body: dict[str, Any]) -> _ParsedFields:
     """
     raw_input: Any = body.get("input")
     if isinstance(raw_input, str):
-        input_items: list[Any] = (
-            [{"type": "message", "role": "user", "content": raw_input}] if raw_input else []
-        )
+        input_items: list[Any] = [{"type": "message", "role": "user", "content": raw_input}] if raw_input else []
     elif isinstance(raw_input, list):
         input_items = list(raw_input)
     else:

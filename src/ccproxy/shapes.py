@@ -43,8 +43,7 @@ class ShapeAudit(BaseModel):
 
 
 Shapes = Annotated[
-    Annotated[ShapeSave, tyro.conf.subcommand(name="save")]
-    | Annotated[ShapeAudit, tyro.conf.subcommand(name="audit")],
+    Annotated[ShapeSave, tyro.conf.subcommand(name="save")] | Annotated[ShapeAudit, tyro.conf.subcommand(name="audit")],
     tyro.conf.subcommand(
         name="shapes",
         description="Manage provider shape artifacts.",

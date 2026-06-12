@@ -299,9 +299,7 @@ class TestHandleShapesAudit:
         resp.status_code = 404
         resp.text = "not found here"
         ctx = MagicMock()
-        ctx.__enter__ = MagicMock(
-            side_effect=httpx.HTTPStatusError("msg", request=MagicMock(), response=resp)
-        )
+        ctx.__enter__ = MagicMock(side_effect=httpx.HTTPStatusError("msg", request=MagicMock(), response=resp))
         ctx.__exit__ = MagicMock(return_value=False)
         mock_mc.return_value = ctx
 

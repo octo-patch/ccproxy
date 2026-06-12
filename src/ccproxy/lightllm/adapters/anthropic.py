@@ -157,12 +157,18 @@ class AnthropicAdapter(UIAdapter[MessageCreateParamsBase, BetaMessageParam, Any,
             role = msg.get("role")
             if role == "user":
                 cls._load_user_turn(
-                    msg, builder, tool_name_by_id,
-                    msg_index=msg_index, raw_extras=raw_extras,
+                    msg,
+                    builder,
+                    tool_name_by_id,
+                    msg_index=msg_index,
+                    raw_extras=raw_extras,
                 )
             elif role == "assistant":
                 cls._load_assistant_turn(
-                    msg, builder, msg_index=msg_index, raw_extras=raw_extras,
+                    msg,
+                    builder,
+                    msg_index=msg_index,
+                    raw_extras=raw_extras,
                 )
             elif role == "system":  # type: ignore[unreachable]
                 # Some clients put system prompts inline in messages[] rather than
@@ -452,9 +458,7 @@ class AnthropicAdapter(UIAdapter[MessageCreateParamsBase, BetaMessageParam, Any,
                 system = [{"type": "text", "text": system, "cache_control": {"type": "ephemeral", "ttl": cache_ttl}}]
             else:
                 for block in system:
-                    cast(dict[str, Any], block).setdefault(
-                        "cache_control", {"type": "ephemeral", "ttl": cache_ttl}
-                    )
+                    cast(dict[str, Any], block).setdefault("cache_control", {"type": "ephemeral", "ttl": cache_ttl})
 
         body: dict[str, Any] = {
             "model": req.model,

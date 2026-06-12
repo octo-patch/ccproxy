@@ -768,9 +768,7 @@ class TestAttemptRequestRegression:
         flow = _make_flow()
         addon = GeminiAddon()
 
-        request_mock = AsyncMock(
-            side_effect=TypeError("unsupported operand type(s) for +: 'NoneType' and 'NoneType'")
-        )
+        request_mock = AsyncMock(side_effect=TypeError("unsupported operand type(s) for +: 'NoneType' and 'NoneType'"))
         mock_get_client = _make_transport_patch(request_mock)
         with patch("ccproxy.inspector.gemini_addon.transport.get_client", new=mock_get_client):
             result = await addon._try_fallback_models(flow)

@@ -18,6 +18,11 @@ from ccproxy.hooks.inject_auth import (
 from ccproxy.pipeline.context import Context
 
 
+class _ExtraHeaderAuthSource(CommandAuthSource):
+    def extra_headers(self, label: str = "Auth") -> dict[str, str]:
+        return {"ChatGPT-Account-ID": "acct_test"}
+
+
 def _make_ctx(headers: dict[str, str] | None = None) -> Context:
     """Context with a plain dict for headers so mutations are observable."""
     flow = MagicMock()
@@ -124,6 +129,23 @@ class TestInjectAuthSentinelPath:
         # Source authorization header cleared so the sentinel doesn't leak.
         assert ctx.get_header("authorization") == ""
         assert ctx.flow.metadata["ccproxy.auth_provider"] == "deepseek"
+
+    def test_sentinel_stamps_companion_auth_headers(self, clean_config: CCProxyConfig) -> None:
+        clean_config.providers = {
+            "codex": Provider(
+                auth=_ExtraHeaderAuthSource(command="printf '%s' codex-token"),
+                host="chatgpt.com",
+                path="/backend-api/codex/responses",
+                type="openai_responses",
+            )
+        }
+        ctx = _make_ctx({"authorization": f"Bearer {AUTH_SENTINEL_PREFIX}codex"})
+
+        inject_auth(ctx, {})
+
+        assert ctx.get_header("authorization") == "Bearer codex-token"
+        assert ctx.get_header("ChatGPT-Account-ID") == "acct_test"
+        assert ctx.flow.metadata["ccproxy.auth_provider"] == "codex"
 
     def test_sentinel_no_token_raises_auth_config_error(self, clean_config: CCProxyConfig) -> None:
         ctx = _make_ctx({"x-api-key": f"{AUTH_SENTINEL_PREFIX}missing-provider"})

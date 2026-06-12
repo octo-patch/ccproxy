@@ -73,16 +73,13 @@ class PerplexityAdapter(UIAdapter[Any, dict[str, Any], Any, AgentDepsT, OutputDa
     @classmethod
     def load_messages(cls, *_args: Any, **_kwargs: Any) -> list[ModelMessage]:
         raise NotImplementedError(
-            "ccproxy does not host a Perplexity-format listener; "
-            "PerplexityAdapter is outbound-only."
+            "ccproxy does not host a Perplexity-format listener; PerplexityAdapter is outbound-only."
         )
 
     def build_event_stream(
         self,
     ) -> UIEventStream[Any, Any, AgentDepsT, OutputDataT]:
-        raise NotImplementedError(
-            "Perplexity streaming intake lives in ccproxy.lightllm.graph.perplexity_intake."
-        )
+        raise NotImplementedError("Perplexity streaming intake lives in ccproxy.lightllm.graph.perplexity_intake.")
 
     @classmethod
     def render(cls, req: Any) -> bytes:

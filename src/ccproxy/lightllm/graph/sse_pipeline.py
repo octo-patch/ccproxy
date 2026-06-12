@@ -88,14 +88,10 @@ class SSEPipeline:
             return data
 
         try:
-            future: Future[bytes] = asyncio.run_coroutine_threadsafe(
-                self._process_chunk(data), self._loop
-            )
+            future: Future[bytes] = asyncio.run_coroutine_threadsafe(self._process_chunk(data), self._loop)
             out = future.result()
         except Exception:
-            logger.exception(
-                "SSEPipeline.feed failed mid-stream; passing chunk through"
-            )
+            logger.exception("SSEPipeline.feed failed mid-stream; passing chunk through")
             return data
         return out if out else []
 
@@ -115,14 +111,10 @@ class SSEPipeline:
 
         if self._loop.is_running():
             try:
-                future: Future[bytes] = asyncio.run_coroutine_threadsafe(
-                    self._drain_and_terminate(), self._loop
-                )
+                future: Future[bytes] = asyncio.run_coroutine_threadsafe(self._drain_and_terminate(), self._loop)
                 out.extend(future.result())
             except Exception:
-                logger.exception(
-                    "SSEPipeline.close failed mid-drain; emitting render terminator only"
-                )
+                logger.exception("SSEPipeline.close failed mid-drain; emitting render terminator only")
                 # Fall through: still try to emit the render terminator below.
 
         # Tear down the loop regardless. ``self._closed`` is the gate for
@@ -143,17 +135,13 @@ class SSEPipeline:
             for event in await self._intake.close():
                 out.extend(await self._render.render(event))
         except Exception:
-            logger.exception(
-                "SSEPipeline intake.close failed; emitting render terminator only"
-            )
+            logger.exception("SSEPipeline intake.close failed; emitting render terminator only")
         if not self._terminator_emitted:
             self._terminator_emitted = True
             try:
                 out.extend(await self._render.close())
             except Exception:
-                logger.exception(
-                    "SSEPipeline render.close failed; no terminator emitted"
-                )
+                logger.exception("SSEPipeline render.close failed; no terminator emitted")
         return bytes(out)
 
     def close(self) -> None:

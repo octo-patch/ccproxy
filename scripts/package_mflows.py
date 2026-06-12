@@ -43,9 +43,11 @@ class Capture:
 CAPTURES: dict[str, Capture] = {
     "anthropic": Capture(
         command=lambda: ["claude", "--model", "haiku", "-p", "Reply with exactly: packaged mflow ok"],
-        selector=lambda flow: _is_2xx(flow)
-        and _request_host(flow) == "api.anthropic.com"
-        and _request_path(flow).startswith("/v1/messages"),
+        selector=lambda flow: (
+            _is_2xx(flow)
+            and _request_host(flow) == "api.anthropic.com"
+            and _request_path(flow).startswith("/v1/messages")
+        ),
     ),
     "gemini": Capture(
         command=lambda: [
@@ -55,9 +57,30 @@ CAPTURES: dict[str, Capture] = {
             "-p",
             "Reply with exactly: packaged mflow ok",
         ],
-        selector=lambda flow: _is_2xx(flow)
-        and _request_host(flow) == "cloudcode-pa.googleapis.com"
-        and _request_path(flow).startswith("/v1internal:"),
+        selector=lambda flow: (
+            _is_2xx(flow)
+            and _request_host(flow) == "cloudcode-pa.googleapis.com"
+            and _request_path(flow).startswith("/v1internal:")
+        ),
+    ),
+    "openai_responses": Capture(
+        command=lambda: [
+            "codex",
+            "exec",
+            "--ephemeral",
+            "--ignore-rules",
+            "--skip-git-repo-check",
+            "--sandbox",
+            "read-only",
+            "-C",
+            tempfile.gettempdir(),
+            "Reply with exactly: packaged mflow ok",
+        ],
+        selector=lambda flow: (
+            _is_2xx(flow)
+            and _request_host(flow) == "chatgpt.com"
+            and _request_path(flow).startswith("/backend-api/codex/responses")
+        ),
     ),
 }
 
@@ -67,11 +90,25 @@ SENSITIVE_HEADERS = {
     "proxy-authorization",
     "x-api-key",
     "x-goog-api-key",
+    "x-client-request-id",
+    "session-id",
+    "thread-id",
     "x-ccproxy-flow-id",
     "x-ccproxy-hooks",
     "x-ccproxy-auth-injected",
     "x-ccproxy-target-url",
     "x-ccproxy-impersonate",
+    "chatgpt-account-id",
+    "x-openai-fedramp",
+    "x-codex-installation-id",
+    "x-codex-turn-state",
+    "x-codex-turn-metadata",
+    "x-codex-parent-thread-id",
+    "x-codex-window-id",
+    "x-openai-memgen-request",
+    "x-openai-subagent",
+    "openai-organization",
+    "openai-project",
 }
 
 
@@ -80,12 +117,12 @@ def main(argv: list[str] | None = None) -> int:
     output_dir = args.output_dir.resolve()
     source_dir = _source_dir(args.source_dir, args.skip_capture)
 
-    with _package_config(source_dir):
+    with _package_config(source_dir, stop_process_compose=not args.skip_capture):
         if not args.skip_capture:
-            _capture_all()
+            _capture_all(args.providers)
 
         output_dir.mkdir(parents=True, exist_ok=True)
-        for provider in CAPTURES:
+        for provider in args.providers:
             source = _read_latest(source_dir / f"{provider}.mflow")
             packaged = _package_flow(provider, source)
             _write_single(output_dir / f"{provider}.mflow", packaged)
@@ -115,7 +152,16 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         default=DEFAULT_OUTPUT_DIR,
         help="Destination for packaged built-in .mflow files.",
     )
-    return parser.parse_args(argv)
+    parser.add_argument(
+        "--provider",
+        action="append",
+        choices=sorted(CAPTURES),
+        dest="providers",
+        help="Provider key to capture/package. Repeatable. Defaults to every packaged provider.",
+    )
+    args = parser.parse_args(argv)
+    args.providers = args.providers or list(CAPTURES)
+    return args
 
 
 def _source_dir(path: Path | None, skip_capture: bool) -> Path:
@@ -130,7 +176,7 @@ def _source_dir(path: Path | None, skip_capture: bool) -> Path:
 
 
 @contextmanager
-def _package_config(source_dir: Path):
+def _package_config(source_dir: Path, *, stop_process_compose: bool):
     original_config_dir = os.environ.get("CCPROXY_CONFIG_DIR")
     with tempfile.TemporaryDirectory(prefix="ccproxy-package-mflows-") as tmp:
         config_dir = Path(tmp)
@@ -140,7 +186,8 @@ def _package_config(source_dir: Path):
         try:
             yield
         finally:
-            _run(["process-compose", "down"], timeout=30, check=False)
+            if stop_process_compose:
+                _run(["process-compose", "down"], timeout=30, check=False)
             clear_config_instance()
             if original_config_dir is None:
                 os.environ.pop("CCPROXY_CONFIG_DIR", None)
@@ -174,11 +221,12 @@ def _write_runtime_config(config_dir: Path, source_dir: Path) -> None:
     (config_dir / "ccproxy.yaml").write_text(yaml.safe_dump(data, sort_keys=False))
 
 
-def _capture_all() -> None:
+def _capture_all(providers: list[str]) -> None:
     _run(["process-compose", "down"], timeout=30, check=False)
     _run(["process-compose", "up", "--detached"])
     _wait_for_proxy()
-    for provider, capture in CAPTURES.items():
+    for provider in providers:
+        capture = CAPTURES[provider]
         _clear_flows()
         command = capture.command()
         if capture.inspect:
@@ -259,7 +307,7 @@ def _canonical_request(provider: str) -> http.Request:
             "model": "claude-haiku-4-5-20251001",
             "messages": [{"role": "user", "content": "Reply with exactly: packaged mflow ok"}],
             "max_tokens": 32,
-            "stream": False,
+            "stream": True,
         }
         return _json_request("https://api.anthropic.com/v1/messages", body)
     if provider == "gemini":
@@ -272,6 +320,24 @@ def _canonical_request(provider: str) -> http.Request:
             },
         }
         return _json_request("https://cloudcode-pa.googleapis.com/v1internal:generateContent", body)
+    if provider == "openai_responses":
+        body = {
+            "model": "gpt-5.5",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "Reply with exactly: packaged mflow ok",
+                        }
+                    ],
+                }
+            ],
+            "stream": True,
+        }
+        return _json_request("https://chatgpt.com/backend-api/codex/responses", body)
     raise ValueError(f"unsupported provider: {provider}")
 
 
@@ -339,6 +405,21 @@ def _sensitive_state_markers() -> set[str]:
         "ya29.",
         "set-cookie",
         "cookie",
+        "chatgpt-account-id",
+        "x-openai-fedramp",
+        "x-codex-installation-id",
+        "x-codex-turn-state",
+        "x-codex-turn-metadata",
+        "x-codex-parent-thread-id",
+        "x-codex-window-id",
+        "openai-organization",
+        "openai-project",
+        "refresh_token",
+        "access_token",
+        "id_token",
+        "account_id",
+        "chatgpt_user_id",
+        "cf_clearance",
     }
 
 
@@ -352,6 +433,9 @@ def _sensitive_source_values(provider: str, flow: http.HTTPFlow) -> set[str]:
         metadata = body.get("metadata")
         if isinstance(metadata, dict):
             _collect_strings(metadata, values)
+        client_metadata = body.get("client_metadata")
+        if isinstance(client_metadata, dict):
+            _collect_strings(client_metadata, values)
         diagnostics = body.get("diagnostics")
         if isinstance(diagnostics, dict):
             _collect_strings(diagnostics, values)
@@ -362,6 +446,19 @@ def _sensitive_source_values(provider: str, flow: http.HTTPFlow) -> set[str]:
         request = body.get("request")
         if isinstance(request, dict) and isinstance(request.get("session_id"), str):
             values.add(request["session_id"])
+    elif provider == "openai_responses":
+        for key in (
+            "previous_response_id",
+            "prompt_cache_key",
+            "safety_identifier",
+            "user",
+        ):
+            value = body.get(key)
+            if isinstance(value, str):
+                values.add(value)
+        metadata = body.get("metadata")
+        if isinstance(metadata, dict):
+            _collect_strings(metadata, values)
     return {value for value in values if len(value) >= 8}
 
 

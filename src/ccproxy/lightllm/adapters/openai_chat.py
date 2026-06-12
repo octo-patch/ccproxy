@@ -140,9 +140,7 @@ class OpenAIChatAdapter(
                 user = cast(ChatCompletionUserMessageParam, msg)
                 builder.add(
                     UserPromptPart(
-                        content=cls._load_user_content(
-                            user["content"], msg_index=msg_index, raw_extras=raw_extras
-                        )
+                        content=cls._load_user_content(user["content"], msg_index=msg_index, raw_extras=raw_extras)
                     )
                 )
 
@@ -191,9 +189,7 @@ class OpenAIChatAdapter(
                 tool = cast(ChatCompletionToolMessageParam, msg)
                 t_content = tool["content"]
                 if not isinstance(t_content, str):
-                    t_content = "".join(
-                        p["text"] for p in t_content if p.get("type") == "text"
-                    )
+                    t_content = "".join(p["text"] for p in t_content if p.get("type") == "text")
                 builder.add(
                     ToolReturnPart(
                         tool_name=tool_name_by_id.get(tool["tool_call_id"], ""),

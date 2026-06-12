@@ -34,6 +34,7 @@ PplxSource = Literal["web", "scholar", "social", "edgar"]
 def _default_pplx_sources() -> list[PplxSource]:
     return ["web"]
 
+
 __all__ = [
     "AnthropicShapingConfig",
     "AnyAuthSource",
@@ -802,6 +803,14 @@ class CCProxyConfig(BaseSettings):
         if provider_entry is None or provider_entry.auth is None:
             return None
         return provider_entry.auth.header
+
+    def get_auth_extra_headers(self, provider: str) -> dict[str, str]:
+        """Return companion auth headers for a provider, if its source exposes any."""
+        provider_entry = self.providers.get(provider)
+        if provider_entry is None or provider_entry.auth is None:
+            return {}
+        with _get_provider_lock(provider):
+            return provider_entry.auth.extra_headers(f"Auth/{provider}")
 
     @classmethod
     def from_yaml(cls, yaml_path: Path, **kwargs: Any) -> "CCProxyConfig":

@@ -125,9 +125,7 @@ class _GoogleIntakeState:
 # ── Per-chunk dispatch subgraph ─────────────────────────────────────────────
 
 
-_cg: GraphBuilder[
-    _GoogleIntakeState, None, _GenerateChunk, None
-] = GraphBuilder(
+_cg: GraphBuilder[_GoogleIntakeState, None, _GenerateChunk, None] = GraphBuilder(
     name="google_chunk_dispatch",
     state_type=_GoogleIntakeState,
     input_type=_GenerateChunk,
@@ -229,9 +227,7 @@ async def handle_text_typed(
     text = ctx.inputs.part.text
     if not text:
         return
-    state.out_events.extend(
-        state.parts_manager.handle_text_delta(vendor_part_id=None, content=text)
-    )
+    state.out_events.extend(state.parts_manager.handle_text_delta(vendor_part_id=None, content=text))
 
 
 @_cg.step
@@ -282,9 +278,7 @@ async def handle_function_response_typed(
 ) -> None:
     """Log and drop unexpected ``functionResponse`` parts."""
     del ctx  # StepFunction protocol requires ``ctx`` parameter name; nothing to read here
-    logger.warning(
-        "google intake: unexpected functionResponse part in upstream response; skipping"
-    )
+    logger.warning("google intake: unexpected functionResponse part in upstream response; skipping")
 
 
 @_cg.step
@@ -299,9 +293,7 @@ _cg.add(
     _cg.edge_from(_cg.start_node).to(absorb_chunk),
     _cg.edge_from(absorb_chunk).to(pop_next_part),
     _cg.edge_from(pop_next_part).to(
-        _cg.decision()
-        .branch(_cg.match(_ChunkDone).to(_cg.end_node))
-        .branch(_cg.match(_PartDispatch).to(classify_part))
+        _cg.decision().branch(_cg.match(_ChunkDone).to(_cg.end_node)).branch(_cg.match(_PartDispatch).to(classify_part))
     ),
     _cg.edge_from(classify_part).to(
         _cg.decision()
@@ -327,9 +319,7 @@ _chunk_dispatch_graph = _cg.build()
 # ── Outer intake graph (events queue dispatcher) ──────────────────────────
 
 
-_g: GraphBuilder[
-    _GoogleIntakeState, None, None, list[ModelResponseStreamEvent]
-] = GraphBuilder(
+_g: GraphBuilder[_GoogleIntakeState, None, None, list[ModelResponseStreamEvent]] = GraphBuilder(
     name="google_intake",
     state_type=_GoogleIntakeState,
     output_type=list[ModelResponseStreamEvent],

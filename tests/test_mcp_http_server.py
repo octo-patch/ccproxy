@@ -132,9 +132,7 @@ class TestMcpToolsList:
             result = await session.list_tools()
 
         retrofit_tools = [
-            tool
-            for tool in result.tools
-            if tool.name in {"dump_har", "diff_flows", "compare_flow", "capture_shape"}
+            tool for tool in result.tools if tool.name in {"dump_har", "diff_flows", "compare_flow", "capture_shape"}
         ]
         assert retrofit_tools, "expected to find at least one ctx-retrofit tool"
 

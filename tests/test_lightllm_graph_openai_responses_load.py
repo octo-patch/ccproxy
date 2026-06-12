@@ -240,8 +240,7 @@ class TestToolItems:
             (
                 m
                 for m in result.messages
-                if isinstance(m, ModelRequest)
-                and any(isinstance(p, ToolReturnPart) for p in m.parts)
+                if isinstance(m, ModelRequest) and any(isinstance(p, ToolReturnPart) for p in m.parts)
             ),
             None,
         )
@@ -277,9 +276,7 @@ class TestToolItems:
 
 
 class TestReasoning:
-    def test_reasoning_emits_thinking_part_and_stashes_full_dict(
-        self, parse: Parse
-    ) -> None:
+    def test_reasoning_emits_thinking_part_and_stashes_full_dict(self, parse: Parse) -> None:
         reasoning_item = {
             "type": "reasoning",
             "id": "rs_1",

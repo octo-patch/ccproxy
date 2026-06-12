@@ -226,9 +226,7 @@ class InspectorAddon:
         else:
             flow.response.stream = True
 
-    def _install_streaming_transformer(
-        self, flow: http.HTTPFlow, transform: TransformMeta
-    ) -> None:
+    def _install_streaming_transformer(self, flow: http.HTTPFlow, transform: TransformMeta) -> None:
         """Install the SSE response transformer on ``flow.response.stream``.
 
         All providers route through the pydantic-ai-mediated

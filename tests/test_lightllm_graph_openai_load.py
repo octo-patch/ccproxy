@@ -35,6 +35,7 @@ def parse() -> Parse:
 
     return _parse
 
+
 # ---------------------------------------------------------------------------
 # Simple roles: system / developer / user / assistant / tool
 # ---------------------------------------------------------------------------
@@ -258,10 +259,7 @@ class TestToolCalls:
 # Images
 # ---------------------------------------------------------------------------
 
-_PNG_PIXEL_B64 = (
-    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8A"
-    "AAAASUVORK5CYII="
-)
+_PNG_PIXEL_B64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII="
 
 
 class TestImages:
@@ -727,9 +725,7 @@ CONTENT_CASES: list[ContentCase] = [
 ]
 
 
-@pytest.mark.parametrize(
-    "case", [pytest.param(c, id=c.name) for c in CONTENT_CASES]
-)
+@pytest.mark.parametrize("case", [pytest.param(c, id=c.name) for c in CONTENT_CASES])
 def test_content_cases(case: ContentCase, parse: Parse) -> None:
     """Smoke-table over basic role/content shapes."""
     result = parse(case.body)

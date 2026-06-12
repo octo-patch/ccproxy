@@ -27,13 +27,14 @@ in-house cross-provider wire layer.
   `ccproxy status` (`--mermaid` emits stateDiagram-v2).
 - **Request shaping**: provider identity replayed from captured `.mflow`
   shapes with declarative `content_fields` / `merge_strategies` profiles.
-  Packaged defaults ship for Anthropic and Gemini; `ccproxy shapes save` /
-  `ccproxy shapes audit` manage local overrides and patch queues.
+  Packaged defaults ship for Anthropic, Gemini, and OpenAI Responses
+  (Codex CLI); `ccproxy shapes save` / `ccproxy shapes audit` manage local
+  overrides and patch queues.
 - **Unified `providers` map**: one sentinel key
   (`sk-ant-oat-ccproxy-{name}`) drives credential injection, header
   selection, routing, and wire-format dispatch. Auth sources: `command`,
-  `file`, and refresh-capable `anthropic_oauth` / `google_oauth` with atomic
-  credential write-back and per-provider refresh locks.
+  `file`, refresh-capable `anthropic_oauth` / `google_oauth`, and
+  `codex_oauth` for Codex's ChatGPT OAuth file plus account-routing headers.
 - **Gemini via cloudcode-pa**: OAuth subscription access with `v1internal`
   envelope wrap/unwrap, project prewarm, and capacity fallback (sticky
   retries on 429/503, then a configurable fallback-model walk). Enabled by

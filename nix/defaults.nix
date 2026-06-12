@@ -23,6 +23,14 @@
         path = "/v1internal:{action}";
         type = "gemini";
       };
+      codex = {
+        auth = {
+          type = "codex_oauth";
+        };
+        host = "chatgpt.com";
+        path = "/backend-api/codex/responses";
+        type = "openai_responses";
+      };
       deepseek = {
         auth = {
           type = "command";
@@ -170,6 +178,29 @@
             "transfer-encoding" "connection" "accept-encoding"
           ];
           capture = { path_pattern = "^/v1internal:"; };
+        };
+        openai_responses = {
+          content_fields = [
+            "model" "input" "tools" "tool_choice" "parallel_tool_calls"
+            "reasoning" "text" "stream" "max_output_tokens" "temperature" "top_p"
+            "metadata" "client_metadata" "include" "previous_response_id" "prompt_cache_key"
+            "prompt_cache_retention" "store" "truncation" "service_tier"
+            "background" "safety_identifier" "user"
+          ];
+          shape_hooks = [
+            "ccproxy.shaping.codex"
+          ];
+          preserve_headers = [ "authorization" "chatgpt-account-id" "x-openai-fedramp" "host" ];
+          strip_headers = [
+            "authorization" "chatgpt-account-id" "x-openai-fedramp"
+            "content-length" "content-encoding" "host" "transfer-encoding" "connection" "accept-encoding"
+            "x-client-request-id" "session-id" "thread-id"
+            "x-codex-installation-id" "x-codex-turn-state" "x-codex-turn-metadata"
+            "x-codex-parent-thread-id" "x-codex-window-id"
+            "x-openai-memgen-request" "x-openai-subagent"
+            "openai-organization" "openai-project"
+          ];
+          capture = { path_pattern = "^/backend-api/codex/responses"; };
         };
       };
     };

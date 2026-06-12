@@ -13,9 +13,10 @@ Cross-provider request and response transformation is handled by `lightllm`, a
 surgical adapter and streaming-FSM layer inside ccproxy — no LiteLLM proxy
 subprocess, no gateway server.
 
-**New in 2.0**: DeepSeek V4 routing support — redirect Anthropic-format
-requests to DeepSeek’s `/anthropic/v1/messages` endpoint with a single transform
-rule. See [Configuration](#configuration) for the routing setup.
+**New in 2.0**: Codex/OpenAI Responses support with packaged request shaping,
+plus DeepSeek V4 routing for Anthropic-format requests through DeepSeek's
+`/anthropic/v1/messages` endpoint. See [Configuration](#configuration) for
+the routing setup.
 
 The hook pipeline is your extension point for building mods and taking control
 of your LLM usage while respecting terms of service:
@@ -268,7 +269,7 @@ Auth resolves through `dest_provider` → `providers[name]`.
 ### Auth source types
 
 `Provider.auth` dispatches on `type:`. Two static loaders return whatever the
-underlying source holds; two OAuth loaders own the refresh lifecycle in-process.
+underlying source holds; OAuth loaders own the refresh lifecycle in-process.
 
 | `type` | What it is | When to use |
 | --- | --- | --- |
@@ -276,18 +277,17 @@ underlying source holds; two OAuth loaders own the refresh lifecycle in-process.
 | `file` | Read a file, return contents | Static API keys stored in a managed secret file |
 | `anthropic_oauth` | In-process Anthropic OAuth refresh | Share `~/.claude/.credentials.json` with Claude Code CLI |
 | `google_oauth` | In-process Google/Gemini OAuth refresh | Share `~/.gemini/oauth_creds.json` with gemini-cli |
+| `codex_oauth` | In-process Codex OAuth refresh | Share `~/.codex/auth.json` with Codex CLI |
 
 `command` and `file` are not OAuth — they have no expiry awareness and never
 call out to a refresh endpoint. ccproxy reads them on every resolve; rotation
 happens out-of-band through whichever secret manager produced the value.
 
-`anthropic_oauth` and `google_oauth` extend the same `AuthSource` base. ccproxy
-owns refresh end-to-end: when the cached access token is within 60 seconds of
-expiry, ccproxy POSTs to the OAuth endpoint and atomically writes the new
-tokens back to `file_path`. Three glom-configurable paths (`access_path`,
-`refresh_path`, `expiry_path`) declare the credential JSON's schema, and
-`copy.deepcopy` + `glom.assign(..., missing=dict)` keep sibling fields
-(`scopes`, `subscriptionType`, etc.) intact.
+`anthropic_oauth` and `google_oauth` extend the same form-encoded
+`AuthSource` base. `codex_oauth` follows Codex's ChatGPT auth-file schema: it
+reads `~/.codex/auth.json`, refreshes JWT access tokens through OpenAI's OAuth
+endpoint, atomically writes the updated token envelope, and stamps companion
+`ChatGPT-Account-ID` / `X-OpenAI-Fedramp` headers derived from the same file.
 
 A static API key for DeepSeek alongside an OAuth-refresh entry for Anthropic:
 
@@ -374,15 +374,25 @@ even if both tools refresh concurrently.
 
 ## Shape Replay
 
-Anthropic and Gemini traffic depend on shape replay. ccproxy ships sanitized
-packaged defaults for both providers. For Anthropic, the shape is the only
-source of the Claude Code identity headers (user-agent, anthropic-beta, etc.)
-and the billing-header block — there is no synthetic-identity fallback hook
-anymore. Normal users do not need to capture a shape before using the packaged
-defaults. If a packaged shape goes stale for a future upstream SDK release,
-update ccproxy to a release with refreshed packaged defaults. If no fixed
-release is available yet, follow the manual rescue path in
+Anthropic, Gemini, and Codex/OpenAI Responses traffic depend on shape replay.
+ccproxy ships sanitized packaged defaults for all three providers. For
+Anthropic, the shape is the only source of the Claude Code identity headers
+(user-agent, anthropic-beta, etc.) and the billing-header block — there is no
+synthetic-identity fallback hook anymore. For Codex, the packaged
+`openai_responses` shape carries only the public request envelope; account
+routing headers come from `codex_oauth` at runtime. Normal users do not need to
+capture a shape before using the packaged defaults. If a packaged shape goes
+stale for a future upstream SDK release, update ccproxy to a release with
+refreshed packaged defaults. If no fixed release is available yet, follow the
+manual rescue path in
 [Request Shaping](docs/shaping.md#manual-shaping-when-a-packaged-default-is-stale).
+
+Codex traffic is routed to ChatGPT's Codex backend, not the public OpenAI
+Responses endpoint. Use streaming Responses requests; ccproxy preserves the
+captured Codex instruction envelope, normalizes public SDK string input into
+Codex's verbose message form, and enforces `store: false`. Public Responses
+fields unsupported by the Codex backend, such as `max_output_tokens`, should be
+left unset for the default `codex` provider.
 
 ## CLI Reference
 

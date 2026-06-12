@@ -73,10 +73,12 @@ def _canonical_messages(messages: list[Any]) -> list[dict[str, Any]]:
     for msg in messages:
         if not isinstance(msg, dict):
             continue
-        out.append({
-            "role": msg.get("role"),
-            "content": _canonical_content(msg.get("content", "")),
-        })
+        out.append(
+            {
+                "role": msg.get("role"),
+                "content": _canonical_content(msg.get("content", "")),
+            }
+        )
     return out
 
 
@@ -453,5 +455,3 @@ def test_metadata_preserved_via_raw_extras(parse: Parse, render: Render) -> None
     parsed = parse(body)
     rendered = json.loads(render(parsed))
     assert rendered.get("metadata") == {"user_id": "alice"}
-
-

@@ -16,6 +16,7 @@ SHAPES_DIR = Path(__file__).resolve().parents[2] / "src" / "ccproxy" / "template
 
 ANTHROPIC_MODEL = os.environ.get("CCPROXY_E2E_ANTHROPIC_MODEL", "claude-haiku-4-5-20251001")
 GEMINI_MODEL = os.environ.get("CCPROXY_E2E_GEMINI_MODEL", "gemini-3.1-pro-preview")
+CODEX_MODEL = os.environ.get("CCPROXY_E2E_CODEX_MODEL", "gpt-5.5")
 
 
 def _proxy_reachable() -> bool:
@@ -104,3 +105,38 @@ def test_google_genai_sdk_uses_packaged_shape() -> None:
 
     assert response.text is not None
     assert "packaged e2e ok" in response.text.lower()
+
+
+@pytest.mark.skipif(not (Path.home() / ".codex" / "auth.json").exists(), reason="Codex auth.json absent")
+def test_openai_responses_sdk_uses_codex_packaged_shape() -> None:
+    _require_shape("openai_responses")
+    from openai import OpenAI
+
+    client = OpenAI(
+        api_key="sk-ant-oat-ccproxy-codex",
+        base_url=f"{CCPROXY_BASE}/v1",
+    )
+
+    def call_codex_stream() -> str:
+        stream = client.responses.create(
+            model=CODEX_MODEL,
+            input="Reply with exactly: packaged e2e ok",
+            stream=True,
+        )
+        chunks: list[str] = []
+        final_text = ""
+        for event in stream:
+            event_type = getattr(event, "type", "")
+            if event_type == "response.output_text.delta":
+                delta = getattr(event, "delta", "")
+                if isinstance(delta, str):
+                    chunks.append(delta)
+            elif event_type == "response.completed":
+                response = getattr(event, "response", None)
+                text = getattr(response, "output_text", None)
+                if isinstance(text, str):
+                    final_text = text
+        return "".join(chunks) or final_text
+
+    text = _call_with_retry(call_codex_stream)
+    assert "packaged e2e ok" in text.lower()

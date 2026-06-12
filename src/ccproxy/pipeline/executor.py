@@ -35,6 +35,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+
 class PipelineExecutor:
     """Executes hooks in DAG-ordered sequence with override support."""
 

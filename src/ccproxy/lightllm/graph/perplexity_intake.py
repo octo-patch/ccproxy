@@ -208,11 +208,7 @@ def _apply_markdown_patch(state: _PerplexityIntakeState, path: str, value: Any) 
             new_text = "".join(c for c in chunks if isinstance(c, str))
             if offset in (None, 0):
                 if new_text != state.answer_seen:
-                    d = (
-                        new_text[len(state.answer_seen) :]
-                        if new_text.startswith(state.answer_seen)
-                        else new_text
-                    )
+                    d = new_text[len(state.answer_seen) :] if new_text.startswith(state.answer_seen) else new_text
                     if d:
                         delta += d
                     state.answer_seen = new_text
@@ -262,9 +258,7 @@ def _apply_markdown_patch(state: _PerplexityIntakeState, path: str, value: Any) 
 # ── Per-event dispatch subgraph ─────────────────────────────────────────────
 
 
-_eg: GraphBuilder[
-    _PerplexityIntakeState, None, _PerplexityEventEnvelope, None
-] = GraphBuilder(
+_eg: GraphBuilder[_PerplexityIntakeState, None, _PerplexityEventEnvelope, None] = GraphBuilder(
     name="pplx_event_dispatch",
     state_type=_PerplexityIntakeState,
     input_type=_PerplexityEventEnvelope,
@@ -546,9 +540,7 @@ _event_dispatch_graph = _eg.build()
 # ── Outer intake graph (events queue dispatcher) ──────────────────────────
 
 
-_g: GraphBuilder[
-    _PerplexityIntakeState, None, None, list[ModelResponseStreamEvent]
-] = GraphBuilder(
+_g: GraphBuilder[_PerplexityIntakeState, None, None, list[ModelResponseStreamEvent]] = GraphBuilder(
     name="pplx_intake",
     state_type=_PerplexityIntakeState,
     output_type=list[ModelResponseStreamEvent],

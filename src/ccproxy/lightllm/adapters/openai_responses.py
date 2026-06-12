@@ -183,9 +183,7 @@ class OpenAIResponsesAdapter:
         consumed_reasoning_keys: set[str] = set()
 
         reasoning_index_pool = [
-            int(key.rsplit(":", 1)[1])
-            for key in raw_extras
-            if key.startswith("openai_responses:reasoning:")
+            int(key.rsplit(":", 1)[1]) for key in raw_extras if key.startswith("openai_responses:reasoning:")
         ]
         reasoning_iter = iter(sorted(reasoning_index_pool))
 
@@ -271,9 +269,7 @@ class OpenAIResponsesAdapter:
                     {
                         "type": "message",
                         "role": "assistant",
-                        "content": [
-                            {"type": "output_text", "text": "".join(buffered_text)}
-                        ],
+                        "content": [{"type": "output_text", "text": "".join(buffered_text)}],
                     }
                 )
                 buffered_text.clear()
@@ -303,18 +299,14 @@ class OpenAIResponsesAdapter:
                 flush_text()
                 try:
                     stash_index = next(reasoning_iter)
-                    consumed_reasoning_keys.add(
-                        f"openai_responses:reasoning:{stash_index}"
-                    )
+                    consumed_reasoning_keys.add(f"openai_responses:reasoning:{stash_index}")
                     items.append({"__ccproxy_reasoning_slot__": stash_index})
                 except StopIteration:
                     items.append(
                         {
                             "type": "reasoning",
                             "summary": [],
-                            "content": [
-                                {"type": "reasoning_text", "text": part.content or ""}
-                            ],
+                            "content": [{"type": "reasoning_text", "text": part.content or ""}],
                         }
                     )
         flush_text()

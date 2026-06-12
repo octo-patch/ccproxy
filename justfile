@@ -23,6 +23,8 @@ e2e-packaged-mflows:
     uv run python -c 'import sys, yaml; p=sys.argv[1]; shapes=sys.argv[2]; data=yaml.safe_load(open(p)); cc=data["ccproxy"]; cc["port"]=4001; cc["inspector"]["port"]=8084; cc["mcp"]["http"]["port"]=4031; cc["inspector"]["cert_dir"]=sys.argv[3]; cc["shaping"]["shapes_dir"]=shapes; open(p, "w").write(yaml.safe_dump(data, sort_keys=False))' "$tmp/ccproxy.yaml" "$tmp/shapes" "$tmp"; \
     CCPROXY_CONFIG_DIR="$tmp" process-compose down >/dev/null 2>&1 || true; \
     CCPROXY_CONFIG_DIR="$tmp" process-compose up --detached; \
+    for i in $(seq 1 60); do CCPROXY_CONFIG_DIR="$tmp" uv run ccproxy status --proxy >/dev/null 2>&1 && break; sleep 1; done; \
+    CCPROXY_CONFIG_DIR="$tmp" uv run ccproxy status --proxy; \
     CCPROXY_CONFIG_DIR="$tmp" CCPROXY_E2E_PACKAGED_SHAPES=1 CCPROXY_E2E_URL=http://127.0.0.1:4001 uv run pytest --no-cov -rs -m e2e tests/e2e/test_packaged_mflows_e2e.py
 
 e2e-namespace-observe:

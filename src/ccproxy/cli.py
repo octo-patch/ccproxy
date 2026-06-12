@@ -909,8 +909,7 @@ def _namespace_status_payload(config_dir: Path) -> dict[str, Any]:
     userns = _read_proc_text(Path("/proc/sys/kernel/unprivileged_userns_clone"))
     dev_net_tun = Path("/dev/net/tun")
     tools = {
-        tool: shutil.which(tool)
-        for tool in ("slirp4netns", "unshare", "nsenter", "ip", "wg", "iptables", "sysctl")
+        tool: shutil.which(tool) for tool in ("slirp4netns", "unshare", "nsenter", "ip", "wg", "iptables", "sysctl")
     }
     return {
         "mode": "permissive",

@@ -445,9 +445,7 @@ class TestRoundtrip:
         pytest.param(THINKING_STREAM, id=THINKING_STREAM.name),
     ],
 )
-def test_chunk_boundaries_do_not_affect_ir_events(
-    fixture: StreamFixture, intake_factory: _IntakeFactory
-) -> None:
+def test_chunk_boundaries_do_not_affect_ir_events(fixture: StreamFixture, intake_factory: _IntakeFactory) -> None:
     """Feeding the same byte stream in different chunk sizes yields identical IR events."""
     sse = _frames(fixture.events)
 
@@ -533,9 +531,7 @@ def test_upstream_raw_bytes_is_byte_for_byte_tee(intake_factory: _IntakeFactory)
         pytest.param(b"\r\n\r\n", "crlf_crlf", id="crlf_crlf_separator"),
     ],
 )
-def test_both_sse_separators_are_recognized(
-    separator: bytes, label: str, intake_factory: _IntakeFactory
-) -> None:
+def test_both_sse_separators_are_recognized(separator: bytes, label: str, intake_factory: _IntakeFactory) -> None:
     intake = intake_factory()
     payload = json.dumps(
         {

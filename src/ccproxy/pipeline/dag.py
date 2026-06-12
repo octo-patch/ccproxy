@@ -158,7 +158,7 @@ class HookDAG:
         lines: list[str] = ["---", f"title: {title}", "---", "stateDiagram-v2", f"  direction {direction}"]
 
         for name in self._execution_order:
-            lines.append(f"  state \"{name}\" as {name}")
+            lines.append(f'  state "{name}" as {name}')
 
         sources = {n for n in self._execution_order if not deps[n]}
         sinks = {n for n in self._execution_order if not self.get_dependents(n)}

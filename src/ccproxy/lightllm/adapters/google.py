@@ -57,17 +57,12 @@ class GoogleAdapter(UIAdapter[Any, dict[str, Any], Any, AgentDepsT, OutputDataT]
 
     @classmethod
     def load_messages(cls, *_args: Any, **_kwargs: Any) -> list[ModelMessage]:
-        raise NotImplementedError(
-            "ccproxy does not host a Google-format listener; "
-            "GoogleAdapter is outbound-only."
-        )
+        raise NotImplementedError("ccproxy does not host a Google-format listener; GoogleAdapter is outbound-only.")
 
     def build_event_stream(
         self,
     ) -> UIEventStream[Any, Any, AgentDepsT, OutputDataT]:
-        raise NotImplementedError(
-            "Google streaming intake/render lives in ccproxy.lightllm.graph.google_*."
-        )
+        raise NotImplementedError("Google streaming intake/render lives in ccproxy.lightllm.graph.google_*.")
 
     @classmethod
     def render(cls, req: Any) -> bytes:

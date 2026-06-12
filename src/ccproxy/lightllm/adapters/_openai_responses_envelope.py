@@ -325,13 +325,9 @@ def parse_input_item(
                     if ptype in ("output_text", "text"):
                         builder.add(TextPart(content=block.get("text", "")))
                     elif ptype == "refusal":
-                        raw_extras[
-                            f"openai_responses:refusal:{item_index}:{part_index}"
-                        ] = dict(block)
+                        raw_extras[f"openai_responses:refusal:{item_index}:{part_index}"] = dict(block)
                     else:
-                        raw_extras[
-                            f"unknown_block:msg:{item_index}:idx:{part_index}"
-                        ] = block
+                        raw_extras[f"unknown_block:msg:{item_index}:idx:{part_index}"] = block
                         builder.add(TextPart(content=json.dumps(block)))
             return
 

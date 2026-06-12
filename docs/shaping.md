@@ -41,7 +41,8 @@ refreshed packaged shape.
 
 Use this manual guide when all of these are true:
 
-- You are using a built-in shaped provider such as `anthropic` or `gemini`.
+- You are using a built-in shaped provider such as `anthropic`, `gemini`, or
+  `openai_responses`.
 - The packaged shape fails, usually with a provider-side 400, 401, or 403.
 - There is not yet a ccproxy release with an updated packaged shape.
 - The provider's official CLI still works on your machine when run normally.
@@ -65,6 +66,9 @@ claude -p "reply with ok"
 
 # Gemini CLI
 gemini -p "reply with ok"
+
+# Codex CLI
+codex exec --ephemeral --ignore-rules --skip-git-repo-check -C /tmp "reply with ok"
 ```
 
 Make sure ccproxy is running in another terminal:
@@ -278,6 +282,10 @@ replay fingerprint under `ccproxy.fingerprint.profile`, and then:
 ├── anthropic/
 │   ├── series
 │   └── 0001-local-shape.patch
+├── openai_responses.mflow
+├── openai_responses/
+│   ├── series
+│   └── 0001-local-shape.patch
 ├── gemini/
 │   ├── series
 │   └── 0001-local-shape.patch
@@ -286,6 +294,7 @@ replay fingerprint under `ccproxy.fingerprint.profile`, and then:
 <package>/ccproxy/templates/shapes/
 ├── anthropic.mflow
 ├── gemini.mflow
+├── openai_responses.mflow
 └── ...
 ```
 
@@ -596,6 +605,13 @@ shaping:
 | `preserve_headers` | `list[str]` | auth + host | Target headers apply_shape must NOT overwrite |
 | `strip_headers` | `list[str]` | auth + transport | Shape headers to remove before stamping |
 | `capture.path_pattern` | `str` | `""` | Regex for flow validation during `ccproxy shapes save` |
+
+The packaged `openai_responses` profile for Codex includes
+`ccproxy.shaping.codex`. That inner shape hook preserves the captured Codex
+instruction envelope, converts public SDK string `input` into Codex's verbose
+message-list form, and enforces `store: false`. The ChatGPT Codex backend does
+not accept every public `/v1/responses` option; keep the default provider on
+streaming requests and omit public-only fields such as `max_output_tokens`.
 
 ### Writing Custom Shape Hooks
 

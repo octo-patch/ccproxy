@@ -190,10 +190,10 @@ cascades into capacity fallback.
   the incoming request per `merge_strategies`, shape inner-DAG hooks run, then `apply_shape()`
   stamps headers + query params + body onto the outbound flow.
   Packaged defaults live in `src/ccproxy/templates/shapes/` and are public distribution artifacts.
-  As of this repo state, only `anthropic.mflow` and `gemini.mflow` are packaged defaults.
-  `openai_responses` / Codex is not supported as a packaged default yet; do not add it back to
-  `nix/defaults.nix`, `scripts/package_mflows.py`, or the packaged-shape E2E gate until live
-  provider behavior is actually supported.
+  As of this repo state, `anthropic.mflow`, `gemini.mflow`, and
+  `openai_responses.mflow` are packaged defaults. Codex/OpenAI Responses is supported through the
+  default `codex` provider, `codex_oauth`, and same-format `openai_responses` redirect with shape
+  replay.
   `scripts/package_mflows.py` is a dev artifact, not a public CLI command. It captures real CLI
   traffic through `ccproxy run --inspect`, then prepares public `.mflow` files by reusing the same
   apply-time shaping machinery against canonical SDK requests.
@@ -231,8 +231,10 @@ cascades into capacity fallback.
   `FileAuthSource` (`type: file`) are static value loaders. `AuthSource(AuthFields)` is the
   refresh-capable base (60s expiry headroom, atomic write-back via tmp+fsync+rename+chmod0o600,
   glom-configurable `access_path`/`refresh_path`/`expiry_path`). `AnthropicAuthSource` and
-  `GoogleAuthSource` extend it with provider-specific refresh bodies. `parse_auth_source` accepts
-  bare strings, explicit `type:` discriminators, or `command`/`file` key inference.
+  `GoogleAuthSource` extend it with provider-specific form refresh bodies. `CodexAuthSource`
+  (`type: codex_oauth`) refreshes Codex ChatGPT JWTs from `~/.codex/auth.json` and exposes
+  companion account-routing headers. `parse_auth_source` accepts bare strings, explicit `type:`
+  discriminators, or `command`/`file` key inference.
 
 - **`specs/`** — Vendored constants, Pydantic schemas, model catalog.
   - `claude_code_constants.py` — `BASE_BETAS`, `LONG_CONTEXT_BETAS` (vendored fact lists).
@@ -319,14 +321,14 @@ keys — using raw provider keys bypasses the `inject_auth` hook and the shaping
 If a destination isn’t routable through a sentinel key, add a `providers` entry for it.
 
 `providers` is a `dict[str, Provider]`. Each `Provider` carries `auth` (an `AnyAuthSource`
-discriminated union — `command` / `file` / `anthropic_oauth` / `google_oauth`; bare YAML strings
-auto-coerce to `command`), `host` (single destination hostname), `path` (with `{model}` / `{action}`
+discriminated union — `command` / `file` / `anthropic_oauth` / `google_oauth` / `codex_oauth`;
+bare YAML strings auto-coerce to `command`), `host` (single destination hostname), `path` (with `{model}` / `{action}`
 templating), `type` (an adapter-family name routed by
 `lightllm/graph/__init__.py:dispatch_dump_sync` — `anthropic` / `openai` / `google` / `gemini` /
 `vertex_ai` / `vertex_ai_beta` / `perplexity_pro`; Anthropic-compatible forks like `deepseek` and
 `zai` use `type: anthropic`), and an optional `fingerprint_profile` (curl-cffi impersonate name,
 e.g. `"chrome131"`, `"firefox144"`). `command` and `file` are static value loaders with no expiry
-awareness; `anthropic_oauth` and `google_oauth` extend `AuthSource` and own the in-process refresh
+awareness; `anthropic_oauth`, `google_oauth`, and `codex_oauth` own the in-process refresh
 lifecycle (60s headroom, atomic write-back to `file_path`). The optional `auth.header` field
 overrides the target auth header (default `authorization` with `Bearer`; set to `x-api-key` for raw
 injection).

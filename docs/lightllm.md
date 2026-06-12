@@ -676,9 +676,16 @@ host/path to the upstream (typically
 `chatgpt.com/backend-api/codex/responses`), and streams the upstream
 response straight back to the client. The buffered output arm above is
 ONLY used when a `/v1/responses` request cross-format-transforms to a
-non-Responses upstream (e.g., Anthropic for testing); the codex
-sentinel routing would be pure passthrough once a real provider entry is
-configured.
+non-Responses upstream (e.g., Anthropic for testing). The default `codex`
+provider entry uses `type: openai_responses`, so normal Codex sentinel traffic
+is same-format redirect plus shape replay, not a buffered cross-format
+transform.
+
+The default Codex route targets ChatGPT's Codex backend, which is stricter than
+the public `/v1/responses` API. Keep default `codex` traffic streaming, leave
+public-only fields such as `max_output_tokens` unset, and rely on the
+`ccproxy.shaping.codex` inner shape hook for the backend-required verbose
+`input` form and `store: false`.
 
 `_FORMAT_PATTERNS` in `inspector/routes/transform.py` and
 `_select_inbound_format` in `pipeline/context.py` both recognize

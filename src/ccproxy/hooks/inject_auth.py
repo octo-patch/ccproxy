@@ -106,6 +106,9 @@ def _inject_token(ctx: Context, provider: str, token: str) -> None:
     else:
         ctx.set_header(target_header, token)
 
+    for header, value in config.get_auth_extra_headers(provider).items():
+        ctx.set_header(header, value)
+
     for header in _INBOUND_AUTH_HEADERS:
         if header != target_header:
             ctx.set_header(header, "")

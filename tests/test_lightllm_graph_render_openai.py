@@ -368,8 +368,8 @@ class TestMultipleToolCalls:
             PartStartEvent(index=1, part=ToolCallPart(tool_name="fn_b", tool_call_id="call_1")),
             PartDeltaEvent(index=0, delta=ToolCallPartDelta(args_delta='{"a":')),
             PartDeltaEvent(index=1, delta=ToolCallPartDelta(args_delta='{"b":')),
-            PartDeltaEvent(index=0, delta=ToolCallPartDelta(args_delta='1}')),
-            PartDeltaEvent(index=1, delta=ToolCallPartDelta(args_delta='2}')),
+            PartDeltaEvent(index=0, delta=ToolCallPartDelta(args_delta="1}")),
+            PartDeltaEvent(index=1, delta=ToolCallPartDelta(args_delta="2}")),
         ]
         out = _render_all(render, events)
         deltas = _deltas(out)
@@ -600,9 +600,7 @@ class TestRoundtrip:
         "case",
         [pytest.param(c, id=c.name) for c in ROUNDTRIP_CASES],
     )
-    def test_render_then_intake_reconstructs_same_assistant_message(
-        self, case: RoundtripCase
-    ) -> None:
+    def test_render_then_intake_reconstructs_same_assistant_message(self, case: RoundtripCase) -> None:
         # 1. Render
         render = _new_render()
         wire_bytes = _render_all(render, case.events)

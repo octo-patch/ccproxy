@@ -437,9 +437,7 @@ class TestForwardedRequestCapture:
         assert flow.request.port == _SIDECAR_PORT
         assert flow.metadata.get("ccproxy.transport_override") is True
 
-    async def test_no_fingerprint_profile_and_no_shape_leaves_forwarded_request_none(
-        self, shape_fingerprint
-    ) -> None:
+    async def test_no_fingerprint_profile_and_no_shape_leaves_forwarded_request_none(self, shape_fingerprint) -> None:
         """Provider with fingerprint_profile=None AND no shape — forwarded_request stays None."""
         _set_provider("anthropic", fingerprint_profile=None)
         shape_fingerprint(None)
@@ -474,9 +472,7 @@ class TestShapeImplicitPath:
         assert flow.request.port == _SIDECAR_PORT
         assert flow.request.scheme == "http"
 
-    async def test_shape_fingerprint_uses_provider_type_as_impersonate_key(
-        self, shape_fingerprint
-    ) -> None:
+    async def test_shape_fingerprint_uses_provider_type_as_impersonate_key(self, shape_fingerprint) -> None:
         """The IMPERSONATE_HEADER carries provider.type (= shape lookup key)."""
         provider = Provider(
             host="api.anthropic.com",

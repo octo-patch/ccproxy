@@ -6,7 +6,7 @@ continue to accept:
 
 1. Bare command strings (most common form in user configs).
 2. Dicts with only ``command`` or ``file`` keys (no ``type`` discriminator).
-3. The new discriminated forms (``type: command|file|anthropic_oauth|google_oauth``).
+3. The new discriminated forms (``type: command|file|anthropic_oauth|google_oauth|codex_oauth``).
 """
 
 from __future__ import annotations
@@ -15,6 +15,7 @@ import pytest
 
 from ccproxy.auth.sources import (
     AnthropicAuthSource,
+    CodexAuthSource,
     CommandAuthSource,
     FileAuthSource,
     GoogleAuthSource,
@@ -70,6 +71,12 @@ def test_explicit_type_google_oauth_dispatches_correctly() -> None:
     )
     assert isinstance(source, GoogleAuthSource)
     assert source.endpoint == "https://oauth2.googleapis.com/token"
+
+
+def test_explicit_type_codex_oauth_dispatches_correctly() -> None:
+    source = parse_auth_source({"type": "codex_oauth"})
+    assert isinstance(source, CodexAuthSource)
+    assert source.file_path == "~/.codex/auth.json"
 
 
 def test_unknown_type_raises_value_error() -> None:

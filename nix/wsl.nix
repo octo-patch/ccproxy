@@ -145,6 +145,7 @@ in
         else
           chmod 0644 "$root/etc/wsl.conf"
         fi
+        sed -i '/^[[:space:]]*default[[:space:]]*=/d' "$root/etc/wsl.conf"
 
         echo "[ccproxy-wsl] Installing default NixOS configuration"
         install -Dm644 ${defaultConfig} "$root/etc/nixos/configuration.nix"

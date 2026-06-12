@@ -204,7 +204,7 @@ ccproxy:
 | `auth` | Discriminated auth source. Bare strings coerce to `{type: command, command: <str>}`. |
 | `host` | Single destination hostname (e.g. `api.anthropic.com`). |
 | `path` | Destination path. Supports `{model}` and `{action}` templating substituted from the body / URL at routing time. Defaults to `/`. |
-| `type` | Wire-format identifier (`anthropic`, `gemini`, `openai`, `perplexity_pro`, …). When the incoming format matches `type`, the routing handler just rewrites the destination; when they differ, the body is rewritten via `lightllm`. |
+| `type` | Wire-format identifier (`anthropic`, `gemini`, `openai`, `openai_responses`, `perplexity_pro`, …). When the incoming format matches `type`, the routing handler just rewrites the destination; when they differ, the body is rewritten via `lightllm`. |
 
 **Auth source types** (the `type:` discriminator inside `auth:`):
 
@@ -214,8 +214,17 @@ ccproxy:
 | `file` | `file` | File path; contents stripped of whitespace are the token. |
 | `anthropic_oauth` | `file_path` (default `~/.config/ccproxy/oauth/anthropic.json`) | Refreshes Anthropic OAuth tokens in-process via `claude.ai/v1/oauth/token`. Atomically writes refreshed tokens back to `file_path`. |
 | `google_oauth` | `client_id`, `client_secret`, `file_path` (default `~/.gemini/oauth_creds.json`) | Refreshes Google/Gemini OAuth tokens in-process via `oauth2.googleapis.com`. Preserves on-disk `refresh_token` when the refresh response omits it (gemini-cli #21691). |
+| `codex_oauth` | `file_path` (default `~/.codex/auth.json`) | Refreshes Codex ChatGPT OAuth tokens in-process via `auth.openai.com`, atomically writes the updated auth envelope, and stamps account-routing companion headers. |
 
 The `auth.header` field (inside any `auth:` block) overrides the default `Authorization: Bearer {token}` injection. Set it to a custom header name (e.g. `x-api-key`) when the destination expects the raw token in a non-Bearer header.
+
+The packaged `codex` provider uses `type: openai_responses` and routes
+same-format Responses requests to ChatGPT's Codex backend
+(`/backend-api/codex/responses`). That backend follows Codex CLI semantics, not
+the full public OpenAI Responses API surface: use streaming requests, leave
+public-only fields such as `max_output_tokens` unset, and let the
+`ccproxy.shaping.codex` shape hook normalize string `input` and enforce
+`store: false`.
 
 #### Auth source class hierarchy
 
@@ -225,6 +234,7 @@ Configuration values dispatch through a small Pydantic class hierarchy:
 AuthFields                                  # base — only `header`
 ├── CommandAuthSource    type: command          → run a shell command, return stdout
 ├── FileAuthSource       type: file             → read a file, return contents
+├── CodexAuthSource      type: codex_oauth      → refresh Codex ChatGPT JWTs + account headers
 └── AuthSource                              # OAuth refresh-capable base
     ├── AnthropicAuthSource   type: anthropic_oauth
     └── GoogleAuthSource      type: google_oauth
@@ -237,7 +247,15 @@ AuthFields                                  # base — only `header`
 - defaults for `type` (the `Literal` discriminator), `file_path`, `endpoint`, `client_id`, optional `client_secret`, and `default_expires_in_seconds`;
 - a `_build_refresh_body(refresh_token) -> dict[str, str]` that returns the per-provider POST body (Anthropic uses `grant_type=refresh_token` + `client_id`; Google adds `client_secret`).
 
-The discriminator literal mirrors the distinction in YAML: bare `command` / `file` for the static loaders, `*_oauth` for the refresh sources. Pick the right one for the credential's lifecycle, not for the brand of the destination — pointing a Gemini destination at `type: command` is legal, but ccproxy will not refresh anything in that case (see "Why Gemini wants `google_oauth`" below).
+`CodexAuthSource` is separate because Codex's auth file stores JWTs and
+ChatGPT account metadata under a different envelope, and the refresh endpoint
+expects JSON rather than the form body used by Anthropic and Google. The
+discriminator literal mirrors the distinction in YAML: bare `command` / `file`
+for the static loaders, `*_oauth` for the refresh sources. Pick the right one
+for the credential's lifecycle, not for the brand of the destination —
+pointing a Gemini destination at `type: command` is legal, but ccproxy will
+not refresh anything in that case (see "Why Gemini wants `google_oauth`"
+below).
 
 **Iteration order is load-bearing.** `inject_auth` walks `providers` in insertion order to pick a fallback when no sentinel key is present on the request — the first provider with a cached token wins. Keep the highest-priority provider (typically `anthropic`) first.
 
@@ -253,7 +271,11 @@ When ccproxy sees a key matching `sk-ant-oat-ccproxy-{name}`, it substitutes the
 
 ### Token Refresh
 
-Tokens are loaded at startup via `_load_credentials()` and cached in memory. For OAuth-source providers (`anthropic_oauth`, `google_oauth`), `AuthSource.resolve()` rotates the cached access token in-process whenever its expiry is within 60 seconds (atomic write-back to `file_path` preserves sibling fields).
+Tokens are loaded at startup via `_load_credentials()` and cached in memory.
+For refresh-capable providers (`anthropic_oauth`, `google_oauth`,
+`codex_oauth`), `resolve()` rotates the cached access token in-process
+whenever it is near expiry and atomically writes the updated credentials back
+to `file_path`.
 
 On a 401 response from upstream, `AuthAddon.response()` calls `config.resolve_auth_token(provider)` to re-resolve the credential source — for OAuth sources this triggers another refresh attempt; for static `command` / `file` loaders it just re-reads. The request is then replayed with whatever token the resolver returns; if the resolver returns nothing (empty token, refresh failed), the 401 propagates to the client.
 
@@ -271,7 +293,7 @@ The `gemini-cli #21691` workaround lives at the merge step: `new_refresh = paylo
 
 #### Startup sequence
 
-`from_yaml()` calls `_load_credentials()` before the inspector listeners come up. `_load_credentials()` iterates every `providers[name]` whose `auth` is set and calls `auth.resolve(label=name)`, populating `_cached_auth_tokens[name]`. For `anthropic_oauth` / `google_oauth` entries, that single call performs the full read → expiry-check → refresh → write-back dance, so the cached token is guaranteed fresh by the time mitmweb starts accepting traffic.
+`from_yaml()` calls `_load_credentials()` before the inspector listeners come up. `_load_credentials()` iterates every `providers[name]` whose `auth` is set and calls `auth.resolve(label=name)`, populating `_cached_auth_tokens[name]`. For `anthropic_oauth`, `google_oauth`, and `codex_oauth` entries, that single call performs the full read → expiry-check → refresh → write-back dance, so the cached token is fresh by the time mitmweb starts accepting traffic.
 
 This ordering matters most for Gemini. The `prewarm_project()` hook in `ccproxy.hooks.gemini_cli` runs once after readiness, POSTs to `https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist` with the cached `gemini` token, and stashes the resulting `cloudaicompanionProject` for the process lifetime:
 

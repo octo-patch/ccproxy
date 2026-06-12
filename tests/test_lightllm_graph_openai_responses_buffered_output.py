@@ -99,17 +99,13 @@ class TestToolCallOutput:
 class TestReasoningOutput:
     def test_thinking_part_emits_reasoning_item(self) -> None:
         out = _parts_to_openai_responses(
-            parts=[
-                ThinkingPart(content="Thinking step.", provider_name="anthropic")
-            ],
+            parts=[ThinkingPart(content="Thinking step.", provider_name="anthropic")],
             model="claude-sonnet-4-5",
         )
         assert len(out["output"]) == 1
         item = out["output"][0]
         assert item["type"] == "reasoning"
-        assert item["content"] == [
-            {"type": "reasoning_text", "text": "Thinking step."}
-        ]
+        assert item["content"] == [{"type": "reasoning_text", "text": "Thinking step."}]
 
 
 class TestEnvelopeMetadata:

@@ -71,9 +71,7 @@ def _build_anthropic_text_sse(text: str) -> bytes:
     return b"".join(_frame(e) for e in events)
 
 
-def _make_fsm_pipeline(
-    *, provider_type: str = "anthropic", inbound_format: InboundFormat
-) -> SSEPipeline:
+def _make_fsm_pipeline(*, provider_type: str = "anthropic", inbound_format: InboundFormat) -> SSEPipeline:
     intake = dispatch_intake(
         provider_type=provider_type,
         model="claude-3-5-haiku-20241022",

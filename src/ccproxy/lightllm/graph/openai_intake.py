@@ -130,9 +130,7 @@ class _OpenAIIntakeState:
 # ── Graph ──────────────────────────────────────────────────────────────────
 
 
-_g: GraphBuilder[
-    _OpenAIIntakeState, None, None, list[ModelResponseStreamEvent]
-] = GraphBuilder(
+_g: GraphBuilder[_OpenAIIntakeState, None, None, list[ModelResponseStreamEvent]] = GraphBuilder(
     state_type=_OpenAIIntakeState,
     output_type=list[ModelResponseStreamEvent],
 )
