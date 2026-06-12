@@ -10,11 +10,12 @@ import json
 import logging
 import re
 
-from mitmproxy import command, ctx, http
+from mitmproxy import command, http
 
 from ccproxy.config import get_config
 from ccproxy.constants import SENSITIVE_PATTERNS
 from ccproxy.inspector.fingerprint import CapturedFingerprint
+from ccproxy.inspector.flow_lookup import find_http_flow
 from ccproxy.pipeline.context import metadata_from_flow
 from ccproxy.shaping.store import get_store
 
@@ -124,11 +125,7 @@ class ShapeCaptureAddon:
 
     @staticmethod
     def _find_http_flow(flow_id: str) -> http.HTTPFlow | None:
-        view = ctx.master.addons.get("view")  # type: ignore[no-untyped-call]
-        if view is None:
-            return None
-        found = view.get_by_id(flow_id)
-        return found if isinstance(found, http.HTTPFlow) else None
+        return find_http_flow(flow_id)
 
 
 def _validate_flow(

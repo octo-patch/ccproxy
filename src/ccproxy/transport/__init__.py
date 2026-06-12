@@ -15,6 +15,7 @@ from ccproxy.transport.dispatch import (
     aclose_all,
     get_client,
     reset_cache,
+    resolve_captured_fingerprint,
 )
 
 __all__ = [
@@ -26,4 +27,5 @@ __all__ = [
     "aclose_all",
     "get_client",
     "reset_cache",
+    "resolve_captured_fingerprint",
 ]

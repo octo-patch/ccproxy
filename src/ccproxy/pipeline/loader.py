@@ -11,11 +11,11 @@ from __future__ import annotations
 import importlib
 import logging
 from dataclasses import replace
-from typing import Any
+from typing import Any, cast
 
 from pydantic import ValidationError
 
-from ccproxy.pipeline.hook import HookSpec, get_registry
+from ccproxy.pipeline.hook import HookParams, HookSpec, RegisteredHandlerFn, get_registry
 
 logger = logging.getLogger(__name__)
 
@@ -32,15 +32,16 @@ def load_hooks(entries: list[str | dict[str, Any]]) -> list[HookSpec]:
       from the given config entries.
     """
     hook_priority_map: dict[str, int] = {}
-    hook_params_map: dict[str, dict[str, Any]] = {}
+    hook_params_map: dict[str, HookParams] = {}
 
     for idx, entry in enumerate(entries):
-        params: dict[str, Any] = {}
+        params: HookParams = {}
         if isinstance(entry, str):
             module_path = entry
         else:
             module_path = str(entry.get("hook", ""))
-            params = entry.get("params", {})
+            raw_params = entry.get("params", {})
+            params = raw_params if isinstance(raw_params, dict) else {}
             if not module_path:
                 continue
 
@@ -53,7 +54,8 @@ def load_hooks(entries: list[str | dict[str, Any]]) -> list[HookSpec]:
         for attr_name in dir(mod):
             obj = getattr(mod, attr_name, None)
             if callable(obj) and hasattr(obj, "_hook_spec"):
-                hook_name: str = obj._hook_spec.name  # type: ignore[union-attr]
+                hook_fn = cast(RegisteredHandlerFn, obj)
+                hook_name = hook_fn._hook_spec.name
                 hook_priority_map[hook_name] = idx
                 if params:
                     hook_params_map[hook_name] = params
@@ -66,7 +68,7 @@ def load_hooks(entries: list[str | dict[str, Any]]) -> list[HookSpec]:
         if name not in hook_priority_map:
             continue
         params = hook_params_map.get(name, {})
-        resolved_params: dict[str, Any] = {}
+        resolved_params: HookParams = {}
         if params and spec.model is not None:
             try:
                 validated = spec.model(**params)

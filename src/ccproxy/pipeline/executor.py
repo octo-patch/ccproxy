@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import logging
 import traceback
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import httpx
 
@@ -31,7 +31,7 @@ from ccproxy.pipeline.results import (
 if TYPE_CHECKING:
     from mitmproxy.http import HTTPFlow
 
-    from ccproxy.pipeline.hook import HookSpec
+    from ccproxy.pipeline.hook import HookParams, HookSpec
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +41,7 @@ class PipelineExecutor:
     def __init__(
         self,
         hooks: list[HookSpec],
-        extra_params: dict[str, Any] | None = None,
+        extra_params: HookParams | None = None,
     ) -> None:
         self.dag = HookDAG(hooks)
         self.extra_params = extra_params or {}
@@ -114,7 +114,7 @@ class PipelineExecutor:
         ctx: Context,
         spec: HookSpec,
         overrides: OverrideSet,
-        params: dict[str, Any],
+        params: HookParams,
     ) -> HookResult:
         """Execute a single hook with error isolation.
 

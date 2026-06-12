@@ -44,7 +44,7 @@ def _run_dump(flow: http.HTTPFlow | None, flow_id: str) -> str:
     view.get_by_id.return_value = flow
     master = MagicMock()
     master.addons.get.return_value = view
-    with patch("ccproxy.inspector.multi_har_saver.ctx") as mock_ctx:
+    with patch("ccproxy.inspector.flow_lookup.ctx") as mock_ctx:
         mock_ctx.master = master
         return saver.dump_flows(flow_id)
 
@@ -56,7 +56,7 @@ def _run_dump_multi(flows_by_id: dict[str, http.HTTPFlow | None], flow_ids_csv: 
     view.get_by_id.side_effect = lambda fid: flows_by_id.get(fid)
     master = MagicMock()
     master.addons.get.return_value = view
-    with patch("ccproxy.inspector.multi_har_saver.ctx") as mock_ctx:
+    with patch("ccproxy.inspector.flow_lookup.ctx") as mock_ctx:
         mock_ctx.master = master
         return saver.dump_flows(flow_ids_csv)
 

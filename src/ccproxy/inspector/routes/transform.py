@@ -389,7 +389,7 @@ def _handle_transform(
 def register_transform_routes(router: InspectorRouter) -> None:
     from ccproxy.inspector.router import RouteType
 
-    @router.route("/{path}", rtype=RouteType.REQUEST, catch_error=False)  # ty: ignore[invalid-argument-type]
+    @router.route("/{path}", rtype=RouteType.REQUEST, catch_error=False)
     def handle_transform(flow: HTTPFlow, **_kwargs: object) -> None:  # pyright: ignore[reportUnusedFunction]
         if metadata_from_flow(flow).direction != "inbound":
             return
@@ -453,7 +453,7 @@ def register_transform_routes(router: InspectorRouter) -> None:
                 flow.request.path,
             )
 
-    @router.route("/{path}", rtype=RouteType.RESPONSE, catch_error=False)  # ty: ignore[invalid-argument-type]
+    @router.route("/{path}", rtype=RouteType.RESPONSE, catch_error=False)
     def handle_transform_response(flow: HTTPFlow, **_kwargs: object) -> None:  # pyright: ignore[reportUnusedFunction]
         record = metadata_from_flow(flow).record
         if record is None or getattr(record, "transform", None) is None:

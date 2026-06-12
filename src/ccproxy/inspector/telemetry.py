@@ -6,8 +6,9 @@ graceful degradation when OTel packages are not installed.
 
 from __future__ import annotations
 
+import importlib
 import logging
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from ccproxy.flows.store import FlowRecord, OtelMeta
 from ccproxy.pipeline.context import metadata_from_flow
@@ -17,7 +18,35 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_provider: Any = None
+
+class _TracerProviderLike(Protocol):
+    def add_span_processor(self, _processor: object) -> None: ...
+    def shutdown(self) -> None: ...
+
+
+class _TraceApi(Protocol):
+    def set_tracer_provider(self, provider: object) -> None: ...
+    def get_tracer(self, name: str) -> object: ...
+
+
+class _ResourceClass(Protocol):
+    @classmethod
+    def create(cls, _attributes: dict[str, object]) -> object: ...
+
+
+class _TracerProviderFactory(Protocol):
+    def __call__(self, *, resource: object) -> _TracerProviderLike: ...
+
+
+class _ExporterFactory(Protocol):
+    def __call__(self, **kwargs: object) -> object: ...
+
+
+class _SpanProcessorFactory(Protocol):
+    def __call__(self, exporter: object) -> object: ...
+
+
+_provider: _TracerProviderLike | None = None
 
 _PROVIDER_MAP = {
     "api.anthropic.com": "anthropic",
@@ -207,23 +236,29 @@ class InspectorTracer:
             logger.debug("Error finishing OTel span for client disconnect: %s", e)
 
 
-def _init_otel_tracer(service_name: str, otlp_endpoint: str) -> Any:
+def _init_otel_tracer(service_name: str, otlp_endpoint: str) -> object:
     global _provider
 
-    from opentelemetry import trace
-    from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
-    from opentelemetry.sdk.resources import SERVICE_NAME, Resource
-    from opentelemetry.sdk.trace import TracerProvider
-    from opentelemetry.sdk.trace.export import BatchSpanProcessor
+    trace = cast(_TraceApi, importlib.import_module("opentelemetry.trace"))
+    trace_exporter = importlib.import_module("opentelemetry.exporter.otlp.proto.grpc.trace_exporter")
+    resources = importlib.import_module("opentelemetry.sdk.resources")
+    sdk_trace = importlib.import_module("opentelemetry.sdk.trace")
+    sdk_export = importlib.import_module("opentelemetry.sdk.trace.export")
 
-    resource = Resource.create({SERVICE_NAME: service_name})
-    provider = TracerProvider(resource=resource)
+    service_name_key = cast(str, resources.SERVICE_NAME)
+    resource_factory = cast(_ResourceClass, resources.Resource)
+    tracer_provider_factory = cast(_TracerProviderFactory, sdk_trace.TracerProvider)
+    exporter_factory = cast(_ExporterFactory, trace_exporter.OTLPSpanExporter)
+    span_processor_factory = cast(_SpanProcessorFactory, sdk_export.BatchSpanProcessor)
 
-    exporter = OTLPSpanExporter(
+    resource = resource_factory.create({service_name_key: service_name})
+    provider = tracer_provider_factory(resource=resource)
+
+    exporter = exporter_factory(
         endpoint=otlp_endpoint,
         insecure=True,
     )
-    provider.add_span_processor(BatchSpanProcessor(exporter))
+    provider.add_span_processor(span_processor_factory(exporter))
     trace.set_tracer_provider(provider)
 
     _provider = provider

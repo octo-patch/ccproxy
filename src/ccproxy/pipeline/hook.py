@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 if TYPE_CHECKING:
     from pydantic import BaseModel
@@ -16,9 +16,24 @@ if TYPE_CHECKING:
     from ccproxy.pipeline.context import Context
 
 
-# Type aliases
+type HookParams = dict[str, Any]
+
+
 GuardFn = Callable[["Context"], bool]
-HandlerFn = Callable[["Context", dict[str, Any]], "Context"]
+HandlerFn = Callable[["Context", HookParams], "Context"]
+
+
+class HandlerMetadata(Protocol):
+    """Callable hook handler with function metadata used for registration."""
+
+    __name__: str
+    __module__: str
+
+
+class RegisteredHandlerFn(HandlerMetadata, Protocol):
+    """Hook handler after ``@hook`` has attached its registered spec."""
+
+    _hook_spec: HookSpec
 
 
 def always_true(ctx: Context) -> bool:
@@ -45,7 +60,7 @@ class HookSpec:
     writes: frozenset[str] = field(default_factory=frozenset)  # pyright: ignore[reportUnknownVariableType]
     """Keys this hook writes to the request context."""
 
-    params: dict[str, Any] = field(default_factory=dict)  # pyright: ignore[reportUnknownVariableType]
+    params: HookParams = field(default_factory=dict)  # pyright: ignore[reportUnknownVariableType]
     """YAML-supplied parameters validated against the model."""
 
     priority: int = 0
@@ -66,7 +81,7 @@ class HookSpec:
         """Check if this hook should run for the given context."""
         return self.guard(ctx)
 
-    def execute(self, ctx: Context, extra_params: dict[str, Any] | None = None) -> Context:
+    def execute(self, ctx: Context, extra_params: HookParams | None = None) -> Context:
         """Execute the hook handler."""
         params = dict(self.params)
         if extra_params:
@@ -120,19 +135,20 @@ def hook(
     """
 
     def decorator(fn: HandlerFn) -> HandlerFn:
+        metadata = cast(HandlerMetadata, fn)
         # Try to find guard function by convention
         resolved_guard = guard
         if resolved_guard is None:
             # Look for {fn_name}_guard in the same module
             import sys
 
-            module = sys.modules.get(fn.__module__)
+            module = sys.modules.get(metadata.__module__)
             if module:
-                guard_name = f"{fn.__name__}_guard"
+                guard_name = f"{metadata.__name__}_guard"
                 resolved_guard = getattr(module, guard_name, None)
 
         spec = HookSpec(
-            name=fn.__name__,
+            name=metadata.__name__,
             handler=fn,
             guard=resolved_guard or always_true,
             reads=frozenset(reads or []),
@@ -142,7 +158,8 @@ def hook(
         _registry.register_spec(spec)
 
         # Attach spec to function for introspection
-        fn._hook_spec = spec  # type: ignore[attr-defined]
+        registered = cast(RegisteredHandlerFn, fn)
+        registered._hook_spec = spec
         return fn
 
     return decorator

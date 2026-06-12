@@ -34,7 +34,6 @@ from mitmproxy import http
 from ccproxy import transport
 from ccproxy.config import get_config
 from ccproxy.hooks.gemini_envelope import EnvelopeUnwrapStream, unwrap_buffered
-from ccproxy.inspector.fingerprint import CapturedFingerprint
 from ccproxy.pipeline.context import metadata_from_flow
 
 logger = logging.getLogger(__name__)
@@ -96,14 +95,6 @@ def _is_capacity_exhausted(body: Any, retry_status_codes: list[int]) -> bool:
     code = err.get("code")
     status = err.get("status")
     return code in retry_status_codes and status in ("RESOURCE_EXHAUSTED", "INTERNAL")
-
-
-def _resolve_captured_fingerprint(profile: str) -> CapturedFingerprint | None:
-    if profile in transport.VALID_PROFILES:
-        return None
-    from ccproxy.shaping.store import get_store
-
-    return get_store().pick_fingerprint(profile)
 
 
 class GeminiAddon:
@@ -219,7 +210,7 @@ class GeminiAddon:
         metadata = metadata_from_flow(flow)
         profile = metadata.fingerprint_profile or transport.DEFAULT_PROFILE
         try:
-            fingerprint = _resolve_captured_fingerprint(profile)
+            fingerprint = transport.resolve_captured_fingerprint(profile)
             if fingerprint is None:
                 client = await transport.get_client(host=flow.request.pretty_host, profile=profile)
             else:

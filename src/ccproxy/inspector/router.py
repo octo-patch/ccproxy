@@ -12,7 +12,8 @@ Patches:
 from __future__ import annotations
 
 import re
-from typing import Any
+from collections.abc import Callable
+from typing import Any, cast
 
 from mitmproxy.connection import Server
 from mitmproxy.http import HTTPFlow
@@ -52,6 +53,27 @@ class InspectorRouter(InterceptedAPI):
         if not self.response_routes:
             return
         super().response(flow)
+
+    def route(
+        self,
+        path: str,
+        host: str | None = None,
+        rtype: RouteType = RouteType.REQUEST,
+        catch_error: bool = True,
+        return_error: bool = False,
+    ) -> Callable[[Callable[..., object]], Callable[..., object]]:
+        """Expose xepor's route decorator with a correct bound-method type."""
+        base_route = cast(Any, super().route)
+        return cast(
+            Callable[[Callable[..., object]], Callable[..., object]],
+            base_route(
+                path=path,
+                host=host,
+                rtype=rtype,
+                catch_error=catch_error,
+                return_error=return_error,
+            ),
+        )
 
     def find_handler(self, host: str, path: str, rtype: RouteType = RouteType.REQUEST) -> tuple[Any, Any]:
         """Support host=None as a wildcard (xepor skips None-registered routes)."""

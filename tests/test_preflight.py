@@ -489,7 +489,7 @@ class TestCleanupStaleWireguardConfs:
 class TestKillStaleProcessesExtra:
     @patch("os.kill")
     @patch("time.sleep")
-    def test_sends_sigkill_when_still_alive(self, mock_sleep, mock_kill):
+    def test_sends_sigkill_when_still_alive(self, _mock_sleep, mock_kill):
         """If process is still alive after SIGTERM, sends SIGKILL."""
         # First kill (SIGTERM) succeeds, second (check with 0) succeeds (still alive),
         # third (SIGKILL) succeeds
@@ -502,14 +502,14 @@ class TestKillStaleProcessesExtra:
 
     @patch("os.kill")
     @patch("time.sleep")
-    def test_oserror_logs_error(self, mock_sleep, mock_kill):
+    def test_oserror_logs_error(self, _mock_sleep, mock_kill):
         mock_kill.side_effect = OSError("unexpected")
         count = kill_stale_processes([(1234, "litellm .ccproxy/config.yaml")])
         assert count == 0
 
     @patch("os.kill")
     @patch("time.sleep")
-    def test_long_cmdline_snippet(self, mock_sleep, mock_kill):
+    def test_long_cmdline_snippet(self, _mock_sleep, mock_kill):
         mock_kill.side_effect = ProcessLookupError
         long_cmd = "x" * 200
         count = kill_stale_processes([(1234, long_cmd)])

@@ -187,6 +187,14 @@ async def get_client(
     return await _get_cache().get(host=host, profile=profile, fingerprint=fingerprint)
 
 
+def resolve_captured_fingerprint(profile: str) -> CapturedFingerprint | None:
+    if profile in VALID_PROFILES:
+        return None
+    from ccproxy.shaping.store import get_store
+
+    return get_store().pick_fingerprint(profile)
+
+
 async def aclose_all() -> None:
     """Close every cached client. Call on inspector shutdown."""
     await _get_cache().aclose_all()

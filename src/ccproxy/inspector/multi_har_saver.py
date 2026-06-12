@@ -19,9 +19,10 @@ import json
 import logging
 from typing import cast
 
-from mitmproxy import command, ctx, http
+from mitmproxy import command, http
 from mitmproxy.addons.savehar import SaveHar
 
+from ccproxy.inspector.flow_lookup import find_http_flow
 from ccproxy.pipeline.context import metadata_from_flow
 
 logger = logging.getLogger(__name__)
@@ -85,11 +86,7 @@ class MultiHARSaver:
 
     @staticmethod
     def _find_http_flow(flow_id: str) -> http.HTTPFlow | None:
-        view = ctx.master.addons.get("view")  # type: ignore[no-untyped-call]
-        if view is None:
-            return None
-        found = view.get_by_id(flow_id)
-        return found if isinstance(found, http.HTTPFlow) else None
+        return find_http_flow(flow_id)
 
     @staticmethod
     def _build_provider_clone(flow: http.HTTPFlow) -> http.HTTPFlow:

@@ -138,7 +138,7 @@ async def _handle(request: Request) -> Response:
     try:
         fingerprint = _fingerprint_from_header(request.headers.get(FINGERPRINT_HEADER))
         if fingerprint is None:
-            fingerprint = _resolve_captured_fingerprint(profile)
+            fingerprint = transport.resolve_captured_fingerprint(profile)
         client = await transport.get_client(host=host, profile=profile, fingerprint=fingerprint)
     except transport.UnknownFingerprintProfileError as e:
         return Response(str(e), status_code=400)
@@ -192,14 +192,6 @@ async def _handle(request: Request) -> Response:
             )
         ),
     )
-
-
-def _resolve_captured_fingerprint(profile: str) -> CapturedFingerprint | None:
-    if profile in transport.VALID_PROFILES:
-        return None
-    from ccproxy.shaping.store import get_store
-
-    return get_store().pick_fingerprint(profile)
 
 
 def _fingerprint_from_header(value: str | None) -> CapturedFingerprint | None:

@@ -224,7 +224,7 @@ class TestFindHttpFlow:
     def test_returns_none_when_view_missing(self) -> None:
         master = MagicMock()
         master.addons.get.return_value = None
-        with patch("ccproxy.inspector.shape_capturer.ctx") as mock_ctx:
+        with patch("ccproxy.inspector.flow_lookup.ctx") as mock_ctx:
             mock_ctx.master = master
             assert ShapeCaptureAddon._find_http_flow("x") is None
 
@@ -234,7 +234,7 @@ class TestFindHttpFlow:
         view.get_by_id.return_value = flow
         master = MagicMock()
         master.addons.get.return_value = view
-        with patch("ccproxy.inspector.shape_capturer.ctx") as mock_ctx:
+        with patch("ccproxy.inspector.flow_lookup.ctx") as mock_ctx:
             mock_ctx.master = master
             assert ShapeCaptureAddon._find_http_flow("abc") is flow
 
@@ -243,6 +243,6 @@ class TestFindHttpFlow:
         view.get_by_id.return_value = object()
         master = MagicMock()
         master.addons.get.return_value = view
-        with patch("ccproxy.inspector.shape_capturer.ctx") as mock_ctx:
+        with patch("ccproxy.inspector.flow_lookup.ctx") as mock_ctx:
             mock_ctx.master = master
             assert ShapeCaptureAddon._find_http_flow("x") is None

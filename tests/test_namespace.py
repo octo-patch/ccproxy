@@ -372,7 +372,7 @@ class TestCreateNamespace:
     @patch("ccproxy.inspector.namespace._safe_close")
     def test_slirp_not_ready_cleans_up(
         self,
-        mock_safe_close: Mock,
+        _mock_safe_close: Mock,
         mock_safe_kill: Mock,
         mock_mkstemp: Mock,
         mock_close: Mock,
@@ -420,7 +420,7 @@ class TestCreateNamespace:
     @patch("ccproxy.inspector.namespace._safe_close")
     def test_wg_setup_failure_cleans_up(
         self,
-        mock_safe_close: Mock,
+        _mock_safe_close: Mock,
         mock_safe_kill: Mock,
         mock_mkstemp: Mock,
         mock_close: Mock,
@@ -887,7 +887,7 @@ class TestCliInspectHardFailure:
     def test_cleanup_always_called(
         self,
         mock_create: Mock,
-        mock_run_ns: Mock,
+        _mock_run_ns: Mock,
         mock_cleanup: Mock,
         mock_check: Mock,
         tmp_path: Path,
@@ -1079,7 +1079,7 @@ class TestPortForwarder:
 
     @patch("ccproxy.inspector.namespace._slirp_add_hostfwd", return_value=True)
     @patch("ccproxy.inspector.namespace._parse_proc_net_tcp", return_value={8080})
-    def test_forwards_new_port(self, mock_parse: Mock, mock_fwd: Mock, tmp_path: Path) -> None:
+    def test_forwards_new_port(self, _mock_parse: Mock, mock_fwd: Mock, tmp_path: Path) -> None:
         fwd = PortForwarder(ns_pid=1, api_socket=tmp_path / "api.sock", poll_interval=0.01)
         fwd.start()
         # Give the thread time to poll
@@ -1089,7 +1089,7 @@ class TestPortForwarder:
 
     @patch("ccproxy.inspector.namespace._slirp_add_hostfwd", return_value=False)
     @patch("ccproxy.inspector.namespace._parse_proc_net_tcp", return_value={8080})
-    def test_no_retry_on_failure(self, mock_parse: Mock, mock_fwd: Mock, tmp_path: Path) -> None:
+    def test_no_retry_on_failure(self, _mock_parse: Mock, mock_fwd: Mock, tmp_path: Path) -> None:
         fwd = PortForwarder(ns_pid=1, api_socket=tmp_path / "api.sock", poll_interval=0.01)
         fwd.start()
         fwd._stop_event.wait(0.15)
@@ -1099,7 +1099,7 @@ class TestPortForwarder:
 
     @patch("ccproxy.inspector.namespace._slirp_add_hostfwd", return_value=True)
     @patch("ccproxy.inspector.namespace._parse_proc_net_tcp", return_value={8080})
-    def test_no_retry_on_success(self, mock_parse: Mock, mock_fwd: Mock, tmp_path: Path) -> None:
+    def test_no_retry_on_success(self, _mock_parse: Mock, mock_fwd: Mock, tmp_path: Path) -> None:
         fwd = PortForwarder(ns_pid=1, api_socket=tmp_path / "api.sock", poll_interval=0.01)
         fwd.start()
         fwd._stop_event.wait(0.15)
@@ -1108,7 +1108,7 @@ class TestPortForwarder:
 
     @patch("ccproxy.inspector.namespace._slirp_add_hostfwd")
     @patch("ccproxy.inspector.namespace._parse_proc_net_tcp", side_effect=OSError("gone"))
-    def test_survives_parse_error(self, mock_parse: Mock, mock_fwd: Mock, tmp_path: Path) -> None:
+    def test_survives_parse_error(self, _mock_parse: Mock, mock_fwd: Mock, tmp_path: Path) -> None:
         fwd = PortForwarder(ns_pid=1, api_socket=tmp_path / "api.sock", poll_interval=0.01)
         fwd.start()
         fwd._stop_event.wait(0.1)

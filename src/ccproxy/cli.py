@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
+import importlib
 import json
 import logging
 import os
@@ -15,7 +16,7 @@ import tempfile
 from builtins import print as builtin_print
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, Protocol, cast
 
 import tyro
 from pydantic import BaseModel, Field
@@ -38,6 +39,10 @@ from ccproxy.shapes import ShapeAudit, Shapes, ShapeSave, handle_shapes
 from ccproxy.utils import get_templates_dir
 
 logger = logging.getLogger(__name__)
+
+
+class _JournalHandlerFactory(Protocol):
+    def __call__(self, **kwargs: object) -> logging.Handler: ...
 
 
 class Start(BaseModel):
@@ -282,10 +287,10 @@ def setup_logging(
     journal_fallback_reason: str | None = None
     if use_journal:
         try:
-            from systemd.journal import JournalHandler  # type: ignore[import-not-found]
-
+            journal_module = importlib.import_module("systemd.journal")
+            journal_handler_factory = cast(_JournalHandlerFactory, journal_module.JournalHandler)
             identifier = _derive_journal_identifier(config_dir, journal_identifier)
-            journal_handler = JournalHandler(SYSLOG_IDENTIFIER=identifier)
+            journal_handler = journal_handler_factory(SYSLOG_IDENTIFIER=identifier)
             journal_handler.setFormatter(fmt)
             root.addHandler(journal_handler)
         except Exception as exc:  # ImportError or runtime socket errors
@@ -1098,7 +1103,8 @@ def main(
     # real parsed subcommand lives at cmd.__tyro_dummy_inner__ — unwrap it so
     # the isinstance dispatch below sees the concrete class.
     if hasattr(cmd, "__tyro_dummy_inner__"):
-        cmd = cmd.__tyro_dummy_inner__  # type: ignore[attr-defined]
+        dummy_cmd = cast(Any, cmd)
+        cmd = cast("Command", dummy_cmd.__tyro_dummy_inner__)
     from ccproxy.config import get_config
 
     cfg = get_config()
