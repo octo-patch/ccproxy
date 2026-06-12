@@ -37,7 +37,7 @@ import logging
 from collections import deque
 from collections.abc import Iterator
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from openai.types.chat import ChatCompletionChunk
 from pydantic import TypeAdapter, ValidationError
@@ -97,6 +97,10 @@ class _FeedDone:
     """Marker returned by the router when the events queue is exhausted."""
 
 
+type _QueueEvent = _RefusalChunk | _StandardChunk | _EmptyChoicesChunk
+type _RoutedEvent = _QueueEvent | _FeedDone
+
+
 # ── State ──────────────────────────────────────────────────────────────────
 
 
@@ -119,7 +123,7 @@ class _OpenAIIntakeState:
     finish_reason: FinishReason | None = None
     provider_response_id: str | None = None
     provider_details: dict[str, object] | None = None
-    events_queue: deque[Any] = field(default_factory=deque)
+    events_queue: deque[_QueueEvent] = field(default_factory=deque)
     out_events: list[ModelResponseStreamEvent] = field(default_factory=list)
 
 
@@ -137,7 +141,7 @@ _g: GraphBuilder[
 @_g.step
 async def frame_next_event(
     ctx: StepContext[_OpenAIIntakeState, None, None],
-) -> Any:
+) -> _RoutedEvent:
     """Router source: pop the next dispatch envelope from the queue, or signal end."""
     state = ctx.state
     if not state.events_queue:
@@ -344,7 +348,7 @@ class OpenAIResponseIntakeFSM:
             }
         return []
 
-    def _drain_sse_envelopes(self) -> Iterator[Any]:
+    def _drain_sse_envelopes(self) -> Iterator[_QueueEvent]:
         """Frame SSE events from ``self._sse_buffer``; flip ``_terminated`` on ``[DONE]``;
         validate surviving frames into a dispatch envelope.
 
@@ -379,7 +383,7 @@ class OpenAIResponseIntakeFSM:
             if envelope is not None:
                 yield envelope
 
-    def _classify_chunk(self, chunk: ChatCompletionChunk) -> Any:
+    def _classify_chunk(self, chunk: ChatCompletionChunk) -> _QueueEvent | None:
         """Wrap a validated chunk in the matching dispatch envelope.
 
         Returns ``None`` to skip the chunk entirely (Azure-style ``delta=None`` defense).

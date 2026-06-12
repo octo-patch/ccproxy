@@ -28,7 +28,7 @@ import logging
 from collections import deque
 from collections.abc import Iterator
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING
 
 from anthropic.types.beta import (
     BetaCitationsDelta,
@@ -126,6 +126,15 @@ class _IgnoredEvent:
     """
 
 
+type _RoutedEvent = (
+    BetaRawContentBlockStartEvent
+    | BetaRawContentBlockDeltaEvent
+    | BetaRawContentBlockStopEvent
+    | _IgnoredEvent
+    | _FeedDone
+)
+
+
 # ── Graph ──────────────────────────────────────────────────────────────────
 
 
@@ -140,7 +149,7 @@ _g: GraphBuilder[
 @_g.step
 async def frame_next_event(
     ctx: StepContext[_AnthropicIntakeState, None, None],
-) -> Any:
+) -> _RoutedEvent:
     """Router source: pop the next typed event from the queue, or signal end via :class:`_FeedDone`."""
     state = ctx.state
     while state.events_queue:
@@ -199,7 +208,7 @@ async def handle_content_block_start(
         maybe_event = pm.handle_tool_call_delta(
             vendor_part_id=event.index,
             tool_name=current_block.name,
-            args=cast("dict[str, Any]", current_block.input) or None,
+            args=current_block.input or None,
             tool_call_id=current_block.id,
         )
         if maybe_event is not None:

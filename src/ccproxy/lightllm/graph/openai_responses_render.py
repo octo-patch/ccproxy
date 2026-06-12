@@ -34,11 +34,12 @@ import logging
 import time
 import uuid
 from collections import deque
+from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
 
 from pydantic_ai.messages import (
     FinalResultEvent,
+    ModelResponseStreamEvent,
     PartDeltaEvent,
     PartEndEvent,
     PartStartEvent,
@@ -51,16 +52,17 @@ from pydantic_ai.messages import (
 )
 from pydantic_graph import GraphBuilder, StepContext
 
-if TYPE_CHECKING:
-    from pydantic_ai.messages import ModelResponseStreamEvent
-
 logger = logging.getLogger(__name__)
 
 
 # ── Wire emission helpers ──────────────────────────────────────────────────
 
 
-def _args_to_str(args: str | dict[str, Any] | None) -> str:
+type _ToolCallArgs = str | Mapping[str, object] | None
+type _WirePayload = Mapping[str, object]
+
+
+def _args_to_str(args: _ToolCallArgs) -> str:
     """Coerce IR tool-call args (string fragment | dict | None) to a JSON string."""
     if args is None:
         return ""
@@ -69,7 +71,7 @@ def _args_to_str(args: str | dict[str, Any] | None) -> str:
     return json.dumps(args, separators=(",", ":"))
 
 
-def _emit_event(event_name: str, payload: dict[str, Any]) -> bytes:
+def _emit_event(event_name: str, payload: _WirePayload) -> bytes:
     """Encode one event as a Responses SSE frame.
 
     Responses uses the named-event SSE form
@@ -159,7 +161,7 @@ class _OpenAIResponsesRenderState:
     finish_status: str = "completed"
     """``"completed"`` / ``"incomplete"`` / ``"failed"`` — stamped in postlude."""
 
-    pending_events: deque[Any] = field(default_factory=deque)
+    pending_events: deque[ModelResponseStreamEvent] = field(default_factory=deque)
     """Single-event queue popped by the FSM router."""
 
     out: bytearray = field(default_factory=bytearray)
@@ -201,8 +203,8 @@ def _response_envelope_snapshot(
     state: _OpenAIResponsesRenderState,
     *,
     status: str,
-    usage: dict[str, Any] | None = None,
-) -> dict[str, Any]:
+    usage: Mapping[str, object] | None = None,
+) -> dict[str, object]:
     """Build the Response envelope snapshot stamped in prelude/postlude."""
     return {
         "id": state.response_id,
@@ -491,7 +493,7 @@ _g: GraphBuilder[_OpenAIResponsesRenderState, None, None, bytes] = GraphBuilder(
 @_g.step
 async def take_next_event(
     ctx: StepContext[_OpenAIResponsesRenderState, None, None],
-) -> Any:
+) -> ModelResponseStreamEvent | _RenderDone:
     """Router source: pop the next event from the queue, or signal end via :class:`_RenderDone`."""
     if not ctx.state.pending_events:
         return _RenderDone()

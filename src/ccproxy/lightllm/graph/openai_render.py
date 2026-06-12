@@ -36,11 +36,13 @@ import logging
 import time
 import uuid
 from collections import deque
+from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Literal
+from typing import Literal
 
 from pydantic_ai.messages import (
     FinalResultEvent,
+    ModelResponseStreamEvent,
     PartDeltaEvent,
     PartEndEvent,
     PartStartEvent,
@@ -52,9 +54,6 @@ from pydantic_ai.messages import (
 )
 from pydantic_graph import GraphBuilder, StepContext
 
-if TYPE_CHECKING:
-    from pydantic_ai.messages import ModelResponseStreamEvent
-
 logger = logging.getLogger(__name__)
 
 
@@ -64,7 +63,10 @@ _FinishReason = Literal["stop", "length", "tool_calls", "content_filter", "funct
 # ── Wire emission helpers (module-level — pure byte emitters) ──────────────
 
 
-def _args_to_str(args: str | dict[str, Any] | None) -> str:
+type _ToolCallArgs = str | Mapping[str, object] | None
+
+
+def _args_to_str(args: _ToolCallArgs) -> str:
     """OpenAI Chat Completion wires tool-call arguments as a JSON string.
 
     pydantic-ai's IR holds either a string fragment (already-serialized
@@ -82,10 +84,10 @@ def _emit_chunk(
     chunk_id: str,
     created: int,
     model: str,
-    delta: dict[str, Any],
+    delta: Mapping[str, object],
     finish_reason: str | None = None,
 ) -> bytes:
-    chunk: dict[str, Any] = {
+    chunk: dict[str, object] = {
         "id": chunk_id,
         "object": "chat.completion.chunk",
         "created": created,
@@ -125,7 +127,7 @@ class _OpenAIRenderState:
     part_to_tool_call_index: dict[int, int] = field(default_factory=dict)
     next_tool_call_index: int = 0
     finish_reason: _FinishReason = "stop"
-    pending_events: deque[Any] = field(default_factory=deque)
+    pending_events: deque[ModelResponseStreamEvent] = field(default_factory=deque)
     out: bytearray = field(default_factory=bytearray)
 
 
@@ -161,7 +163,7 @@ _g: GraphBuilder[_OpenAIRenderState, None, None, bytes] = GraphBuilder(
 @_g.step
 async def take_next_event(
     ctx: StepContext[_OpenAIRenderState, None, None],
-) -> Any:
+) -> ModelResponseStreamEvent | _RenderDone:
     """Router source: pop the next event from the queue, or signal end via :class:`_RenderDone`."""
     if not ctx.state.pending_events:
         return _RenderDone()
@@ -244,10 +246,10 @@ async def handle_part_delta(
             tc_index = state.next_tool_call_index
             state.next_tool_call_index += 1
             state.part_to_tool_call_index[event.index] = tc_index
-            envelope: dict[str, Any] = {"index": tc_index, "type": "function"}
+            envelope: dict[str, object] = {"index": tc_index, "type": "function"}
             if delta.tool_call_id is not None:
                 envelope["id"] = delta.tool_call_id
-            fn: dict[str, Any] = {}
+            fn: dict[str, object] = {}
             if delta.tool_name_delta is not None:
                 fn["name"] = delta.tool_name_delta
             fn["arguments"] = _args_to_str(delta.args_delta)

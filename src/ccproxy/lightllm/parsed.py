@@ -19,11 +19,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Any
 
 from pydantic_ai.messages import ModelMessage
 from pydantic_ai.models import ModelRequestParameters
 from pydantic_ai.settings import ModelSettings
+
+type JsonScalar = str | int | float | bool | None
+type JsonValue = JsonScalar | list[JsonValue] | dict[str, JsonValue]
+type RawExtras = dict[str, JsonValue]
 
 
 class InboundFormat(StrEnum):
@@ -57,5 +60,5 @@ class ParsedRequest:
     stream: bool = False
     """Whether the listener requested SSE streaming."""
 
-    raw_extras: dict[str, Any] = field(default_factory=dict)
+    raw_extras: RawExtras = field(default_factory=dict)
     """Wire fields not absorbed into the IR — preserved for passthrough rendering."""

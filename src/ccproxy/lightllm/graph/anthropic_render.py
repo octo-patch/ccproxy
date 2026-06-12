@@ -31,11 +31,14 @@ import json
 import logging
 import uuid
 from collections import deque
+from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
 
 from pydantic_ai.messages import (
     FinalResultEvent,
+    ModelResponsePart,
+    ModelResponsePartDelta,
+    ModelResponseStreamEvent,
     NativeToolCallPart,
     PartDeltaEvent,
     PartEndEvent,
@@ -49,16 +52,13 @@ from pydantic_ai.messages import (
 )
 from pydantic_graph import GraphBuilder, StepContext
 
-if TYPE_CHECKING:
-    from pydantic_ai.messages import ModelResponseStreamEvent
-
 logger = logging.getLogger(__name__)
 
 
 # ── Wire emission helpers (module-level — pure byte emitters) ──────────────
 
 
-def _emit(event_name: str, body: dict[str, Any]) -> bytes:
+def _emit(event_name: str, body: Mapping[str, object]) -> bytes:
     return f"event: {event_name}\ndata: {json.dumps(body, separators=(',', ':'))}\n\n".encode()
 
 
@@ -81,8 +81,8 @@ def _emit_message_start(message_id: str, model: str) -> bytes:
     )
 
 
-def _emit_content_block_start(idx: int, part: Any) -> bytes:
-    block: dict[str, Any]
+def _emit_content_block_start(idx: int, part: ModelResponsePart) -> bytes:
+    block: dict[str, object]
     if isinstance(part, TextPart):
         block = {"type": "text", "text": ""}
     elif isinstance(part, ThinkingPart):
@@ -114,7 +114,7 @@ def _emit_content_block_start(idx: int, part: Any) -> bytes:
     )
 
 
-def _tool_args_to_json_string(args_delta: str | dict[str, Any] | None) -> str | None:
+def _tool_args_to_json_string(args_delta: str | Mapping[str, object] | None) -> str | None:
     """Serialize a ``ToolCallPartDelta.args_delta`` to the wire ``partial_json`` shape.
 
     On the Anthropic wire ``input_json_delta.partial_json`` is always a string —
@@ -128,7 +128,7 @@ def _tool_args_to_json_string(args_delta: str | dict[str, Any] | None) -> str | 
     return json.dumps(args_delta, separators=(",", ":"))
 
 
-def _emit_initial_content_deltas(idx: int, part: Any) -> bytes:
+def _emit_initial_content_deltas(idx: int, part: ModelResponsePart) -> bytes:
     """Emit deltas for any non-empty content carried by a starting part.
 
     The intake collapses an Anthropic ``content_block_start`` whose initial
@@ -181,8 +181,8 @@ def _emit_initial_content_deltas(idx: int, part: Any) -> bytes:
     return bytes(out)
 
 
-def _emit_content_block_delta(idx: int, delta: Any) -> bytes:
-    wire_delta: dict[str, Any]
+def _emit_content_block_delta(idx: int, delta: ModelResponsePartDelta) -> bytes:
+    wire_delta: dict[str, object]
     if isinstance(delta, TextPartDelta):
         wire_delta = {"type": "text_delta", "text": delta.content_delta}
     elif isinstance(delta, ThinkingPartDelta):
@@ -247,7 +247,7 @@ class _AnthropicRenderState:
     model: str
     started: bool = False
     open_block_index: int | None = None
-    pending_events: deque[Any] = field(default_factory=deque)
+    pending_events: deque[ModelResponseStreamEvent] = field(default_factory=deque)
     out: bytearray = field(default_factory=bytearray)
 
 
@@ -267,7 +267,7 @@ _g: GraphBuilder[_AnthropicRenderState, None, None, bytes] = GraphBuilder(
 @_g.step
 async def take_next_event(
     ctx: StepContext[_AnthropicRenderState, None, None],
-) -> Any:
+) -> ModelResponseStreamEvent | _RenderDone:
     """Router source: pop the next event from the queue, or signal end via :class:`_RenderDone`."""
     if not ctx.state.pending_events:
         return _RenderDone()

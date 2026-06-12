@@ -46,7 +46,7 @@ import logging
 from collections import deque
 from collections.abc import Iterator
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, cast
 from uuid import uuid4
 
 from google.genai.types import GenerateContentResponse, Part
@@ -95,6 +95,10 @@ class _FeedDone:
     """Marker returned by the outer router when the events queue is exhausted."""
 
 
+type _PartDispatchRoute = _PartDispatch | _ChunkDone
+type _OuterRoute = _GenerateChunk | _FeedDone
+
+
 # ── State ──────────────────────────────────────────────────────────────────
 
 
@@ -112,7 +116,7 @@ class _GoogleIntakeState:
     """
 
     parts_manager: ModelResponsePartsManager
-    events_queue: deque[Any] = field(default_factory=deque)
+    events_queue: deque[_GenerateChunk] = field(default_factory=deque)
     out_events: list[ModelResponseStreamEvent] = field(default_factory=list)
     parts_queue: deque[Part] = field(default_factory=deque)
     """Per-chunk queue of ``Part`` instances; drained by the per-chunk subgraph."""
@@ -154,7 +158,7 @@ async def absorb_chunk(
 @_cg.step
 async def pop_next_part(
     ctx: StepContext[_GoogleIntakeState, None, None],
-) -> Any:
+) -> _PartDispatchRoute:
     """Pop one ``Part`` from the queue, or signal end-of-chunk via :class:`_ChunkDone`."""
     state = ctx.state
     if not state.parts_queue:
@@ -191,10 +195,13 @@ class _UnknownPart:
     """Sentinel — a Part with no populated field of interest (skipped silently)."""
 
 
+type _PartRoute = _TextPart | _FunctionCallPart | _InlineDataPart | _FunctionResponsePart | _UnknownPart
+
+
 @_cg.step
 async def classify_part(
     ctx: StepContext[_GoogleIntakeState, None, _PartDispatch],
-) -> Any:
+) -> _PartRoute:
     """Route one ``Part`` to the matching arm via its populated field.
 
     Preserves the original imperative ladder's order: ``text`` first,
@@ -332,7 +339,7 @@ _g: GraphBuilder[
 @_g.step
 async def frame_next_event(
     ctx: StepContext[_GoogleIntakeState, None, None],
-) -> Any:
+) -> _OuterRoute:
     """Router source: pop the next dispatch envelope from the queue, or signal end via :class:`_FeedDone`."""
     state = ctx.state
     if not state.events_queue:
@@ -470,7 +477,7 @@ class GoogleResponseIntakeFSM:
             return None
         raw = b"\n".join(payloads)
         try:
-            parsed: Any = json.loads(raw)
+            parsed: object = json.loads(raw)
         except (ValueError, TypeError):
             logger.debug("google intake: skipping unparseable SSE event", exc_info=True)
             return None
@@ -478,13 +485,11 @@ class GoogleResponseIntakeFSM:
         # generateContent emits the chunk directly. Detect by checking for a
         # single ``response`` key wrapping a dict — anything else falls
         # through as the chunk itself.
-        if (
-            isinstance(parsed, dict)
-            and len(parsed) == 1
-            and "response" in parsed
-            and isinstance(parsed["response"], dict)
-        ):
-            parsed = parsed["response"]
+        if isinstance(parsed, dict):
+            parsed_dict = cast("dict[str, object]", parsed)
+            response = parsed_dict.get("response")
+            if len(parsed_dict) == 1 and isinstance(response, dict):
+                parsed = response
         try:
             chunk = _RESPONSE_ADAPTER.validate_python(parsed)
         except ValidationError:

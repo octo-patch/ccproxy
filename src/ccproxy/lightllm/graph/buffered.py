@@ -65,7 +65,8 @@ import json
 import logging
 import time
 import uuid
-from typing import TYPE_CHECKING, Any
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any, cast
 
 from pydantic_ai.messages import TextPart, ThinkingPart, ToolCallPart
 
@@ -85,6 +86,10 @@ if TYPE_CHECKING:
     from ccproxy.lightllm.graph import AnyAsyncIntakeFSM
 
 logger = logging.getLogger(__name__)
+
+
+type _WireObject = dict[str, object]
+type _NextSequence = Callable[[], int]
 
 
 # ── SSE frame encoding helper ──────────────────────────────────────────────
@@ -366,7 +371,7 @@ def _synthesize_openai_sse(body: dict[str, Any]) -> bytes:
 # ── OpenAI Responses: Response → synthetic Responses event stream ──────────
 
 
-def _synthesize_openai_responses_sse(body: dict[str, Any]) -> bytes:
+def _synthesize_openai_responses_sse(body: _WireObject) -> bytes:
     """Convert a buffered ``Response`` JSON dict into Responses SSE bytes."""
     sequence_number = 0
 
@@ -379,7 +384,12 @@ def _synthesize_openai_responses_sse(body: dict[str, Any]) -> bytes:
     response_id = body.get("id", "resp_buffered")
     created_at = body.get("created_at", int(time.time()))
     model = body.get("model", "unknown")
-    output_items = [item for item in body.get("output") or [] if isinstance(item, dict)]
+    raw_output = body.get("output")
+    output_items = (
+        [cast(_WireObject, item) for item in raw_output if isinstance(item, dict)]
+        if isinstance(raw_output, list)
+        else []
+    )
 
     response_base = {
         **body,
@@ -403,7 +413,8 @@ def _synthesize_openai_responses_sse(body: dict[str, Any]) -> bytes:
 
     for output_index, item in enumerate(output_items):
         item_type = item.get("type")
-        item_id = item.get("id") or f"item_{output_index}"
+        raw_item_id = item.get("id")
+        item_id = raw_item_id if isinstance(raw_item_id, str) else f"item_{output_index}"
 
         if item_type == "message":
             added_item = {
@@ -448,7 +459,8 @@ def _synthesize_openai_responses_sse(body: dict[str, Any]) -> bytes:
                 )
             )
         elif item_type == "function_call":
-            args = item.get("arguments") or ""
+            raw_args = item.get("arguments")
+            args = raw_args if isinstance(raw_args, str) else json.dumps(raw_args or {}, separators=(",", ":"))
             if args:
                 frames.append(
                     _frame(
@@ -521,18 +533,22 @@ def _synthesize_openai_responses_sse(body: dict[str, Any]) -> bytes:
 
 def _synthesize_openai_responses_message_content(
     *,
-    item: dict[str, Any],
+    item: _WireObject,
     item_id: str,
     output_index: int,
-    next_seq: Any,
+    next_seq: _NextSequence,
 ) -> list[bytes]:
     frames: list[bytes] = []
-    for content_index, part in enumerate(item.get("content") or []):
-        if not isinstance(part, dict):
+    raw_content = item.get("content")
+    content_parts = raw_content if isinstance(raw_content, list) else []
+    for content_index, raw_part in enumerate(content_parts):
+        if not isinstance(raw_part, dict):
             continue
+        part = cast(_WireObject, raw_part)
         part_type = part.get("type")
         if part_type == "output_text":
-            text = part.get("text") or ""
+            raw_text = part.get("text")
+            text = raw_text if isinstance(raw_text, str) else ""
             empty_part = {**part, "text": ""}
             frames.append(
                 _frame(
@@ -570,7 +586,7 @@ def _synthesize_openai_responses_message_content(
                         "output_index": output_index,
                         "content_index": content_index,
                         "text": text,
-                        "logprobs": part.get("logprobs") or [],
+                        "logprobs": part["logprobs"] if isinstance(part.get("logprobs"), list) else [],
                         "sequence_number": next_seq(),
                     },
                     event_name="response.output_text.done",
@@ -590,7 +606,8 @@ def _synthesize_openai_responses_message_content(
                 )
             )
         elif part_type == "refusal":
-            refusal = part.get("refusal") or ""
+            raw_refusal = part.get("refusal")
+            refusal = raw_refusal if isinstance(raw_refusal, str) else ""
             if refusal:
                 frames.append(
                     _frame(
@@ -623,16 +640,20 @@ def _synthesize_openai_responses_message_content(
 
 def _synthesize_openai_responses_reasoning_content(
     *,
-    item: dict[str, Any],
+    item: _WireObject,
     item_id: str,
     output_index: int,
-    next_seq: Any,
+    next_seq: _NextSequence,
 ) -> list[bytes]:
     frames: list[bytes] = []
-    for summary_index, summary in enumerate(item.get("summary") or []):
-        if not isinstance(summary, dict):
+    raw_summary = item.get("summary")
+    summaries = raw_summary if isinstance(raw_summary, list) else []
+    for summary_index, raw_summary_item in enumerate(summaries):
+        if not isinstance(raw_summary_item, dict):
             continue
-        text = summary.get("text") or ""
+        summary = cast(_WireObject, raw_summary_item)
+        raw_text = summary.get("text")
+        text = raw_text if isinstance(raw_text, str) else ""
         if text:
             frames.append(
                 _frame(
@@ -661,10 +682,16 @@ def _synthesize_openai_responses_reasoning_content(
             )
         )
 
-    for content_index, content in enumerate(item.get("content") or []):
-        if not isinstance(content, dict) or content.get("type") != "reasoning_text":
+    raw_content = item.get("content")
+    content_parts = raw_content if isinstance(raw_content, list) else []
+    for content_index, raw_content_part in enumerate(content_parts):
+        if not isinstance(raw_content_part, dict):
             continue
-        text = content.get("text") or ""
+        content = cast(_WireObject, raw_content_part)
+        if content.get("type") != "reasoning_text":
+            continue
+        raw_text = content.get("text")
+        text = raw_text if isinstance(raw_text, str) else ""
         if text:
             frames.append(
                 _frame(
@@ -796,7 +823,7 @@ def _parts_to_openai_responses(
     truncation, mirroring the OpenAI Response spec.
     """
     text_chunks: list[str] = []
-    output_items: list[dict[str, Any]] = []
+    output_items: list[_WireObject] = []
 
     def flush_text() -> None:
         if text_chunks:

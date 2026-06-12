@@ -6,7 +6,7 @@ import logging
 from collections import deque
 from collections.abc import Iterator
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from openai.types import responses
 from pydantic import TypeAdapter, ValidationError
@@ -21,7 +21,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-_EVENT_ADAPTER: TypeAdapter[Any] = TypeAdapter(responses.ResponseStreamEvent)
+_EVENT_ADAPTER: TypeAdapter[responses.ResponseStreamEvent] = TypeAdapter(responses.ResponseStreamEvent)
 
 _RESPONSES_FINISH_REASON_MAP: dict[str, FinishReason] = {
     "max_output_tokens": "length",
@@ -32,9 +32,19 @@ _RESPONSES_FINISH_REASON_MAP: dict[str, FinishReason] = {
 }
 
 
+type _ResponseEnvelopeWireEvent = (
+    responses.ResponseCreatedEvent
+    | responses.ResponseQueuedEvent
+    | responses.ResponseInProgressEvent
+    | responses.ResponseCompletedEvent
+    | responses.ResponseFailedEvent
+    | responses.ResponseIncompleteEvent
+)
+
+
 @dataclass(frozen=True)
 class _ResponseEnvelopeEvent:
-    event: Any
+    event: _ResponseEnvelopeWireEvent
 
 
 @dataclass(frozen=True)
@@ -101,6 +111,24 @@ class _FeedDone:
     """Marker returned by the router when the events queue is exhausted."""
 
 
+type _QueueEvent = (
+    _ResponseEnvelopeEvent
+    | _OutputItemAddedEvent
+    | _OutputItemDoneEvent
+    | _TextDeltaEvent
+    | _TextDoneEvent
+    | _FunctionArgumentsDeltaEvent
+    | _FunctionArgumentsDoneEvent
+    | _ReasoningSummaryPartAddedEvent
+    | _ReasoningSummaryTextDeltaEvent
+    | _ReasoningTextDeltaEvent
+    | _RefusalDeltaEvent
+    | _RefusalDoneEvent
+    | _NoOpEvent
+)
+type _RoutedEvent = _QueueEvent | _FeedDone
+
+
 @dataclass
 class _OpenAIResponsesIntakeState:
     parts_manager: ModelResponsePartsManager
@@ -111,7 +139,7 @@ class _OpenAIResponsesIntakeState:
     has_refusal: bool = False
     refusal_text: str = ""
     phase_by_item: dict[str, str] = field(default_factory=dict)
-    events_queue: deque[Any] = field(default_factory=deque)
+    events_queue: deque[_QueueEvent] = field(default_factory=deque)
     out_events: list[ModelResponseStreamEvent] = field(default_factory=list)
 
 
@@ -124,34 +152,31 @@ _g: GraphBuilder[_OpenAIResponsesIntakeState, None, None, list[ModelResponseStre
 @_g.step
 async def frame_next_event(
     ctx: StepContext[_OpenAIResponsesIntakeState, None, None],
-) -> Any:
+) -> _RoutedEvent:
     if not ctx.state.events_queue:
         return _FeedDone()
     return ctx.state.events_queue.popleft()
 
 
-def _response_from_event(event: Any) -> Any:
-    return getattr(event, "response", None)
+def _response_from_event(event: _ResponseEnvelopeWireEvent) -> responses.Response:
+    return event.response
 
 
-def _record_response_metadata(state: _OpenAIResponsesIntakeState, event: Any) -> None:
+def _record_response_metadata(state: _OpenAIResponsesIntakeState, event: _ResponseEnvelopeWireEvent) -> None:
     response = _response_from_event(event)
-    if response is None:
-        return
 
-    if getattr(response, "id", None):
+    if response.id:
         state.provider_response_id = response.id
-    if getattr(response, "model", None):
+    if response.model:
         state.model = response.model
 
-    conversation = getattr(response, "conversation", None)
-    if conversation is not None and getattr(conversation, "id", None):
+    if response.conversation is not None and response.conversation.id:
         state.provider_details = {
             **(state.provider_details or {}),
-            "conversation_id": conversation.id,
+            "conversation_id": response.conversation.id,
         }
 
-    raw_finish_reason = None
+    raw_finish_reason: str | None = None
     if isinstance(
         event,
         (
@@ -160,12 +185,13 @@ def _record_response_metadata(state: _OpenAIResponsesIntakeState, event: Any) ->
             responses.ResponseIncompleteEvent,
         ),
     ):
-        incomplete_details = getattr(response, "incomplete_details", None)
-        raw_finish_reason = (
+        candidate = (
             incomplete_details.reason
-            if incomplete_details is not None and getattr(incomplete_details, "reason", None)
-            else getattr(response, "status", None)
+            if (incomplete_details := response.incomplete_details) is not None and incomplete_details.reason
+            else response.status
         )
+        if isinstance(candidate, str):
+            raw_finish_reason = candidate
 
     if raw_finish_reason and not state.has_refusal:
         state.provider_details = {
@@ -503,7 +529,7 @@ class OpenAIResponsesIntakeFSM:
             }
         return []
 
-    def _drain_sse_envelopes(self) -> Iterator[Any]:
+    def _drain_sse_envelopes(self) -> Iterator[_QueueEvent]:
         while True:
             if self._terminated:
                 return
@@ -531,7 +557,7 @@ class OpenAIResponsesIntakeFSM:
             yield _classify_event(event)
 
 
-def _classify_event(event: Any) -> Any:
+def _classify_event(event: responses.ResponseStreamEvent) -> _QueueEvent:
     if isinstance(
         event,
         (
@@ -566,7 +592,8 @@ def _classify_event(event: Any) -> Any:
         return _RefusalDeltaEvent(event=event)
     if isinstance(event, responses.ResponseRefusalDoneEvent):
         return _RefusalDoneEvent(event=event)
-    return _NoOpEvent(event_type=getattr(event, "type", type(event).__name__))
+    event_type = getattr(event, "type", None)
+    return _NoOpEvent(event_type=event_type if isinstance(event_type, str) else type(event).__name__)
 
 
 def _extract_data_payload(frame: bytes) -> bytes | None:
