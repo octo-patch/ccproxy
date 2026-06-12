@@ -3,7 +3,7 @@
 All notable changes to ccproxy are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [2.0.0] — Unreleased
+## [2.0.0] — 2026-06-12
 
 ccproxy 2.0 is a clean break from 1.x: the LiteLLM proxy subprocess and
 gateway architecture are gone, replaced by a single self-contained daemon —
