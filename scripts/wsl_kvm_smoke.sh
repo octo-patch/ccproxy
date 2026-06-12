@@ -414,7 +414,7 @@ function Send-CollectorText {
     )
 
     $uri = "$CollectorBase/$Path"
-    Invoke-WebRequest -Uri $uri -Method Post -Body $Body -ContentType $ContentType -UseBasicParsing | Out-Null
+    Invoke-WebRequest -Uri $uri -Method Post -Body $Body -ContentType $ContentType -UseBasicParsing -TimeoutSec 30 | Out-Null
 }
 
 function Send-CollectorFile {
@@ -431,6 +431,20 @@ function Send-CollectorFile {
     }
 }
 
+function Publish-Stage {
+    param([string]$Name)
+
+    Set-Content -Path $stagePath -Value $Name -Encoding ASCII
+    if ($script:collectorBase) {
+        try {
+            Send-CollectorText -CollectorBase $script:collectorBase -Path "stage" -Body $Name
+        }
+        catch {
+            Write-Host "[ccproxy-wsl-smoke] failed to publish stage '$Name': $($_.Exception.Message)"
+        }
+    }
+}
+
 function Invoke-Step {
     param(
         [string]$Name,
@@ -438,6 +452,7 @@ function Invoke-Step {
     )
 
     Write-Host "[ccproxy-wsl-smoke] $Name"
+    Publish-Stage -Name $Name
     $output = & $Script 2>&1
     $code = if ($null -eq $LASTEXITCODE) { 0 } else { $LASTEXITCODE }
     $script:steps += [ordered]@{
@@ -496,15 +511,43 @@ function Invoke-Native {
         [int]$TimeoutSeconds = 300
     )
 
+    $captureOutput = $FilePath -ine "wsl.exe"
+    $stdoutLines = [System.Collections.Generic.List[string]]::new()
+    $stderrLines = [System.Collections.Generic.List[string]]::new()
+
     $psi = [System.Diagnostics.ProcessStartInfo]::new()
     $psi.FileName = $FilePath
     $psi.Arguments = ($Arguments | ForEach-Object { ConvertTo-NativeArgument $_ }) -join " "
-    $psi.RedirectStandardOutput = $true
-    $psi.RedirectStandardError = $true
+    $psi.RedirectStandardOutput = $captureOutput
+    $psi.RedirectStandardError = $captureOutput
     $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $captureOutput
+
     $process = [System.Diagnostics.Process]::new()
     $process.StartInfo = $psi
+
+    $stdoutHandler = [System.Diagnostics.DataReceivedEventHandler]{
+        param($sender, $event)
+        if ($null -ne $event.Data) {
+            [void]$stdoutLines.Add($event.Data)
+        }
+    }
+    $stderrHandler = [System.Diagnostics.DataReceivedEventHandler]{
+        param($sender, $event)
+        if ($null -ne $event.Data) {
+            [void]$stderrLines.Add($event.Data)
+        }
+    }
+    if ($captureOutput) {
+        $process.add_OutputDataReceived($stdoutHandler)
+        $process.add_ErrorDataReceived($stderrHandler)
+    }
+
     [void]$process.Start()
+    if ($captureOutput) {
+        $process.BeginOutputReadLine()
+        $process.BeginErrorReadLine()
+    }
 
     if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
         try {
@@ -512,11 +555,15 @@ function Invoke-Native {
         }
         catch {
         }
-        throw "Timed out after $TimeoutSeconds seconds: $FilePath $($Arguments -join ' ')"
+        $global:LASTEXITCODE = -1
+        $stdout = $stdoutLines -join "`n"
+        $stderr = $stderrLines -join "`n"
+        throw "Timed out after $TimeoutSeconds seconds: $FilePath $($Arguments -join ' ')`n$stdout`n$stderr"
     }
 
-    $stdout = $process.StandardOutput.ReadToEnd()
-    $stderr = $process.StandardError.ReadToEnd()
+    $process.WaitForExit()
+    $stdout = $stdoutLines -join "`n"
+    $stderr = $stderrLines -join "`n"
     $global:LASTEXITCODE = $process.ExitCode
 
     $lines = @()
@@ -553,6 +600,7 @@ function Write-SmokeResult {
 }
 
 $script:steps = @()
+$script:collectorBase = ""
 
 try {
     Set-BootstrapRunKey
@@ -567,55 +615,58 @@ try {
     }
 
     $collector = Get-CollectorBase
+    $script:collectorBase = $collector
     $artifact = Get-SmokeArtifactPath
     $installRoot = "C:\ccproxy-wsl"
     $distroRoot = Join-Path $installRoot "distro"
     New-Item -ItemType Directory -Force -Path $installRoot | Out-Null
 
-    Invoke-Step "wsl-version-before-update" { Invoke-Native -FilePath "wsl.exe" -Arguments @("--version") -TimeoutSeconds 180 }
-    Invoke-Step "wsl-update" {
-        Invoke-Native -FilePath "wsl.exe" -Arguments @("--update", "--web-download") -TimeoutSeconds 1800
-        if ($LASTEXITCODE -ne 0) {
-            Invoke-Native -FilePath "wsl.exe" -Arguments @("--update") -TimeoutSeconds 1800
-        }
-    }
-    Invoke-Step "wsl-set-default-version" { Invoke-Native -FilePath "wsl.exe" -Arguments @("--set-default-version", "2") -TimeoutSeconds 180 }
-    Invoke-Step "wsl-unregister-old" {
-        Invoke-Native -FilePath "wsl.exe" -Arguments @("--unregister", "ccproxy-smoke") -TimeoutSeconds 180
-        if ($LASTEXITCODE -ne 0) {
-            $global:LASTEXITCODE = 0
-        }
-    }
     Invoke-Step "wsl-import-ccproxy" { Invoke-Native -FilePath "wsl.exe" -Arguments @("--import", "ccproxy-smoke", $distroRoot, $artifact, "--version", "2") -TimeoutSeconds 900 }
     Invoke-Step "wsl-version-list" { Invoke-Native -FilePath "wsl.exe" -Arguments @("-l", "-v") -TimeoutSeconds 180 }
     Invoke-Step "ccproxy-help" { Invoke-Native -FilePath "wsl.exe" -Arguments @("-d", "ccproxy-smoke", "--", "bash", "-lc", "ccproxy --help >/dev/null") -TimeoutSeconds 180 }
     Invoke-Step "systemd-status" { Invoke-Native -FilePath "wsl.exe" -Arguments @("-d", "ccproxy-smoke", "--", "bash", "-lc", "systemctl is-system-running --wait") -TimeoutSeconds 300 }
 
-    $bash = @'
+    $bashStart = @'
 set -euo pipefail
-tmp="$(mktemp -d /tmp/ccproxy-wsl.XXXXXX)"
-export CCPROXY_CONFIG_DIR="$tmp"
+export CCPROXY_CONFIG_DIR=/tmp/ccproxy-wsl-smoke
+rm -rf "$CCPROXY_CONFIG_DIR"
+mkdir -p "$CCPROXY_CONFIG_DIR"
 ccproxy init
-nohup ccproxy start > "$tmp/ccproxy.log" 2>&1 &
+nohup ccproxy start > "$CCPROXY_CONFIG_DIR/ccproxy.log" 2>&1 &
 daemon="$!"
-cleanup() {
-  kill "$daemon" >/dev/null 2>&1 || true
-}
-trap cleanup EXIT
+echo "$daemon" > "$CCPROXY_CONFIG_DIR/ccproxy.pid"
 for i in $(seq 1 120); do
-  if ccproxy status --proxy >/dev/null 2>&1 && test -s "$tmp/.inspector-wireguard-client.conf"; then
+  if ccproxy status --proxy >/dev/null 2>&1 && test -s "$CCPROXY_CONFIG_DIR/.inspector-wireguard-client.conf"; then
     break
   fi
   sleep 1
 done
 ccproxy status --proxy
-test -s "$tmp/.inspector-wireguard-client.conf"
-ccproxy namespace status --json | tee "$tmp/namespace-status.json"
-ccproxy namespace doctor --json | tee "$tmp/namespace-doctor.json"
+test -s "$CCPROXY_CONFIG_DIR/.inspector-wireguard-client.conf"
+'@
+
+    $bashStatus = @'
+set -euo pipefail
+export CCPROXY_CONFIG_DIR=/tmp/ccproxy-wsl-smoke
+ccproxy namespace status --json | tee "$CCPROXY_CONFIG_DIR/namespace-status.json"
+'@
+
+    $bashDoctor = @'
+set -euo pipefail
+export CCPROXY_CONFIG_DIR=/tmp/ccproxy-wsl-smoke
+ccproxy namespace doctor --json | tee "$CCPROXY_CONFIG_DIR/namespace-doctor.json"
+'@
+
+    $bashCurl = @'
+set -euo pipefail
+export CCPROXY_CONFIG_DIR=/tmp/ccproxy-wsl-smoke
 ccproxy run --inspect -- curl -fsS https://example.com -o /dev/null
 '@
 
-    Invoke-Step "ccproxy-namespace-smoke" { Invoke-Native -FilePath "wsl.exe" -Arguments @("-d", "ccproxy-smoke", "--", "bash", "-lc", $bash) -TimeoutSeconds 900 }
+    Invoke-Step "ccproxy-start-ready" { Invoke-Native -FilePath "wsl.exe" -Arguments @("-d", "ccproxy-smoke", "--", "bash", "-lc", $bashStart) -TimeoutSeconds 300 }
+    Invoke-Step "ccproxy-namespace-status" { Invoke-Native -FilePath "wsl.exe" -Arguments @("-d", "ccproxy-smoke", "--", "bash", "-lc", $bashStatus) -TimeoutSeconds 180 }
+    Invoke-Step "ccproxy-namespace-doctor" { Invoke-Native -FilePath "wsl.exe" -Arguments @("-d", "ccproxy-smoke", "--", "bash", "-lc", $bashDoctor) -TimeoutSeconds 300 }
+    Invoke-Step "ccproxy-inspect-curl" { Invoke-Native -FilePath "wsl.exe" -Arguments @("-d", "ccproxy-smoke", "--", "bash", "-lc", $bashCurl) -TimeoutSeconds 300 }
     Write-SmokeResult -CollectorBase $collector -Ok $true -ErrorMessage ""
     Remove-BootstrapRunKey
     Stop-Transcript | Out-Null
