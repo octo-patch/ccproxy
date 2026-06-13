@@ -1,5 +1,7 @@
 """Shared test fixtures and helpers."""
 
+from collections.abc import Generator
+
 import pytest
 
 from ccproxy.config import clear_config_instance
@@ -13,7 +15,7 @@ from ccproxy.transport.dispatch import reset_cache as reset_transport_cache
 
 
 @pytest.fixture(autouse=True)
-def cleanup():
+def cleanup() -> Generator[None]:
     """Ensure clean state between tests."""
     yield
     clear_config_instance()

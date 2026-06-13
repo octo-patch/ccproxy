@@ -603,7 +603,7 @@ def test_extract_deltas_handles_bare_markdown_block() -> None:
     assert state.answer_seen == "Hello, world!"
 
 
-def test_extract_deltas_logs_unknown_intended_usage(caplog) -> None:
+def test_extract_deltas_logs_unknown_intended_usage(caplog: pytest.LogCaptureFixture) -> None:
     import logging
 
     from ccproxy.lightllm.pplx import StreamState, _extract_deltas

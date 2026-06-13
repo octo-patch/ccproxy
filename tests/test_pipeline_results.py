@@ -3,12 +3,17 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Awaitable, Callable
+from typing import Any, cast
+from unittest.mock import MagicMock
 
 import pytest
 from pydantic_core import to_jsonable_python
 
 from ccproxy.pipeline.context import Context
+from ccproxy.pipeline.hook import HookParams
 from ccproxy.pipeline.results import (
+    HookResult,
     _HookDeferred,
     _HookError,
     _HookSkipped,
@@ -18,20 +23,20 @@ from ccproxy.pipeline.results import (
 )
 
 
-def test_hook_success_construction():
+def test_hook_success_construction() -> None:
     """Test _HookSuccess constructs correctly."""
     result = _HookSuccess()
     assert result.kind == "success"
 
 
-def test_hook_skipped_construction():
+def test_hook_skipped_construction() -> None:
     """Test _HookSkipped constructs correctly."""
     result = _HookSkipped(reason="guard returned False")
     assert result.kind == "skipped"
     assert result.reason == "guard returned False"
 
 
-def test_hook_error_construction():
+def test_hook_error_construction() -> None:
     """Test _HookError constructs correctly."""
     result = _HookError(
         hook_name="test_hook",
@@ -46,7 +51,7 @@ def test_hook_error_construction():
     assert result.traceback == "Traceback..."
 
 
-def test_hook_deferred_construction():
+def test_hook_deferred_construction() -> None:
     """Test _HookDeferred constructs correctly."""
     result = _HookDeferred(
         hook_name="test_hook",
@@ -57,7 +62,7 @@ def test_hook_deferred_construction():
     assert result.reason == "waiting for dependency"
 
 
-def test_json_serialization_success():
+def test_json_serialization_success() -> None:
     """Test _HookSuccess round-trips through JSON serialization."""
     result = _HookSuccess()
     json_data = to_jsonable_python(result)
@@ -68,7 +73,7 @@ def test_json_serialization_success():
     assert parsed == {"kind": "success"}
 
 
-def test_json_serialization_skipped():
+def test_json_serialization_skipped() -> None:
     """Test _HookSkipped round-trips through JSON serialization."""
     result = _HookSkipped(reason="guard failed")
     json_data = to_jsonable_python(result)
@@ -79,7 +84,7 @@ def test_json_serialization_skipped():
     assert parsed == {"kind": "skipped", "reason": "guard failed"}
 
 
-def test_json_serialization_error():
+def test_json_serialization_error() -> None:
     """Test _HookError round-trips through JSON serialization."""
     result = _HookError(
         hook_name="test_hook",
@@ -102,7 +107,7 @@ def test_json_serialization_error():
     assert parsed == expected
 
 
-def test_json_serialization_deferred():
+def test_json_serialization_deferred() -> None:
     """Test _HookDeferred round-trips through JSON serialization."""
     result = _HookDeferred(
         hook_name="test_hook",
@@ -124,7 +129,7 @@ def test_json_serialization_deferred():
     }
 
 
-def test_wrap_hook_call_sync_success(mock_flow):
+def test_wrap_hook_call_sync_success(mock_flow: MagicMock) -> None:
     """Test wrap_hook_call returns _HookSuccess for successful sync hook."""
 
     def successful_hook(ctx: Context) -> None:
@@ -138,7 +143,7 @@ def test_wrap_hook_call_sync_success(mock_flow):
     assert result.kind == "success"
 
 
-def test_wrap_hook_call_sync_error(mock_flow):
+def test_wrap_hook_call_sync_error(mock_flow: MagicMock) -> None:
     """Test wrap_hook_call converts raising sync hook to _HookError."""
 
     def failing_hook(ctx: Context) -> None:
@@ -158,13 +163,16 @@ def test_wrap_hook_call_sync_error(mock_flow):
 
 
 @pytest.mark.asyncio
-async def test_wrap_hook_call_async_success(mock_flow):
+async def test_wrap_hook_call_async_success(mock_flow: MagicMock) -> None:
     """Test wrap_hook_call returns _HookSuccess for successful async hook."""
 
     async def successful_async_hook(ctx: Context) -> None:
         ctx.set_header("x-test", "value")
 
-    wrapped = wrap_hook_call(successful_async_hook, hook_name="test_hook")
+    wrapped = cast(
+        Callable[[Context], Awaitable[HookResult]],
+        wrap_hook_call(successful_async_hook, hook_name="test_hook"),
+    )
     ctx = Context.from_flow(mock_flow)
     result = await wrapped(ctx)
 
@@ -173,13 +181,16 @@ async def test_wrap_hook_call_async_success(mock_flow):
 
 
 @pytest.mark.asyncio
-async def test_wrap_hook_call_async_error(mock_flow):
+async def test_wrap_hook_call_async_error(mock_flow: MagicMock) -> None:
     """Test wrap_hook_call converts raising async hook to _HookError."""
 
     async def failing_async_hook(ctx: Context) -> None:
         raise RuntimeError("async error")
 
-    wrapped = wrap_hook_call(failing_async_hook, hook_name="failing_async_hook")
+    wrapped = cast(
+        Callable[[Context], Awaitable[HookResult]],
+        wrap_hook_call(failing_async_hook, hook_name="failing_async_hook"),
+    )
     ctx = Context.from_flow(mock_flow)
     result = await wrapped(ctx)
 
@@ -192,13 +203,13 @@ async def test_wrap_hook_call_async_error(mock_flow):
     assert "RuntimeError: async error" in result.traceback
 
 
-def test_unwrap_hook_result_success_no_raise():
+def test_unwrap_hook_result_success_no_raise() -> None:
     """Test unwrap_hook_result no-ops on success when raise_on_error=False."""
     result = _HookSuccess()
     unwrap_hook_result(result, raise_on_error=False)
 
 
-def test_unwrap_hook_result_error_no_raise():
+def test_unwrap_hook_result_error_no_raise() -> None:
     """Test unwrap_hook_result no-ops on error when raise_on_error=False."""
     result = _HookError(
         hook_name="test_hook",
@@ -208,7 +219,7 @@ def test_unwrap_hook_result_error_no_raise():
     unwrap_hook_result(result, raise_on_error=False)
 
 
-def test_unwrap_hook_result_error_with_raise():
+def test_unwrap_hook_result_error_with_raise() -> None:
     """Test unwrap_hook_result re-raises RuntimeError when raise_on_error=True."""
     result = _HookError(
         hook_name="test_hook",
@@ -219,24 +230,24 @@ def test_unwrap_hook_result_error_with_raise():
         unwrap_hook_result(result, raise_on_error=True)
 
 
-def test_unwrap_hook_result_skipped_with_raise():
+def test_unwrap_hook_result_skipped_with_raise() -> None:
     """Test unwrap_hook_result no-ops on skipped even when raise_on_error=True."""
     result = _HookSkipped(reason="guard failed")
     unwrap_hook_result(result, raise_on_error=True)
 
 
-def test_unwrap_hook_result_deferred_with_raise():
+def test_unwrap_hook_result_deferred_with_raise() -> None:
     """Test unwrap_hook_result no-ops on deferred even when raise_on_error=True."""
     result = _HookDeferred(hook_name="test_hook", reason="waiting")
     unwrap_hook_result(result, raise_on_error=True)
 
 
-def test_executor_adds_success_result_to_metadata():
+def test_executor_adds_success_result_to_metadata() -> None:
     """Test that executor records _HookSuccess in flow.metadata."""
     from ccproxy.pipeline.executor import PipelineExecutor
     from ccproxy.pipeline.hook import HookSpec
 
-    def successful_hook(ctx: Context, params: dict) -> Context:
+    def successful_hook(ctx: Context, params: HookParams) -> Context:
         return ctx
 
     flow = _make_flow()
@@ -255,12 +266,12 @@ def test_executor_adds_success_result_to_metadata():
     assert isinstance(results[0], _HookSuccess)
 
 
-def test_executor_adds_error_result_on_failure():
+def test_executor_adds_error_result_on_failure() -> None:
     """Test that executor records _HookError when hook raises."""
     from ccproxy.pipeline.executor import PipelineExecutor
     from ccproxy.pipeline.hook import HookSpec
 
-    def failing_hook(ctx: Context, params: dict) -> Context:
+    def failing_hook(ctx: Context, params: HookParams) -> Context:
         raise ValueError("test error")
 
     flow = _make_flow()
@@ -283,7 +294,7 @@ def test_executor_adds_error_result_on_failure():
     assert result.message == "test error"
 
 
-def test_executor_adds_skipped_result_for_guard():
+def test_executor_adds_skipped_result_for_guard() -> None:
     """Test that executor records _HookSkipped when guard returns False."""
     from ccproxy.pipeline.executor import PipelineExecutor
     from ccproxy.pipeline.hook import HookSpec
@@ -291,7 +302,7 @@ def test_executor_adds_skipped_result_for_guard():
     def never_run_guard(ctx: Context) -> bool:
         return False
 
-    def hook_handler(ctx: Context, params: dict) -> Context:
+    def hook_handler(ctx: Context, params: HookParams) -> Context:
         return ctx
 
     flow = _make_flow()
@@ -313,15 +324,15 @@ def test_executor_adds_skipped_result_for_guard():
     assert result.reason == "guard"
 
 
-def test_executor_preserves_error_isolation():
+def test_executor_preserves_error_isolation() -> None:
     """Test that hook errors don't abort the DAG."""
     from ccproxy.pipeline.executor import PipelineExecutor
     from ccproxy.pipeline.hook import HookSpec
 
-    def failing_hook(ctx: Context, params: dict) -> Context:
+    def failing_hook(ctx: Context, params: HookParams) -> Context:
         raise RuntimeError("fail")
 
-    def succeeding_hook(ctx: Context, params: dict) -> Context:
+    def succeeding_hook(ctx: Context, params: HookParams) -> Context:
         return ctx
 
     flow = _make_flow()
@@ -348,7 +359,7 @@ def test_executor_preserves_error_isolation():
     assert isinstance(results[1], _HookSuccess)
 
 
-def _make_flow(body: dict | None = None):
+def _make_flow(body: dict[str, Any] | None = None) -> MagicMock:
     """Create a mock HTTPFlow for testing."""
     import json
     from unittest.mock import MagicMock
@@ -369,7 +380,7 @@ def _make_flow(body: dict | None = None):
 
 
 @pytest.fixture
-def mock_flow():
+def mock_flow() -> MagicMock:
     """Create a mock HTTPFlow for testing."""
     from unittest.mock import MagicMock
 

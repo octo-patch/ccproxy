@@ -183,7 +183,10 @@ def test_regenerate_billing_header_signs_cch_via_xxhash64() -> None:
 
     # Verify the cch matches what xxhash64 would produce on the wire bytes
     # with cch reset to the placeholder.
-    wire_bytes = shape._request.content  # type: ignore[union-attr]
+    request = shape._request
+    assert request is not None
+    wire_bytes = request.content
+    assert isinstance(wire_bytes, bytes)
     placeholder_bytes = re.sub(rb"\bcch=[0-9a-f]+;", b"cch=00000;", wire_bytes, count=1)
     expected_cch = _expected_cch_for_body(placeholder_bytes)
     assert f"cch={expected_cch};" in new_text
@@ -292,6 +295,8 @@ def test_signed_body_round_trips_to_wire_bytes() -> None:
     with _patch_billing(_SYNTHETIC_SALT):
         regenerate_billing_header(shape, {})
 
-    wire_bytes = shape._request.content  # type: ignore[union-attr]
+    request = shape._request
+    assert request is not None
+    wire_bytes = request.content
     re_serialized = json.dumps(shape._body).encode()
     assert wire_bytes == re_serialized

@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Generator
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from unittest.mock import MagicMock
 
 import pytest
@@ -35,24 +36,34 @@ class _MockRecord:
 
 
 @pytest.fixture()
-def store(tmp_path: Path) -> Any:
-    from ccproxy.config import CCProxyConfig, set_config_instance
+def store(tmp_path: Path) -> Generator[ShapeStore]:
+    from ccproxy.config import CCProxyConfig, ShapingConfig, set_config_instance
     from ccproxy.shaping.store import _store_lock
 
     set_config_instance(
         CCProxyConfig(
-            shaping={
-                "providers": {
-                    "anthropic": {
-                        "content_fields": ["model", "messages", "tools", "system", "thinking", "stream", "max_tokens"],
-                        "merge_strategies": {"system": "prepend_shape"},
-                        "shape_hooks": [
-                            "ccproxy.shaping.regenerate",
-                        ],
-                        "capture": {"path_pattern": "^/v1/messages"},
-                    },
+            shaping=ShapingConfig.model_validate(
+                {
+                    "providers": {
+                        "anthropic": {
+                            "content_fields": [
+                                "model",
+                                "messages",
+                                "tools",
+                                "system",
+                                "thinking",
+                                "stream",
+                                "max_tokens",
+                            ],
+                            "merge_strategies": {"system": "prepend_shape"},
+                            "shape_hooks": [
+                                "ccproxy.shaping.regenerate",
+                            ],
+                            "capture": {"path_pattern": "^/v1/messages"},
+                        },
+                    }
                 }
-            },
+            ),
         )
     )
     shape_store = ShapeStore(tmp_path / "seeds")
@@ -80,7 +91,7 @@ def _make_flow(
         "POST",
         "https://incoming.example/v1",
         json.dumps(body or {}).encode(),
-        {"user-agent": "incoming-cli/1.0"},
+        cast(dict[str | bytes, str | bytes], {"user-agent": "incoming-cli/1.0"}),
     )
 
     if reverse:
@@ -108,7 +119,7 @@ def _seed_flow(
         "POST",
         f"https://{host}{path}",
         json.dumps(body or {"seed_only": True}).encode(),
-        headers or {"x-seed-header": "yes"},
+        cast(dict[str | bytes, str | bytes], headers or {"x-seed-header": "yes"}),
     )
     return f
 
@@ -238,20 +249,22 @@ class TestMergeStrategySlice:
         strategy: str,
     ) -> ShapeStore:
         """Re-seat the config singleton with the given system merge strategy."""
-        from ccproxy.config import CCProxyConfig, set_config_instance
+        from ccproxy.config import CCProxyConfig, ShapingConfig, set_config_instance
 
         set_config_instance(
             CCProxyConfig(
-                shaping={
-                    "providers": {
-                        "anthropic": {
-                            "content_fields": ["model", "messages", "system"],
-                            "merge_strategies": {"system": strategy},
-                            "shape_hooks": [],
-                            "capture": {"path_pattern": "^/v1/messages"},
-                        },
+                shaping=ShapingConfig.model_validate(
+                    {
+                        "providers": {
+                            "anthropic": {
+                                "content_fields": ["model", "messages", "system"],
+                                "merge_strategies": {"system": strategy},
+                                "shape_hooks": [],
+                                "capture": {"path_pattern": "^/v1/messages"},
+                            },
+                        }
                     }
-                },
+                ),
             )
         )
         return store

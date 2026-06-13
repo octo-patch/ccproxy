@@ -1,5 +1,7 @@
 """Tests for vendored xepor routing framework."""
 
+from collections.abc import Callable
+from typing import Any, cast
 from unittest.mock import MagicMock
 
 from ccproxy.inspector.router import FlowMeta, InspectorRouter, InterceptedAPI, RouteType
@@ -21,6 +23,10 @@ def _make_flow(host: str = "example.com", path: str = "/api/test", method: str =
     flow.client_conn = MagicMock()
     flow.server_conn = MagicMock()
     return flow
+
+
+def _route(api: InterceptedAPI, *args: Any, **kwargs: Any) -> Callable[[Callable[..., object]], Callable[..., object]]:
+    return cast(Callable[[Callable[..., object]], Callable[..., object]], cast(Any, api.route)(*args, **kwargs))
 
 
 class TestInspectorRouter:
@@ -110,7 +116,7 @@ class TestRouteRegistration:
     def test_request_route_registered(self) -> None:
         api = InterceptedAPI(default_host="example.com")
 
-        @api.route("/test", rtype=RouteType.REQUEST)
+        @_route(api, "/test", rtype=RouteType.REQUEST)
         def handler(flow: MagicMock) -> None:
             pass
 
@@ -120,7 +126,7 @@ class TestRouteRegistration:
     def test_response_route_registered(self) -> None:
         api = InterceptedAPI(default_host="example.com")
 
-        @api.route("/test", rtype=RouteType.RESPONSE)
+        @_route(api, "/test", rtype=RouteType.RESPONSE)
         def handler(flow: MagicMock) -> None:
             pass
 
@@ -133,7 +139,7 @@ class TestRouteDispatch:
         api = InterceptedAPI(default_host="example.com")
         called = []
 
-        @api.route("/api/test")
+        @_route(api, "/api/test")
         def handler(flow: MagicMock) -> None:
             called.append(True)
 
@@ -145,7 +151,7 @@ class TestRouteDispatch:
         api = InterceptedAPI(default_host="example.com")
         captured: dict[str, str] = {}
 
-        @api.route("/users/{user_id}/posts/{post_id}")
+        @_route(api, "/users/{user_id}/posts/{post_id}")
         def handler(flow: MagicMock, user_id: str = "", post_id: str = "") -> None:
             captured["user_id"] = user_id
             captured["post_id"] = post_id
@@ -158,7 +164,7 @@ class TestRouteDispatch:
     def test_unmatched_route_passthrough(self) -> None:
         api = InterceptedAPI(default_host="example.com", request_passthrough=True)
 
-        @api.route("/specific")
+        @_route(api, "/specific")
         def handler(flow: MagicMock) -> None:
             pass
 
@@ -170,7 +176,7 @@ class TestRouteDispatch:
     def test_unmatched_route_whitelist_mode(self) -> None:
         api = InterceptedAPI(default_host="example.com", request_passthrough=False)
 
-        @api.route("/allowed")
+        @_route(api, "/allowed")
         def handler(flow: MagicMock) -> None:
             pass
 
@@ -188,7 +194,7 @@ class TestRouteDispatch:
         # xepor's `request()` returns early when no routes are registered, so we
         # register a no-op route on a different host to ensure the blacklist
         # branch executes when evil.com hits the dispatcher.
-        @api.route("/never", host="example.com")
+        @_route(api, "/never", host="example.com")
         def _noop(flow: MagicMock) -> None:
             pass
 
@@ -200,11 +206,11 @@ class TestRouteDispatch:
         api = InterceptedAPI(default_host="example.com")
         order: list[int] = []
 
-        @api.route("/{path}")
+        @_route(api, "/{path}")
         def first(flow: MagicMock, **kwargs: object) -> None:
             order.append(1)
 
-        @api.route("/{path}")
+        @_route(api, "/{path}")
         def second(flow: MagicMock, **kwargs: object) -> None:
             order.append(2)
 
@@ -216,7 +222,7 @@ class TestRouteDispatch:
         api = InterceptedAPI()
         called = []
 
-        @api.route("/test", host="other.com")
+        @_route(api, "/test", host="other.com")
         def handler(flow: MagicMock) -> None:
             called.append(True)
 
@@ -228,7 +234,7 @@ class TestRouteDispatch:
         api = InterceptedAPI(default_host="example.com")
         called = []
 
-        @api.route("/test", rtype=RouteType.RESPONSE)
+        @_route(api, "/test", rtype=RouteType.RESPONSE)
         def handler(flow: MagicMock) -> None:
             called.append(True)
 
@@ -247,7 +253,7 @@ class TestFindHandler:
     def test_returns_handler_and_params(self) -> None:
         api = InterceptedAPI(default_host="example.com")
 
-        @api.route("/items/{id}")
+        @_route(api, "/items/{id}")
         def handler(flow: MagicMock, id: str = "") -> None:
             pass
 
@@ -261,7 +267,7 @@ class TestErrorHandling:
     def test_catch_error_prevents_crash(self) -> None:
         api = InterceptedAPI(default_host="example.com")
 
-        @api.route("/crash", catch_error=True)
+        @_route(api, "/crash", catch_error=True)
         def handler(flow: MagicMock) -> None:
             raise ValueError("boom")
 
@@ -271,7 +277,7 @@ class TestErrorHandling:
     def test_return_error_sends_502(self) -> None:
         api = InterceptedAPI(default_host="example.com")
 
-        @api.route("/crash", catch_error=True, return_error=True)
+        @_route(api, "/crash", catch_error=True, return_error=True)
         def handler(flow: MagicMock) -> None:
             raise ValueError("error message")
 
@@ -285,7 +291,7 @@ class TestPassthroughMetadata:
         api = InterceptedAPI(default_host="example.com")
         called = []
 
-        @api.route("/{path}")
+        @_route(api, "/{path}")
         def handler(flow: MagicMock, **kwargs: object) -> None:
             called.append(True)
 

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from mitmproxy import http
@@ -18,7 +18,7 @@ def _make_ctx(body: dict[str, Any]) -> Context:
         "POST",
         "https://cloudcode-pa.googleapis.com/v1internal:generateContent",
         content=b"{}",
-        headers={"content-type": "application/json"},
+        headers=cast(dict[str | bytes, str | bytes], {"content-type": "application/json"}),
     )
     ctx = Context.from_request(req)
     ctx._body = body

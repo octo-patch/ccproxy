@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, cast
 
 from mitmproxy import http
 
@@ -16,7 +16,7 @@ def _make_ctx(body: dict[str, Any]) -> Context:
         "POST",
         "https://chatgpt.com/backend-api/codex/responses",
         json.dumps(body).encode(),
-        headers={"content-type": "application/json"},
+        headers=cast(dict[str | bytes, str | bytes], {"content-type": "application/json"}),
     )
     return Context.from_request(req)
 

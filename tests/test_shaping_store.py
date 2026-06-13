@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from mitmproxy import http
@@ -25,7 +25,7 @@ def _flow(host: str = "api.anthropic.com", path: str = "/v1/messages") -> http.H
         "POST",
         f"https://{host}{path}",
         b'{"hello": "world"}',
-        {"x-custom": "v"},
+        cast(dict[str | bytes, str | bytes], {"x-custom": "v"}),
     )
     return f
 

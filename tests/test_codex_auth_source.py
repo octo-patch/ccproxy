@@ -6,7 +6,7 @@ import base64
 import json
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import httpx
 import pytest
@@ -97,7 +97,7 @@ def test_expired_codex_access_token_refreshes_and_updates_auth_json(tmp_path: Pa
     def _wrapped(rt: str) -> Any:
         return original_refresh(source, rt, transport=httpx.MockTransport(handler))
 
-    source._refresh_token = _wrapped  # type: ignore[method-assign]
+    cast(Any, source)._refresh_token = _wrapped
 
     assert source.resolve("Auth/codex") == new_access
     assert captured["json"] == {

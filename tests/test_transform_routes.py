@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
 from mitmproxy.proxy.mode_specs import ProxyMode
@@ -557,7 +557,7 @@ class TestHandleRedirect:
         record = FlowRecord(direction="inbound")
         flow = _make_flow(host=host, path=path)
         flow.metadata[InspectorMeta.RECORD] = record
-        return flow
+        return cast(MagicMock, flow)
 
     def test_redirect_rewrites_host_and_port(self) -> None:
         self._make_redirect_config()

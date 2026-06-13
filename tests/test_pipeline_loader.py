@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from pydantic import BaseModel
@@ -79,8 +79,7 @@ class TestLoadHooks:
             writes=frozenset(),
             model=_RateLimitParams,
         )
-        spec._fake_rate_limit = _fake_rate_limit  # type: ignore[attr-defined]
-        _fake_rate_limit._hook_spec = spec  # type: ignore[attr-defined]
+        cast(Any, _fake_rate_limit)._hook_spec = spec
         get_registry().register_spec(spec)
 
         # Simulate a module-path entry by importing a module that has the spec
@@ -112,7 +111,7 @@ class TestLoadHooks:
         import types
 
         fake_mod = types.ModuleType("ccproxy_test_fake_ratelimit_mod")
-        fake_mod._fake_rate_limit = _fake_rate_limit  # type: ignore[attr-defined]
+        cast(Any, fake_mod)._fake_rate_limit = _fake_rate_limit
         sys.modules["ccproxy_test_fake_ratelimit_mod"] = fake_mod
 
         try:
@@ -138,11 +137,11 @@ class TestLoadHooks:
             writes=frozenset(),
             model=_RateLimitParams,
         )
-        _fake_rate_limit3._hook_spec = spec  # type: ignore[attr-defined]
+        cast(Any, _fake_rate_limit3)._hook_spec = spec
         get_registry().register_spec(spec)
 
         fake_mod = types.ModuleType("ccproxy_test_fake_ratelimit_mod3")
-        fake_mod._fake_rate_limit3 = _fake_rate_limit3  # type: ignore[attr-defined]
+        cast(Any, fake_mod)._fake_rate_limit3 = _fake_rate_limit3
         sys.modules["ccproxy_test_fake_ratelimit_mod3"] = fake_mod
 
         try:
@@ -170,11 +169,11 @@ class TestLoadHooks:
             writes=frozenset(),
             model=_RateLimitParams,
         )
-        _fake_rate_limit2._hook_spec = spec  # type: ignore[attr-defined]
+        cast(Any, _fake_rate_limit2)._hook_spec = spec
         get_registry().register_spec(spec)
 
         fake_mod = types.ModuleType("ccproxy_test_fake_ratelimit_mod2")
-        fake_mod._fake_rate_limit2 = _fake_rate_limit2  # type: ignore[attr-defined]
+        cast(Any, fake_mod)._fake_rate_limit2 = _fake_rate_limit2
         sys.modules["ccproxy_test_fake_ratelimit_mod2"] = fake_mod
 
         try:

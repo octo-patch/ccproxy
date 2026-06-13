@@ -14,7 +14,7 @@ expected ``info()`` calls.
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -243,7 +243,7 @@ def test_resource_status_when_mitmweb_unreachable() -> None:
         get_store_mock.return_value.list_providers.return_value = []
         # Resource handlers store the function on the resource object.
         resource = server.mcp._resource_manager._resources["proxy://status"]  # type: ignore[attr-defined]
-        text = resource.fn()
+        text = cast(Any, resource).fn()
     payload = json.loads(text)
     assert payload["connected"] is False
     assert payload["flow_count"] == 0
@@ -252,7 +252,7 @@ def test_resource_status_when_mitmweb_unreachable() -> None:
 def test_resource_requests_returns_json_array(mock_client: Any, fake_flows: list[dict[str, Any]]) -> None:
     with _patch_make_client(mock_client):
         resource = server.mcp._resource_manager._resources["proxy://requests"]  # type: ignore[attr-defined]
-        text = resource.fn()
+        text = cast(Any, resource).fn()
     parsed = json.loads(text)
     assert isinstance(parsed, list)
     assert len(parsed) == len(fake_flows)

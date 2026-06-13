@@ -83,7 +83,7 @@ class TestHandleShapes:
 def _write_mflow(path: Path, *, sensitive_header: str | None = None, with_response: bool = False) -> None:
     """Write a minimal .mflow file for testing _read_latest and _do_shape_audit."""
     f = tflow.tflow()
-    headers: dict[str, str] = {"content-type": "application/json"}
+    headers: dict[str | bytes, str | bytes] = {"content-type": "application/json"}
     if sensitive_header:
         headers[sensitive_header] = "secret"
     f.request = http.Request.make(
@@ -97,7 +97,7 @@ def _write_mflow(path: Path, *, sensitive_header: str | None = None, with_respon
     else:
         f.response = None
     with path.open("wb") as fout:
-        FlowWriter(fout).add(f)
+        FlowWriter(fout).add(f)  # type: ignore[no-untyped-call]
 
 
 # ---------------------------------------------------------------------------
@@ -162,7 +162,7 @@ class TestReadLatest:
         f2.request = http.Request.make("GET", "https://example.com/second", b"", {})
         f2.response = None
         with path.open("wb") as fout:
-            w = FlowWriter(fout)
+            w = FlowWriter(fout)  # type: ignore[no-untyped-call]
             w.add(f1)
             w.add(f2)
 

@@ -184,6 +184,7 @@ module = [
   "ccproxy.lightllm.graph.perplexity_intake",
   "ccproxy.lightllm.graph.sse_pipeline",
   "ccproxy.lightllm.graph._subgraph_patch",
+  "tests.test_lightllm_graph_subgraph_patch",
 ]
 disable_error_code = ["type-arg", "attr-defined", "no-any-return", "misc", "index", "arg-type", "unreachable"]
 
@@ -196,7 +197,7 @@ stubPath = "stubs"
 
 [tool.ty.environment]
 python-version = "3.13"
-root = ["src"]
+root = ["src", "tests"]
 
 [tool.ruff]
 target-version = "py313"
@@ -227,6 +228,7 @@ dev = [
   "pytest-cov>=6.2.1",
   "ruff>=0.12.6",
   "setuptools>=80.9.0",
+  "ty>=0.0.38",
   "types-pyyaml>=6.0.12.20250516",
   "types-requests>=2.32.4.20250611",
 ]

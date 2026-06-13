@@ -5,9 +5,11 @@ from __future__ import annotations
 import json
 import sys
 import uuid
+from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
 import pytest
+from mitmproxy.http import HTTPFlow
 
 from ccproxy.flows.store import FlowRecord, InspectorMeta
 from ccproxy.hooks.gemini_cli import (
@@ -24,7 +26,7 @@ gemini_cli_module = sys.modules["ccproxy.hooks.gemini_cli"]
 
 def _make_ctx(
     *,
-    body: dict | None = None,
+    body: dict[str, Any] | None = None,
     path: str = "/v1beta/models/gemini-3.1-pro-preview:generateContent",
     headers: dict[str, str] | None = None,
     auth_provider: str | None = "gemini",
@@ -44,6 +46,11 @@ def _make_ctx(
         flow.metadata["ccproxy.conversation_id"] = conversation_id
     flow.metadata[InspectorMeta.RECORD] = FlowRecord(direction="inbound")
     return Context.from_flow(flow)
+
+
+def _flow(ctx: Context) -> HTTPFlow:
+    assert ctx.flow is not None
+    return ctx.flow
 
 
 class TestGuard:
@@ -67,7 +74,7 @@ class TestEnvelopeWrap:
             "generationConfig": {"temperature": 0.5},
         }
         ctx = _make_ctx(body=body)
-        gemini_cli_module._cached_project = "test-project"
+        cast(Any, gemini_cli_module)._cached_project = "test-project"
 
         gemini_cli(ctx, {})
 
@@ -82,7 +89,7 @@ class TestEnvelopeWrap:
         assert isinstance(wrapped["user_prompt_id"], str)
 
     def test_glass_style_body_preserved_except_for_session_id_injection(self) -> None:
-        original = {
+        original: dict[str, Any] = {
             "model": "gemini-2.5-pro",
             "project": "glass-project",
             "request": {"contents": [{"role": "user", "parts": [{"text": "hi"}]}]},
@@ -106,7 +113,7 @@ class TestEnvelopeWrap:
             "metadata": {"user_id": "abc"},
         }
         ctx = _make_ctx(body=body)
-        gemini_cli_module._cached_project = "proj"
+        cast(Any, gemini_cli_module)._cached_project = "proj"
 
         gemini_cli(ctx, {})
 
@@ -128,22 +135,22 @@ class TestPathRewriting:
 
         gemini_cli(ctx, {})
 
-        assert ctx.flow.request.path == "/v1internal:generateContent"
+        assert _flow(ctx).request.path == "/v1internal:generateContent"
 
     def test_stream_generate_content_appends_alt_sse(self) -> None:
         ctx = _make_ctx(path="/v1beta/models/gemini-3.1-pro-preview:streamGenerateContent")
 
         gemini_cli(ctx, {})
 
-        assert ctx.flow.request.path == "/v1internal:streamGenerateContent?alt=sse"
+        assert _flow(ctx).request.path == "/v1internal:streamGenerateContent?alt=sse"
 
     def test_path_without_action_passes_through(self) -> None:
         ctx = _make_ctx(path="/v1beta/models/gemini-3.1-pro-preview")
-        original_path = ctx.flow.request.path
+        original_path = _flow(ctx).request.path
 
         gemini_cli(ctx, {})
 
-        assert ctx.flow.request.path == original_path
+        assert _flow(ctx).request.path == original_path
 
     @pytest.mark.parametrize("action", _KNOWN_GEMINI_ACTIONS)
     def test_action_regex_matches_known_actions(self, action: str) -> None:
@@ -158,7 +165,7 @@ class TestPathRewriting:
 
         gemini_cli(ctx, {})
 
-        assert ctx.flow.request.path == path
+        assert _flow(ctx).request.path == path
 
     def test_no_colon_action_passes_through(self) -> None:
         path = "/v1beta/models/gemini-3.1-pro-preview"
@@ -166,7 +173,7 @@ class TestPathRewriting:
 
         gemini_cli(ctx, {})
 
-        assert ctx.flow.request.path == path
+        assert _flow(ctx).request.path == path
 
 
 class TestHostRewriting:
@@ -175,10 +182,11 @@ class TestHostRewriting:
 
         gemini_cli(ctx, {})
 
-        assert ctx.flow.request.host == "cloudcode-pa.googleapis.com"
-        assert ctx.flow.request.port == 443
-        assert ctx.flow.request.scheme == "https"
-        assert ctx.flow.request.headers["host"] == "cloudcode-pa.googleapis.com"
+        flow = _flow(ctx)
+        assert flow.request.host == "cloudcode-pa.googleapis.com"
+        assert flow.request.port == 443
+        assert flow.request.scheme == "https"
+        assert flow.request.headers["host"] == "cloudcode-pa.googleapis.com"
 
 
 class TestHeaderMasquerade:
@@ -187,7 +195,8 @@ class TestHeaderMasquerade:
 
         gemini_cli(ctx, {})
 
-        ua = ctx.flow.request.headers.get("user-agent")
+        ua = _flow(ctx).request.headers.get("user-agent")
+        assert isinstance(ua, str)
         assert ua.startswith("GeminiCLI/")
         assert "gemini-3.1-pro-preview" in ua
 
@@ -196,7 +205,7 @@ class TestHeaderMasquerade:
 
         gemini_cli(ctx, {})
 
-        assert ctx.flow.request.headers.get("x-goog-api-client") == "gl-node/22.22.2"
+        assert _flow(ctx).request.headers.get("x-goog-api-client") == "gl-node/22.22.2"
 
     def test_user_agent_preserved_for_non_sdk_clients(self) -> None:
         """Glass and other third-party tools keep their own UA so cloudcode-pa
@@ -205,15 +214,15 @@ class TestHeaderMasquerade:
 
         gemini_cli(ctx, {})
 
-        assert ctx.flow.request.headers.get("user-agent") == "Python-urllib/3.13"
-        assert "x-goog-api-client" not in ctx.flow.request.headers
+        assert _flow(ctx).request.headers.get("user-agent") == "Python-urllib/3.13"
+        assert "x-goog-api-client" not in _flow(ctx).request.headers
 
     def test_x_goog_api_key_stripped(self) -> None:
         ctx = _make_ctx(headers={"x-goog-api-key": "leftover-key"})
 
         gemini_cli(ctx, {})
 
-        assert "x-goog-api-key" not in ctx.flow.request.headers
+        assert "x-goog-api-key" not in _flow(ctx).request.headers
 
 
 class TestTransformMetadata:
@@ -222,7 +231,7 @@ class TestTransformMetadata:
 
         gemini_cli(ctx, {})
 
-        record = ctx.flow.metadata[InspectorMeta.RECORD]
+        record = _flow(ctx).metadata[InspectorMeta.RECORD]
         assert record.transform is not None
         assert record.transform.provider_type == "gemini"
         assert record.transform.model == "gemini-3.1-pro-preview"
@@ -233,7 +242,7 @@ class TestTransformMetadata:
 
         gemini_cli(ctx, {})
 
-        record = ctx.flow.metadata[InspectorMeta.RECORD]
+        record = _flow(ctx).metadata[InspectorMeta.RECORD]
         assert record.transform.is_streaming is True
 
 
@@ -250,7 +259,7 @@ class TestSessionIdInjection:
             body={"contents": [{"role": "user", "parts": [{"text": "hi"}]}]},
             conversation_id="abc123def456",
         )
-        gemini_cli_module._cached_project = "myproject"
+        cast(Any, gemini_cli_module)._cached_project = "myproject"
 
         gemini_cli(ctx, {})
 
@@ -369,7 +378,7 @@ class TestPrewarmProject:
             prewarm_project()
             prewarm_project()  # second call should be no-op
 
-        assert gemini_cli_module._cached_project == "abc-xyz"
+        assert cast(Any, gemini_cli_module)._cached_project == "abc-xyz"
         assert mock_post.call_count == 1
 
     def test_prewarm_skips_when_no_gemini_oat_source(self) -> None:
@@ -382,7 +391,7 @@ class TestPrewarmProject:
         ):
             prewarm_project()
 
-        assert gemini_cli_module._cached_project is None
+        assert cast(Any, gemini_cli_module)._cached_project is None
         assert mock_post.call_count == 0
 
     def test_prewarm_skips_when_token_missing(self) -> None:
@@ -396,7 +405,7 @@ class TestPrewarmProject:
         ):
             prewarm_project()
 
-        assert gemini_cli_module._cached_project is None
+        assert cast(Any, gemini_cli_module)._cached_project is None
         assert mock_post.call_count == 0
 
     def test_prewarm_swallows_failures(self) -> None:
@@ -413,4 +422,4 @@ class TestPrewarmProject:
         ):
             prewarm_project()
 
-        assert gemini_cli_module._cached_project is None
+        assert cast(Any, gemini_cli_module)._cached_project is None

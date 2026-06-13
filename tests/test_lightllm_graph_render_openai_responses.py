@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import Any, Protocol
 
 import pytest
@@ -75,7 +75,7 @@ def render_factory() -> _RenderFactory:
 # ---------------------------------------------------------------------------
 
 
-def _render_all(render: _RenderLike, events: list[ModelResponseStreamEvent]) -> bytes:
+def _render_all(render: _RenderLike, events: Sequence[ModelResponseStreamEvent]) -> bytes:
     out = bytearray()
     for event in events:
         out += render.render(event)

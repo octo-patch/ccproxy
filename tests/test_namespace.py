@@ -5,7 +5,9 @@ import signal
 import socket
 import subprocess
 import threading
+from collections.abc import Generator
 from pathlib import Path
+from typing import cast
 from unittest.mock import MagicMock, Mock, patch
 
 import pytest
@@ -55,6 +57,10 @@ def mock_ctx(tmp_path: Path) -> NamespaceContext:
         wg_conf_path=conf_path,
         api_socket=None,
     )
+
+
+def _mock_slirp(ctx: NamespaceContext) -> MagicMock:
+    return cast(MagicMock, ctx.slirp_proc)
 
 
 # =============================================================================
@@ -470,7 +476,7 @@ class TestCreateNamespace:
 
 class TestRunInNamespace:
     @pytest.fixture(autouse=True)
-    def _skip_warmup(self):
+    def _skip_warmup(self) -> Generator[None]:
         with patch("ccproxy.inspector.namespace._warmup_ignore_hosts"):
             yield
 
@@ -559,7 +565,7 @@ class TestRunInNamespace:
 
 class TestRunInNamespaceCapture:
     @pytest.fixture(autouse=True)
-    def _skip_warmup(self):
+    def _skip_warmup(self) -> Generator[None]:
         with patch("ccproxy.inspector.namespace._warmup_ignore_hosts"):
             yield
 
@@ -683,14 +689,14 @@ class TestCleanupNamespace:
     @patch("ccproxy.inspector.namespace._safe_close")
     def test_clean_shutdown(self, mock_close: Mock, mock_kill: Mock, mock_ctx: NamespaceContext) -> None:
         """Normal cleanup: close exit-fd, wait for slirp, kill sentinel, remove files."""
-        mock_ctx.slirp_proc.wait.return_value = 0
+        _mock_slirp(mock_ctx).wait.return_value = 0
 
         cleanup_namespace(mock_ctx)
 
         # exit-fd closed to trigger clean slirp4netns exit
         mock_close.assert_called_with(999)
         # slirp waited on
-        mock_ctx.slirp_proc.wait.assert_called_once_with(timeout=2)
+        _mock_slirp(mock_ctx).wait.assert_called_once_with(timeout=2)
         # sentinel killed
         mock_kill.assert_called_once_with(mock_ctx.ns_pid)
         # temp conf file removed
@@ -700,14 +706,14 @@ class TestCleanupNamespace:
     @patch("ccproxy.inspector.namespace._safe_close")
     def test_slirp_timeout_force_kills(self, mock_close: Mock, mock_kill: Mock, mock_ctx: NamespaceContext) -> None:
         """slirp4netns doesn't exit after exit-fd close → force killed."""
-        mock_ctx.slirp_proc.wait.side_effect = [
+        _mock_slirp(mock_ctx).wait.side_effect = [
             subprocess.TimeoutExpired("slirp4netns", 2),  # first wait
             None,  # wait after kill
         ]
 
         cleanup_namespace(mock_ctx)
 
-        mock_ctx.slirp_proc.kill.assert_called_once()
+        _mock_slirp(mock_ctx).kill.assert_called_once()
 
     @patch("ccproxy.inspector.namespace._safe_kill")
     @patch("ccproxy.inspector.namespace._safe_close")
@@ -725,7 +731,7 @@ class TestCleanupNamespace:
             wg_conf_path=conf_path,
             api_socket=socket_path,
         )
-        ctx.slirp_proc.wait.return_value = 0
+        _mock_slirp(ctx).wait.return_value = 0
 
         cleanup_namespace(ctx)
 
@@ -738,7 +744,7 @@ class TestCleanupNamespace:
         self, mock_close: Mock, mock_kill: Mock, mock_ctx: NamespaceContext
     ) -> None:
         """exit_w is set to -1 after closing to prevent double-close."""
-        mock_ctx.slirp_proc.wait.return_value = 0
+        _mock_slirp(mock_ctx).wait.return_value = 0
 
         cleanup_namespace(mock_ctx)
 
@@ -809,7 +815,9 @@ class TestCliInspectHardFailure:
         mock_run.assert_called_once_with(tmp_path, ["echo", "hello"], inspect=True)
 
     @patch("ccproxy.inspector.namespace.check_namespace_capabilities")
-    def test_missing_prerequisites_exits_1(self, mock_check: Mock, tmp_path: Path, capsys) -> None:
+    def test_missing_prerequisites_exits_1(
+        self, mock_check: Mock, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
         """Missing prerequisites → exit(1), not fallback to unconfined execution."""
         from ccproxy.cli import run_with_proxy
 
@@ -826,7 +834,9 @@ class TestCliInspectHardFailure:
         assert "Cannot create network namespace" in captured.err
 
     @patch("ccproxy.inspector.namespace.check_namespace_capabilities")
-    def test_multiple_missing_prerequisites_all_reported(self, mock_check: Mock, tmp_path: Path, capsys) -> None:
+    def test_multiple_missing_prerequisites_all_reported(
+        self, mock_check: Mock, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
         """All missing prerequisites are listed before exiting."""
         from ccproxy.cli import run_with_proxy
 
@@ -848,7 +858,9 @@ class TestCliInspectHardFailure:
         assert "namespaces" in captured.err.lower()
 
     @patch("ccproxy.inspector.namespace.check_namespace_capabilities", return_value=[])
-    def test_missing_wg_state_file_exits_1(self, mock_check: Mock, tmp_path: Path, capsys) -> None:
+    def test_missing_wg_state_file_exits_1(
+        self, mock_check: Mock, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
         """Prerequisites present but no WG state file → clear error about starting --inspect."""
         from ccproxy.cli import run_with_proxy
 
@@ -864,7 +876,9 @@ class TestCliInspectHardFailure:
 
     @patch("ccproxy.inspector.namespace.check_namespace_capabilities", return_value=[])
     @patch("ccproxy.inspector.namespace.create_namespace")
-    def test_namespace_runtime_error_exits_1(self, mock_create: Mock, mock_check: Mock, tmp_path: Path, capsys) -> None:
+    def test_namespace_runtime_error_exits_1(
+        self, mock_create: Mock, mock_check: Mock, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
         """Namespace creation fails at runtime → exit(1) with error message."""
         from ccproxy.cli import run_with_proxy
 
@@ -1371,7 +1385,7 @@ class TestCleanupNamespacePortForwarder:
             wg_conf_path=conf_path,
             port_forwarder=mock_forwarder,
         )
-        ctx.slirp_proc.wait.return_value = 0
+        _mock_slirp(ctx).wait.return_value = 0
 
         cleanup_namespace(ctx)
 
@@ -1381,7 +1395,7 @@ class TestCleanupNamespacePortForwarder:
     @patch("ccproxy.inspector.namespace._safe_close")
     def test_no_forwarder_ok(self, mock_close: Mock, mock_kill: Mock, mock_ctx: NamespaceContext) -> None:
         """Cleanup succeeds when port_forwarder is None."""
-        mock_ctx.slirp_proc.wait.return_value = 0
+        _mock_slirp(mock_ctx).wait.return_value = 0
         cleanup_namespace(mock_ctx)  # should not raise
 
 
@@ -1394,16 +1408,15 @@ class TestPipeOutput:
     """Verify `_pipe_output` routes slirp4netns severity prefixes correctly."""
 
     @staticmethod
-    def _run_reader(lines: list[bytes], tag: str = "slirp4netns") -> subprocess.Popen:
+    def _run_reader(lines: list[bytes], tag: str = "slirp4netns") -> None:
         """Build a mock Popen whose stdout yields the given lines, then wait
         for _pipe_output's reader thread to drain it."""
         proc = MagicMock(spec=subprocess.Popen)
         proc.stdout = iter(lines)
-        t = _pipe_output(proc, tag)
+        t = _pipe_output(cast(subprocess.Popen[bytes], proc), tag)
         t.join(timeout=2)
-        return proc
 
-    def test_host_loopback_warning_downgraded_to_debug(self, caplog) -> None:
+    def test_host_loopback_warning_downgraded_to_debug(self, caplog: pytest.LogCaptureFixture) -> None:
         import logging
 
         line = (
@@ -1420,7 +1433,7 @@ class TestPipeOutput:
         assert any("127.0.0.1:*" in r.message for r in debug_records)
         assert any("REQUIRES namespace loopback" in r.message for r in debug_records)
 
-    def test_other_warning_stays_at_warning(self, caplog) -> None:
+    def test_other_warning_stays_at_warning(self, caplog: pytest.LogCaptureFixture) -> None:
         import logging
 
         with caplog.at_level(logging.WARNING, logger="ccproxy.subprocess.slirp4netns"):
@@ -1430,7 +1443,7 @@ class TestPipeOutput:
         assert len(warn_records) == 1
         assert "requested MTU larger than max" in warn_records[0].message
 
-    def test_error_prefix_routes_to_error_level(self, caplog) -> None:
+    def test_error_prefix_routes_to_error_level(self, caplog: pytest.LogCaptureFixture) -> None:
         import logging
 
         with caplog.at_level(logging.DEBUG, logger="ccproxy.subprocess.slirp4netns"):
@@ -1440,7 +1453,7 @@ class TestPipeOutput:
         assert len(err_records) == 1
         assert "bind failed" in err_records[0].message
 
-    def test_fatal_prefix_routes_to_critical_level(self, caplog) -> None:
+    def test_fatal_prefix_routes_to_critical_level(self, caplog: pytest.LogCaptureFixture) -> None:
         import logging
 
         with caplog.at_level(logging.DEBUG, logger="ccproxy.subprocess.slirp4netns"):
@@ -1450,7 +1463,7 @@ class TestPipeOutput:
         assert len(crit_records) == 1
         assert "ns_join" in crit_records[0].message
 
-    def test_unprefixed_line_routes_to_info(self, caplog) -> None:
+    def test_unprefixed_line_routes_to_info(self, caplog: pytest.LogCaptureFixture) -> None:
         import logging
 
         with caplog.at_level(logging.INFO, logger="ccproxy.subprocess.slirp4netns"):
@@ -1460,7 +1473,7 @@ class TestPipeOutput:
         assert len(info_records) == 1
         assert "DHCP NACK" in info_records[0].message
 
-    def test_empty_lines_skipped(self, caplog) -> None:
+    def test_empty_lines_skipped(self, caplog: pytest.LogCaptureFixture) -> None:
         import logging
 
         with caplog.at_level(logging.DEBUG, logger="ccproxy.subprocess.slirp4netns"):
@@ -1470,7 +1483,7 @@ class TestPipeOutput:
         assert "real content" in messages
         assert "" not in messages
 
-    def test_non_slirp4netns_tag_uses_info_branch(self, caplog) -> None:
+    def test_non_slirp4netns_tag_uses_info_branch(self, caplog: pytest.LogCaptureFixture) -> None:
         """Prefix parsing is slirp4netns-specific; other tags always log at INFO."""
         import logging
 

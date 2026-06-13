@@ -7,6 +7,7 @@ eviction semantics, and profile validation documented in dispatch.py.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Generator
 from dataclasses import dataclass
 from types import SimpleNamespace
 
@@ -30,7 +31,7 @@ from ccproxy.transport.dispatch import _Cache
 
 
 @pytest.fixture(autouse=True)
-def clean_cache():
+def clean_cache() -> Generator[None]:
     """Reset the singleton and close all clients around every test."""
     reset_cache()
     yield

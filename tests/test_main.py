@@ -2,12 +2,12 @@
 
 import runpy
 import sys
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 
 class TestMain:
     @patch("tyro.cli")
-    def test_main_entry_point(self, mock_tyro_cli) -> None:
+    def test_main_entry_point(self, mock_tyro_cli: Mock) -> None:
         """Test that __main__ calls tyro.cli with main function."""
         from ccproxy.cli import main
 

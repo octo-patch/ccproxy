@@ -24,7 +24,9 @@ from __future__ import annotations
 import base64
 import os
 import time
+from collections.abc import Callable, Generator
 from pathlib import Path
+from typing import Any
 
 import httpx
 import pytest
@@ -60,7 +62,7 @@ pytestmark = [
 
 
 @pytest.fixture
-def client():
+def client() -> Any:
     from google import genai
     from google.genai import types
 
@@ -71,13 +73,13 @@ def client():
 
 
 @pytest.fixture(autouse=True)
-def _space_requests():
+def _space_requests() -> Generator[None]:
     """cloudcode-pa rate-limits aggressively; space requests across tests."""
     yield
     time.sleep(2)
 
 
-def _call_with_retry(fn, *, retries: int = 2, backoff: float = 3.0):
+def _call_with_retry[T](fn: Callable[[], T], *, retries: int = 2, backoff: float = 3.0) -> T:
     """Call ``fn`` retrying on cloudcode-pa transient errors (429/5xx).
 
     Skips the test entirely if transients persist past ``retries`` — these
@@ -105,7 +107,7 @@ def _call_with_retry(fn, *, retries: int = 2, backoff: float = 3.0):
     raise AssertionError("unreachable")
 
 
-def test_non_streaming_text_request(client) -> None:
+def test_non_streaming_text_request(client: Any) -> None:
     """Round-trips a text request through ccproxy → cloudcode-pa → back.
 
     Verifies: sentinel resolution, envelope wrap, project resolution, path
@@ -122,14 +124,14 @@ def test_non_streaming_text_request(client) -> None:
     assert "pong" in response.text.lower()
 
 
-def test_streaming_text_request(client) -> None:
+def test_streaming_text_request(client: Any) -> None:
     """Streaming response: each SSE chunk's v1internal envelope must unwrap.
 
     A regression in EnvelopeUnwrapStream or in the cloudcode-pa response
     schema would surface here as empty/malformed chunks.
     """
 
-    def _stream():
+    def _stream() -> tuple[int, list[str]]:
         chunks: list[str] = []
         count = 0
         for chunk in client.models.generate_content_stream(
@@ -149,7 +151,7 @@ def test_streaming_text_request(client) -> None:
         assert n in full, f"missing {n!r} in streamed response: {full!r}"
 
 
-def test_image_payload(client) -> None:
+def test_image_payload(client: Any) -> None:
     """Multi-byte inline image data flows through unchanged.
 
     The Glass-equivalent capability: large base64 image payloads in

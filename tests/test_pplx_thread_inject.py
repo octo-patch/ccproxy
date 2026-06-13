@@ -4,12 +4,15 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from pathlib import Path
+from typing import Any, Literal
 from unittest.mock import MagicMock, patch
 
 import httpx
 import pytest
+from mitmproxy.http import HTTPFlow
 
+from ccproxy.auth.sources import FileAuthSource
 from ccproxy.config import CCProxyConfig, PplxConfig, PplxThreadConfig, Provider, set_config_instance
 from ccproxy.hooks.pplx_thread_inject import (
     _count_client_user_turns,
@@ -40,14 +43,24 @@ def make_ctx(
     return Context.from_flow(flow)
 
 
-def set_pplx_config(tmp_path: Any, *, consistency_mode: str = "warn", token: str = "cookie-token") -> None:
+def _flow(ctx: Context) -> HTTPFlow:
+    assert ctx.flow is not None
+    return ctx.flow
+
+
+def set_pplx_config(
+    tmp_path: Path,
+    *,
+    consistency_mode: Literal["warn", "strict", "ignore"] = "warn",
+    token: str = "cookie-token",
+) -> None:
     token_file = tmp_path / "pplx-token"
     token_file.write_text(token)
     set_config_instance(
         CCProxyConfig(
             providers={
                 "perplexity_pro": Provider(
-                    auth={"type": "file", "file": str(token_file)},
+                    auth=FileAuthSource(file=str(token_file)),
                     host="www.perplexity.ai",
                     path="/rest/sse/perplexity_ask",
                     type="perplexity_pro",
@@ -89,14 +102,14 @@ def test_guard_false_for_other_provider() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_mode3_passthrough_leaves_body_untouched(tmp_path: Any) -> None:
+def test_mode3_passthrough_leaves_body_untouched(tmp_path: Path) -> None:
     set_pplx_config(tmp_path)
     ctx = make_ctx({"messages": [{"role": "user", "content": "hi"}]}, conversation_id="conv-miss")
 
     result = pplx_thread_inject(ctx, {})
 
     assert "pplx" not in result._body
-    assert "ccproxy.pplx.resolved_via" not in result.flow.metadata
+    assert "ccproxy.pplx.resolved_via" not in _flow(result).metadata
 
 
 # ---------------------------------------------------------------------------
@@ -104,7 +117,7 @@ def test_mode3_passthrough_leaves_body_untouched(tmp_path: Any) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_mode2_l1_cache_hit_injects_identifiers(tmp_path: Any) -> None:
+def test_mode2_l1_cache_hit_injects_identifiers(tmp_path: Path) -> None:
     set_pplx_config(tmp_path)
     get_pplx_thread_store().save(
         conversation_id="conv-1",
@@ -125,7 +138,7 @@ def test_mode2_l1_cache_hit_injects_identifiers(tmp_path: Any) -> None:
     assert result.metadata.pplx.resolved_via == "l1_cache"
 
 
-def test_mode2_omits_read_write_token_when_absent(tmp_path: Any) -> None:
+def test_mode2_omits_read_write_token_when_absent(tmp_path: Path) -> None:
     set_pplx_config(tmp_path)
     get_pplx_thread_store().save(
         conversation_id="conv-2",
@@ -149,7 +162,7 @@ def test_mode2_omits_read_write_token_when_absent(tmp_path: Any) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_mode1_metadata_slug_resolves_latest_entry(tmp_path: Any) -> None:
+def test_mode1_metadata_slug_resolves_latest_entry(tmp_path: Path) -> None:
     set_pplx_config(tmp_path)
     body = {
         "metadata": {"session_id": "slug-1"},
@@ -174,10 +187,10 @@ def test_mode1_metadata_slug_resolves_latest_entry(tmp_path: Any) -> None:
         "read_write_token": "T1",
     }
     assert result.metadata.pplx.resolved_via == "metadata"
-    assert "ccproxy.pplx.divergence" not in result.flow.metadata
+    assert "ccproxy.pplx.divergence" not in _flow(result).metadata
 
 
-def test_mode1_divergence_warn_stamps_metadata(tmp_path: Any) -> None:
+def test_mode1_divergence_warn_stamps_metadata(tmp_path: Path) -> None:
     set_pplx_config(tmp_path, consistency_mode="warn")
     body = {
         "metadata": {"session_id": "slug-1"},
@@ -192,7 +205,7 @@ def test_mode1_divergence_warn_stamps_metadata(tmp_path: Any) -> None:
     assert result._body["pplx"]["last_backend_uuid"] == "B1"
 
 
-def test_mode1_divergence_strict_raises_409(tmp_path: Any) -> None:
+def test_mode1_divergence_strict_raises_409(tmp_path: Path) -> None:
     set_pplx_config(tmp_path, consistency_mode="strict")
     body = {
         "metadata": {"session_id": "slug-1"},
@@ -207,7 +220,7 @@ def test_mode1_divergence_strict_raises_409(tmp_path: Any) -> None:
         pplx_thread_inject(ctx, {})
 
 
-def test_mode1_no_token_raises_503(tmp_path: Any) -> None:
+def test_mode1_no_token_raises_503(tmp_path: Path) -> None:
     set_config_instance(CCProxyConfig(providers={}))
     ctx = make_ctx({"metadata": {"session_id": "slug-1"}, "messages": []})
 
@@ -215,7 +228,7 @@ def test_mode1_no_token_raises_503(tmp_path: Any) -> None:
         pplx_thread_inject(ctx, {})
 
 
-def test_mode1_upstream_404_propagates(tmp_path: Any) -> None:
+def test_mode1_upstream_404_propagates(tmp_path: Path) -> None:
     set_pplx_config(tmp_path)
     ctx = make_ctx({"metadata": {"session_id": "slug-1"}, "messages": []})
     not_found = httpx.Response(404, json={"detail": "not found"}, request=httpx.Request("GET", _THREAD_URL))
@@ -227,7 +240,7 @@ def test_mode1_upstream_404_propagates(tmp_path: Any) -> None:
         pplx_thread_inject(ctx, {})
 
 
-def test_mode1_network_error_raises_502(tmp_path: Any) -> None:
+def test_mode1_network_error_raises_502(tmp_path: Path) -> None:
     set_pplx_config(tmp_path)
     ctx = make_ctx({"metadata": {"session_id": "slug-1"}, "messages": []})
 
@@ -241,7 +254,7 @@ def test_mode1_network_error_raises_502(tmp_path: Any) -> None:
         pplx_thread_inject(ctx, {})
 
 
-def test_mode1_empty_entries_raises_502(tmp_path: Any) -> None:
+def test_mode1_empty_entries_raises_502(tmp_path: Path) -> None:
     set_pplx_config(tmp_path)
     ctx = make_ctx({"metadata": {"session_id": "slug-1"}, "messages": []})
 
@@ -257,7 +270,7 @@ def test_mode1_empty_entries_raises_502(tmp_path: Any) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_fetch_thread_merges_pages(tmp_path: Any) -> None:
+def test_fetch_thread_merges_pages(tmp_path: Path) -> None:
     set_pplx_config(tmp_path)
     pages = [
         _page([{"backend_uuid": "B1", "context_uuid": "C1"}], has_next=True, end_cursor="cur-1"),
@@ -273,7 +286,7 @@ def test_fetch_thread_merges_pages(tmp_path: Any) -> None:
     assert mock_get.call_count == 2
 
 
-def test_fetch_thread_missing_cursor_raises(tmp_path: Any) -> None:
+def test_fetch_thread_missing_cursor_raises(tmp_path: Path) -> None:
     set_pplx_config(tmp_path)
 
     with (
@@ -283,7 +296,7 @@ def test_fetch_thread_missing_cursor_raises(tmp_path: Any) -> None:
         _fetch_thread("slug-1", "cookie-token")
 
 
-def test_fetch_thread_repeated_cursor_raises(tmp_path: Any) -> None:
+def test_fetch_thread_repeated_cursor_raises(tmp_path: Path) -> None:
     set_pplx_config(tmp_path)
     pages = [
         _page([_ENTRY], has_next=True, end_cursor="cur-1"),

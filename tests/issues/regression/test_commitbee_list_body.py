@@ -62,4 +62,4 @@ def test_hook_body_no_op_on_list_body() -> None:
     result = commitbee_compat(ctx, {})
     assert result is ctx
     # Body is untouched (still the same list).
-    assert ctx._body is body
+    assert cast(object, ctx._body) is body

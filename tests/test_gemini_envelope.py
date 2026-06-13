@@ -26,6 +26,7 @@ class TestEnvelopeUnwrapStream:
 
         out = stream(chunk)
 
+        assert isinstance(out, bytes)
         assert b'"x": 1' in out
         assert b"response" not in out
         assert out.endswith(b"\r\n\r\n")
@@ -62,6 +63,7 @@ class TestEnvelopeUnwrapStream:
     def test_chunk_without_response_field_passes_through(self) -> None:
         stream = EnvelopeUnwrapStream()
         out = stream(b'data: {"candidates": [{"x": 1}]}\n\n')
+        assert isinstance(out, bytes)
         parsed = json.loads(out.split(b"data: ", 1)[1].rstrip(b"\n\n"))
         assert parsed == {"candidates": [{"x": 1}]}
 

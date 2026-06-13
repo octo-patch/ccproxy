@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import json
+from typing import Any
 from unittest.mock import MagicMock
 
 from ccproxy.pipeline.context import Context
 from ccproxy.pipeline.keyspace import _walk_dict, extract_available_keys
 
 
-def _make_flow(body: dict, headers: dict | None = None) -> MagicMock:
+def _make_flow(body: dict[str, Any], headers: dict[str, str] | None = None) -> MagicMock:
     flow = MagicMock()
     flow.id = "test-id"
     flow.request.content = json.dumps(body).encode()

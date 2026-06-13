@@ -1,12 +1,13 @@
 """Tests for InspectorTracer span lifecycle (telemetry.py)."""
 
+from typing import Any
 from unittest.mock import MagicMock
 
 from ccproxy.flows.store import FlowRecord, InspectorMeta, OtelMeta
 from ccproxy.inspector.telemetry import InspectorTracer
 
 
-def _make_flow(metadata: dict | None = None) -> MagicMock:
+def _make_flow(metadata: dict[str, Any] | None = None) -> MagicMock:
     flow = MagicMock()
     flow.metadata = metadata if metadata is not None else {}
     return flow
@@ -250,6 +251,7 @@ class TestFinishSpanClientDisconnect:
         mock_span.set_attribute.assert_any_call("ccproxy.duration_ms", 123.4)
         mock_span.set_attribute.assert_any_call("ccproxy.client_disconnected", True)
         mock_span.end.assert_called_once()
+        assert record.otel is not None
         assert record.otel.ended is True
 
     def test_skips_duration_when_none(self) -> None:

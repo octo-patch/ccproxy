@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Generator
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -31,7 +32,7 @@ def _set_capacity(**overrides: Any) -> None:
 
 
 @pytest.fixture(autouse=True)
-def patch_sleep() -> AsyncMock:
+def patch_sleep() -> Generator[AsyncMock]:
     """Mock asyncio.sleep so retry tests don't actually wait."""
     with patch("ccproxy.inspector.gemini_addon.asyncio.sleep", new_callable=AsyncMock) as mock:
         yield mock
@@ -83,9 +84,10 @@ def _make_flow(
 
 
 def _capacity_response(status: int, retry_delay: str | None = None) -> MagicMock:
-    body: dict[str, Any] = {"error": {"code": status, "status": "RESOURCE_EXHAUSTED"}}
+    error: dict[str, Any] = {"code": status, "status": "RESOURCE_EXHAUSTED"}
     if retry_delay is not None:
-        body["error"]["details"] = [{"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": retry_delay}]
+        error["details"] = [{"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": retry_delay}]
+    body: dict[str, Any] = {"error": error}
     resp = MagicMock()
     resp.status_code = status
     resp.content = json.dumps(body).encode()

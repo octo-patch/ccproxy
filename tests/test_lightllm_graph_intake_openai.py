@@ -37,14 +37,29 @@ from ccproxy.lightllm.graph.openai_intake import OpenAIResponseIntakeFSM
 class _IntakeLike(Protocol):
     """Sync-callable surface around the async FSM intake."""
 
-    upstream_raw_bytes: bytearray
-    _terminated: bool
-    _model: str
-    _has_refusal: bool
-    _refusal_text: str
-    provider_response_id: str | None
-    provider_details: dict[str, object] | None
-    finish_reason: FinishReason | None
+    @property
+    def upstream_raw_bytes(self) -> bytearray: ...
+
+    @property
+    def _terminated(self) -> bool: ...
+
+    @property
+    def _model(self) -> str: ...
+
+    @property
+    def _has_refusal(self) -> bool: ...
+
+    @property
+    def _refusal_text(self) -> str: ...
+
+    @property
+    def provider_response_id(self) -> str | None: ...
+
+    @property
+    def provider_details(self) -> dict[str, object] | None: ...
+
+    @property
+    def finish_reason(self) -> FinishReason | None: ...
 
     @property
     def parts_manager(self) -> ModelResponsePartsManager: ...

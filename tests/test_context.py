@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock
 
 from pydantic_ai.messages import (
+    ModelMessage,
     ModelRequest,
     SystemPromptPart,
     UserPromptPart,
@@ -15,10 +17,10 @@ from pydantic_ai.tools import ToolDefinition
 
 from ccproxy.pipeline.context import Context
 
-_DEFAULT_BODY = {"model": "test", "messages": [], "metadata": {}}
+_DEFAULT_BODY: dict[str, Any] = {"model": "test", "messages": [], "metadata": {}}
 
 
-def _make_flow(body: dict | None = None, headers: dict | None = None) -> MagicMock:
+def _make_flow(body: dict[str, Any] | None = None, headers: dict[str, str] | None = None) -> MagicMock:
     flow = MagicMock()
     flow.id = "test-id"
     flow.metadata = {}
@@ -28,12 +30,12 @@ def _make_flow(body: dict | None = None, headers: dict | None = None) -> MagicMo
 
 
 class TestContextFromFlow:
-    def test_parses_model_from_body(self):
+    def test_parses_model_from_body(self) -> None:
         flow = _make_flow(body={"model": "claude-3", "messages": []})
         ctx = Context.from_flow(flow)
         assert ctx.model == "claude-3"
 
-    def test_parses_messages_from_body(self):
+    def test_parses_messages_from_body(self) -> None:
         msgs = [{"role": "user", "content": "hi"}]
         flow = _make_flow(body={"model": "m", "messages": msgs})
         ctx = Context.from_flow(flow)
@@ -43,26 +45,26 @@ class TestContextFromFlow:
         assert isinstance(part, UserPromptPart)
         assert part.content == "hi"
 
-    def test_body_metadata_remains_in_extras(self):
+    def test_body_metadata_remains_in_extras(self) -> None:
         flow = _make_flow(body={"model": "m", "messages": [], "metadata": {"key": "val"}})
         ctx = Context.from_flow(flow)
         assert ctx.extras.get("metadata.key") == "val"
 
-    def test_parses_system_from_body(self):
+    def test_parses_system_from_body(self) -> None:
         flow = _make_flow(body={"model": "m", "messages": [], "system": "Be helpful."})
         ctx = Context.from_flow(flow)
         assert len(ctx.system) == 1
         assert ctx.system[0].content == "Be helpful."
 
-    def test_missing_body_fields_use_defaults(self):
+    def test_missing_body_fields_use_defaults(self) -> None:
         flow = _make_flow(body={"model": "", "messages": [], "metadata": {}})
         ctx = Context.from_flow(flow)
         assert ctx.model == ""
         assert ctx.messages == []
-        assert ctx.metadata == {}
+        assert ctx.flow_metadata == {}
         assert ctx.system == []
 
-    def test_invalid_json_body_uses_empty_body(self):
+    def test_invalid_json_body_uses_empty_body(self) -> None:
         flow = MagicMock()
         flow.id = "test-id"
         flow.request.content = b"not-json"
@@ -71,7 +73,7 @@ class TestContextFromFlow:
         assert ctx.model == ""
         assert ctx.messages == []
 
-    def test_empty_body_uses_defaults(self):
+    def test_empty_body_uses_defaults(self) -> None:
         flow = MagicMock()
         flow.id = "test-id"
         flow.request.content = b""
@@ -79,7 +81,7 @@ class TestContextFromFlow:
         ctx = Context.from_flow(flow)
         assert ctx.model == ""
 
-    def test_flow_id_from_flow(self):
+    def test_flow_id_from_flow(self) -> None:
         flow = _make_flow()
         flow.id = "unique-flow-id-123"
         ctx = Context.from_flow(flow)
@@ -87,14 +89,15 @@ class TestContextFromFlow:
 
 
 class TestBodyProperties:
-    def test_messages_setter_writes_to_body(self):
+    def test_messages_setter_writes_to_body(self) -> None:
         ctx = Context.from_flow(_make_flow())
-        ctx.messages = [ModelRequest(parts=[UserPromptPart(content="test")])]
+        messages: list[ModelMessage] = [ModelRequest(parts=[UserPromptPart(content="test")])]
+        ctx.messages = messages
         ctx.commit()
         assert isinstance(ctx._body["messages"], list)
         assert ctx._body["messages"][0]["role"] == "user"
 
-    def test_system_setter_writes_to_body(self):
+    def test_system_setter_writes_to_body(self) -> None:
         ctx = Context.from_flow(_make_flow())
         ctx.system = [SystemPromptPart(content="Be helpful.")]
         ctx.commit()
@@ -105,12 +108,12 @@ class TestBodyProperties:
         else:
             assert any(block.get("text") == "Be helpful." for block in system_body)
 
-    def test_system_empty_list(self):
+    def test_system_empty_list(self) -> None:
         flow = _make_flow(body={"model": "m", "messages": []})
         ctx = Context.from_flow(flow)
         assert ctx.system == []
 
-    def test_tools_getter_and_setter(self):
+    def test_tools_getter_and_setter(self) -> None:
         ctx = Context.from_flow(
             _make_flow(
                 body={
@@ -125,48 +128,48 @@ class TestBodyProperties:
         assert len(ctx.tools) == 1
         assert ctx.tools[0].name == "read_file"
 
-    def test_tools_setter_writes_to_body(self):
+    def test_tools_setter_writes_to_body(self) -> None:
         ctx = Context.from_flow(_make_flow())
         ctx.tools = [ToolDefinition(name="test", description="Test tool", parameters_json_schema={"type": "object"})]
         ctx.commit()
         assert ctx._body["tools"][0]["name"] == "test"
 
-    def test_metadata_writes_to_ccproxy_flow_namespace(self):
+    def test_metadata_writes_to_ccproxy_flow_namespace(self) -> None:
         ctx = Context.from_flow(_make_flow())
         ctx.metadata.auth_provider = "anthropic"
         assert ctx.metadata.auth_provider == "anthropic"
         assert ctx.flow_metadata["ccproxy.auth_provider"] == "anthropic"
 
-    def test_metadata_mapping_writes_dynamic_keys(self):
+    def test_metadata_mapping_writes_dynamic_keys(self) -> None:
         ctx = Context.from_flow(_make_flow())
         ctx.metadata["new_key"] = "new_val"
         assert ctx.flow_metadata["ccproxy.new_key"] == "new_val"
 
-    def test_metadata_accepts_prefixed_keys(self):
+    def test_metadata_accepts_prefixed_keys(self) -> None:
         ctx = Context.from_flow(_make_flow())
         ctx.metadata["ccproxy.trace_id"] = "t123"
         assert ctx.metadata["trace_id"] == "t123"
         assert ctx.flow_metadata["ccproxy.trace_id"] == "t123"
 
-    def test_nested_metadata_section_writes_dotted_keys(self):
+    def test_nested_metadata_section_writes_dotted_keys(self) -> None:
         ctx = Context.from_flow(_make_flow())
         ctx.metadata.pplx.preflight = True
         assert ctx.flow_metadata["ccproxy.pplx.preflight"] is True
         assert ctx.metadata.pplx.preflight is True
 
-    def test_nested_metadata_section_reads_existing_dotted_keys(self):
+    def test_nested_metadata_section_reads_existing_dotted_keys(self) -> None:
         flow = _make_flow()
         flow.metadata["ccproxy.fingerprint.client"] = {"ja3": "abc"}
         ctx = Context.from_flow(flow)
         assert ctx.metadata.fingerprint.client == {"ja3": "abc"}
 
-    def test_nested_metadata_mapping_writes_dynamic_keys(self):
+    def test_nested_metadata_mapping_writes_dynamic_keys(self) -> None:
         ctx = Context.from_flow(_make_flow())
         ctx.metadata.pplx.source = "web"
         assert ctx.flow_metadata["ccproxy.pplx.source"] == "web"
         assert ctx.metadata.pplx.source == "web"
 
-    def test_dynamic_metadata_sections_can_nest(self):
+    def test_dynamic_metadata_sections_can_nest(self) -> None:
         ctx = Context.from_flow(_make_flow())
         ctx.metadata.custom.section.value = 3
         assert ctx.flow_metadata["ccproxy.custom.section.value"] == 3
@@ -174,26 +177,26 @@ class TestBodyProperties:
 
 
 class TestHeaderMethods:
-    def test_get_header_exact_key_match(self):
+    def test_get_header_exact_key_match(self) -> None:
         ctx = Context.from_flow(_make_flow(headers={"authorization": "Bearer tok"}))
         assert ctx.get_header("authorization") == "Bearer tok"
 
-    def test_get_header_returns_default_when_missing(self):
+    def test_get_header_returns_default_when_missing(self) -> None:
         ctx = Context.from_flow(_make_flow(headers={}))
         assert ctx.get_header("authorization") == ""
         assert ctx.get_header("x-missing", "fallback") == "fallback"
 
-    def test_set_header_empty_string_removes(self):
+    def test_set_header_empty_string_removes(self) -> None:
         ctx = Context.from_flow(_make_flow(headers={"x-api-key": "old"}))
         ctx.set_header("x-api-key", "")
         assert ctx.get_header("x-api-key") == ""
 
-    def test_convenience_header_properties(self):
+    def test_convenience_header_properties(self) -> None:
         ctx = Context.from_flow(_make_flow(headers={"authorization": "Bearer xyz", "x-api-key": "sk-123"}))
         assert ctx.authorization == "Bearer xyz"
         assert ctx.x_api_key == "sk-123"
 
-    def test_headers_snapshot_lowercased(self):
+    def test_headers_snapshot_lowercased(self) -> None:
         ctx = Context.from_flow(_make_flow(headers={"X-Custom": "val", "Content-Type": "json"}))
         snap = ctx.headers
         assert snap["x-custom"] == "val"
@@ -201,7 +204,7 @@ class TestHeaderMethods:
 
 
 class TestMetadataConvenienceProperties:
-    def test_auth_provider_getter(self):
+    def test_auth_provider_getter(self) -> None:
         flow = _make_flow(body={"model": "m", "messages": []})
         flow.metadata["ccproxy.auth_provider"] = "anthropic"
         ctx = Context.from_flow(flow)
@@ -209,7 +212,7 @@ class TestMetadataConvenienceProperties:
 
 
 class TestCommit:
-    def test_commit_writes_body_to_flow(self):
+    def test_commit_writes_body_to_flow(self) -> None:
         flow = _make_flow(body={"model": "original", "messages": []})
         ctx = Context.from_flow(flow)
         ctx.model = "updated"
@@ -217,7 +220,7 @@ class TestCommit:
         written = json.loads(flow.request.content)
         assert written["model"] == "updated"
 
-    def test_commit_keeps_ccproxy_metadata_out_of_body(self):
+    def test_commit_keeps_ccproxy_metadata_out_of_body(self) -> None:
         flow = _make_flow()
         ctx = Context.from_flow(flow)
         ctx.metadata.conversation_id = "t123"
@@ -226,7 +229,7 @@ class TestCommit:
         assert "metadata" not in written
         assert flow.metadata["ccproxy.conversation_id"] == "t123"
 
-    def test_commit_includes_system_when_set(self):
+    def test_commit_includes_system_when_set(self) -> None:
         flow = _make_flow()
         ctx = Context.from_flow(flow)
         ctx.system = [SystemPromptPart(content="Be helpful.")]
@@ -234,7 +237,7 @@ class TestCommit:
         written = json.loads(flow.request.content)
         assert written["system"] == "Be helpful."
 
-    def test_commit_round_trips_messages(self):
+    def test_commit_round_trips_messages(self) -> None:
         flow = _make_flow(
             body={
                 "model": "m",
@@ -256,7 +259,7 @@ class TestCommit:
         assert written["messages"][0]["role"] == "user"
         assert written["messages"][1]["role"] == "assistant"
 
-    def test_commit_after_reading_responses_ir_preserves_tools(self):
+    def test_commit_after_reading_responses_ir_preserves_tools(self) -> None:
         body = {
             "model": "gpt-5.5",
             "instructions": "Be direct.",
@@ -288,7 +291,7 @@ class TestCommit:
         written = json.loads(flow.request.content)
         assert written["tools"] == body["tools"]
 
-    def test_header_mutations_do_not_require_commit(self):
+    def test_header_mutations_do_not_require_commit(self) -> None:
         flow = _make_flow(headers={"x-orig": "a"})
         ctx = Context.from_flow(flow)
         ctx.set_header("x-new", "b")
@@ -296,7 +299,7 @@ class TestCommit:
 
 
 class TestFromRequest:
-    def test_from_request_wraps_bare_request(self):
+    def test_from_request_wraps_bare_request(self) -> None:
         req = MagicMock()
         req.content = json.dumps({"model": "test", "messages": [{"role": "user", "content": "hi"}]}).encode()
         req.headers = {}
@@ -305,7 +308,7 @@ class TestFromRequest:
         assert ctx.model == "test"
         assert len(ctx.messages) == 1
 
-    def test_from_request_commit_writes_to_request(self):
+    def test_from_request_commit_writes_to_request(self) -> None:
         req = MagicMock()
         req.content = json.dumps({"model": "old", "messages": []}).encode()
         req.headers = {}
@@ -315,7 +318,7 @@ class TestFromRequest:
         written = json.loads(req.content)
         assert written["model"] == "new"
 
-    def test_flow_id_empty_for_request_context(self):
+    def test_flow_id_empty_for_request_context(self) -> None:
         req = MagicMock()
         req.content = b"{}"
         req.headers = {}
@@ -324,7 +327,7 @@ class TestFromRequest:
 
 
 class TestParseSync:
-    def test_parse_sync_populates_typed_fields(self):
+    def test_parse_sync_populates_typed_fields(self) -> None:
         from ccproxy.lightllm.parsed import InboundFormat
 
         flow = _make_flow(
@@ -339,7 +342,7 @@ class TestParseSync:
         assert ctx.model == "claude-3"
         assert len(ctx.messages) == 1
 
-    def test_parse_sync_is_idempotent(self):
+    def test_parse_sync_is_idempotent(self) -> None:
         flow = _make_flow(
             body={"model": "claude-3", "messages": [{"role": "user", "content": "hi"}]},
             headers={"anthropic-version": "2023-06-01"},
@@ -353,7 +356,7 @@ class TestParseSync:
         second = ctx.messages
         assert first is second
 
-    def test_parse_sync_returns_empty_for_unknown_inbound_format(self):
+    def test_parse_sync_returns_empty_for_unknown_inbound_format(self) -> None:
         flow = _make_flow(body={"model": "?", "messages": []}, headers={})
         flow.request.path = "/unknown/path"
         ctx = Context.from_flow(flow)
@@ -366,24 +369,24 @@ class TestParseSync:
 class TestContextExtras:
     """Typed glom-pathed accessor over ``ctx._body``."""
 
-    def test_get_returns_value_for_existing_path(self):
+    def test_get_returns_value_for_existing_path(self) -> None:
         flow = _make_flow(body={"model": "m", "messages": [], "metadata": {"user_id": "u123"}})
         ctx = Context.from_flow(flow)
         assert ctx.extras.get("metadata.user_id") == "u123"
 
-    def test_get_returns_default_for_missing_path(self):
+    def test_get_returns_default_for_missing_path(self) -> None:
         flow = _make_flow(body={"model": "m", "messages": []})
         ctx = Context.from_flow(flow)
         assert ctx.extras.get("metadata.user_id", default="fallback") == "fallback"
         assert ctx.extras.get("does.not.exist") is None
 
-    def test_set_creates_nested_path(self):
+    def test_set_creates_nested_path(self) -> None:
         flow = _make_flow(body={"model": "m", "messages": []})
         ctx = Context.from_flow(flow)
         ctx.extras.set("pplx.attachments", ["s3://x", "s3://y"])
         assert ctx._body["pplx"]["attachments"] == ["s3://x", "s3://y"]
 
-    def test_delete_removes_existing_path_and_noops_missing(self):
+    def test_delete_removes_existing_path_and_noops_missing(self) -> None:
         flow = _make_flow(body={"model": "m", "messages": [], "tool_choice": "auto"})
         ctx = Context.from_flow(flow)
         ctx.extras.delete("tool_choice")
@@ -392,7 +395,7 @@ class TestContextExtras:
         ctx.extras.delete("tool_choice")
         assert "tool_choice" not in ctx._body
 
-    def test_has_distinguishes_missing_from_falsy(self):
+    def test_has_distinguishes_missing_from_falsy(self) -> None:
         flow = _make_flow(body={"model": "m", "messages": [], "x": 0, "y": None, "z": ""})
         ctx = Context.from_flow(flow)
         assert ctx.extras.has("x")  # 0 is a real value
@@ -401,7 +404,7 @@ class TestContextExtras:
         assert not ctx.extras.has("missing")
 
 
-def test_raw_ccproxy_flow_metadata_access_stays_private_to_context_facade():
+def test_raw_ccproxy_flow_metadata_access_stays_private_to_context_facade() -> None:
     root = Path(__file__).resolve().parents[1] / "src" / "ccproxy"
     allowed = (root / "pipeline" / "context.py").resolve()
     patterns = (

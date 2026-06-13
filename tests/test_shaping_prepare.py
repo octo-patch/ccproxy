@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, cast
 
 from mitmproxy import http
 
@@ -13,7 +13,12 @@ from ccproxy.shaping.prepare import strip_headers
 
 def _ctx(headers: dict[str, str] | None = None, body: dict[str, Any] | None = None) -> Context:
     content = json.dumps(body or {}).encode() if body is not None else b""
-    req = http.Request.make("POST", "https://seed.example/v1", content, headers or {})
+    req = http.Request.make(
+        "POST",
+        "https://seed.example/v1",
+        content,
+        cast(dict[str | bytes, str | bytes], headers or {}),
+    )
     return Context.from_request(req)
 
 

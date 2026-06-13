@@ -6,6 +6,7 @@ import tempfile
 import threading
 import time
 from pathlib import Path
+from typing import Any, cast
 from unittest import mock
 
 import pytest
@@ -80,10 +81,11 @@ other_settings:
         yaml_content = """
 ccproxy:
   hooks:
-    - ccproxy.hooks.rule_evaluator
-    - hook: ccproxy.hooks.capture_headers
-      params:
-        headers: [user-agent, x-request-id]
+    inbound:
+      - ccproxy.hooks.rule_evaluator
+      - hook: ccproxy.hooks.capture_headers
+        params:
+          headers: [user-agent, x-request-id]
 """
         with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
             f.write(yaml_content)
@@ -92,9 +94,10 @@ ccproxy:
         try:
             config = CCProxyConfig.from_yaml(yaml_path)
 
-            assert len(config.hooks) == 2
-            assert config.hooks[0] == "ccproxy.hooks.rule_evaluator"
-            assert config.hooks[1] == {
+            inbound_hooks = config.hooks["inbound"]
+            assert len(inbound_hooks) == 2
+            assert inbound_hooks[0] == "ccproxy.hooks.rule_evaluator"
+            assert inbound_hooks[1] == {
                 "hook": "ccproxy.hooks.capture_headers",
                 "params": {"headers": ["user-agent", "x-request-id"]},
             }
@@ -265,16 +268,16 @@ ccproxy:
 class TestGetConfigDir:
     """Tests for get_config_dir() resolution."""
 
-    def test_env_var_wins(self, tmp_path: Path, monkeypatch) -> None:
+    def test_env_var_wins(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("CCPROXY_CONFIG_DIR", str(tmp_path / "explicit"))
         assert get_config_dir() == tmp_path / "explicit"
 
-    def test_xdg_config_home(self, tmp_path: Path, monkeypatch) -> None:
+    def test_xdg_config_home(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("CCPROXY_CONFIG_DIR", raising=False)
         monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
         assert get_config_dir() == tmp_path / "xdg" / "ccproxy"
 
-    def test_default_fallback(self, tmp_path: Path, monkeypatch) -> None:
+    def test_default_fallback(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("CCPROXY_CONFIG_DIR", raising=False)
         monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
         with mock.patch.object(Path, "home", return_value=tmp_path):
@@ -340,10 +343,10 @@ class TestReadCredentialFile:
     ) -> None:
         original_resolve = Path.resolve
 
-        def mock_resolve(self: Path, *args: object, **kwargs: object) -> Path:
+        def mock_resolve(self: Path, *args: Any, **kwargs: Any) -> Path:
             if str(self).endswith("error.txt"):
                 raise PermissionError("Access Denied")
-            return original_resolve(self, *args, **kwargs)
+            return cast(Path, cast(Any, original_resolve)(self, *args, **kwargs))
 
         monkeypatch.setattr(Path, "resolve", mock_resolve)
         f = tmp_path / "error.txt"

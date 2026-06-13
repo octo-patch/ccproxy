@@ -6,7 +6,7 @@ import difflib
 import json
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from mitmproxy import http
@@ -31,7 +31,7 @@ def _flow(
         "POST",
         f"https://{host}/v1/messages",
         json.dumps(body or {"seed": "old"}).encode(),
-        headers or {"content-type": "application/json", "x-seed": "old"},
+        cast(dict[str | bytes, str | bytes], headers or {"content-type": "application/json", "x-seed": "old"}),
     )
     return flow
 
@@ -159,7 +159,7 @@ def test_store_applies_user_patch_to_fallback_shape(tmp_path: Path) -> None:
 
 
 def test_get_store_uses_configured_shape_dir_for_patch_queue(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from ccproxy.config import CCProxyConfig, set_config_instance
+    from ccproxy.config import CCProxyConfig, ShapingConfig, set_config_instance
 
     config_dir = tmp_path / "config"
     shapes_dir = tmp_path / "shapes"
@@ -174,7 +174,7 @@ def test_get_store_uses_configured_shape_dir_for_patch_queue(tmp_path: Path, mon
 
     monkeypatch.setenv("CCPROXY_CONFIG_DIR", str(config_dir))
     set_config_instance(
-        CCProxyConfig(shaping={"shapes_dir": str(shapes_dir)}),
+        CCProxyConfig(shaping=ShapingConfig.model_validate({"shapes_dir": str(shapes_dir)})),
     )
     clear_store_instance()
 

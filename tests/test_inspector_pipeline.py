@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
+from typing import Any
 from unittest.mock import MagicMock
 
 import httpx
@@ -65,20 +67,20 @@ class TestBuildExecutor:
 
 
 class TestRegisterPipelineRoutes:
-    def _capture_handler(self, executor: object) -> object:
+    def _capture_handler(self, executor: Any) -> Callable[..., Any]:
         """Register routes with a mock router and return the captured route handler."""
         mock_router = MagicMock()
-        captured: list = []
+        captured: list[Callable[..., Any]] = []
 
-        def capture_decorator(*args: object, **kwargs: object):
-            def decorator(fn: object) -> object:
+        def capture_decorator(*args: object, **kwargs: object) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+            def decorator(fn: Callable[..., Any]) -> Callable[..., Any]:
                 captured.append(fn)
                 return fn
 
             return decorator
 
         mock_router.route.side_effect = capture_decorator
-        register_pipeline_routes(mock_router, executor)  # type: ignore[arg-type]
+        register_pipeline_routes(mock_router, executor)
         assert captured, "No route handler was registered"
         return captured[0]
 

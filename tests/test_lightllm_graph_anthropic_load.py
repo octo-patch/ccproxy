@@ -8,7 +8,7 @@ non-standard TTL preservation, unknown-block preservation).
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from pydantic_ai.messages import (
@@ -712,7 +712,8 @@ class TestLossinessRegressions:
         }
         parsed = parse(body)
         assert "cc:msg:0:block:0" in parsed.raw_extras
-        assert parsed.raw_extras["cc:msg:0:block:0"]["ttl"] == "24h"
+        cache_extra = cast(dict[str, Any], parsed.raw_extras["cc:msg:0:block:0"])
+        assert cache_extra["ttl"] == "24h"
         # No CachePoint was emitted because pydantic-ai can't represent the TTL.
         up = parsed.messages[0].parts[0]
         assert isinstance(up, UserPromptPart)
@@ -731,6 +732,6 @@ class TestLossinessRegressions:
         }
         parsed = parse(body)
         assert "unknown_block:msg:0:idx:0" in parsed.raw_extras
-        stash = parsed.raw_extras["unknown_block:msg:0:idx:0"]
+        stash = cast(dict[str, Any], parsed.raw_extras["unknown_block:msg:0:idx:0"])
         assert stash["type"] == "future_block_type_2027"
         assert stash["data"] == "..."

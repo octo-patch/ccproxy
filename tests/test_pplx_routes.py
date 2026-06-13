@@ -4,12 +4,14 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from pathlib import Path
+from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
 import httpx
 from mitmproxy.proxy.mode_specs import ProxyMode
 
+from ccproxy.auth.sources import FileAuthSource
 from ccproxy.config import CCProxyConfig, McpConfig, McpHttpConfig, Provider, set_config_instance
 from ccproxy.inspector.router import InspectorRouter
 from ccproxy.inspector.routes.pplx import register_pplx_routes
@@ -35,14 +37,14 @@ _THREAD_PAGE = {
 }
 
 
-def set_pplx_config(tmp_path: Any, *, mcp_auth: str | None = None, token: str = "cookie-token") -> None:
+def set_pplx_config(tmp_path: Path, *, mcp_auth: str | None = None, token: str = "cookie-token") -> None:
     token_file = tmp_path / "pplx-token"
     token_file.write_text(token)
     set_config_instance(
         CCProxyConfig(
             providers={
                 "perplexity_pro": Provider(
-                    auth={"type": "file", "file": str(token_file)},
+                    auth=FileAuthSource(file=str(token_file)),
                     host="www.perplexity.ai",
                     path="/rest/sse/perplexity_ask",
                     type="perplexity_pro",
@@ -84,10 +86,10 @@ def _make_flow(
 
 
 def _body(flow: MagicMock) -> dict[str, Any]:
-    return json.loads(flow.response.content)
+    return cast(dict[str, Any], json.loads(flow.response.content))
 
 
-def test_skips_non_reverse_and_non_get(tmp_path: Any) -> None:
+def test_skips_non_reverse_and_non_get(tmp_path: Path) -> None:
     set_pplx_config(tmp_path)
     handler = _handler(_make_router())
 
@@ -100,7 +102,7 @@ def test_skips_non_reverse_and_non_get(tmp_path: Any) -> None:
     assert post_flow.response is None
 
 
-def test_auth_required_when_mcp_token_configured(tmp_path: Any) -> None:
+def test_auth_required_when_mcp_token_configured(tmp_path: Path) -> None:
     set_pplx_config(tmp_path, mcp_auth="secret-token")
     handler = _handler(_make_router())
 
@@ -114,7 +116,7 @@ def test_auth_required_when_mcp_token_configured(tmp_path: Any) -> None:
     assert wrong.response.status_code == 401
 
 
-def test_provider_not_configured_returns_503(tmp_path: Any) -> None:
+def test_provider_not_configured_returns_503(tmp_path: Path) -> None:
     set_config_instance(CCProxyConfig(providers={}))
     handler = _handler(_make_router())
     flow = _make_flow()
@@ -126,7 +128,7 @@ def test_provider_not_configured_returns_503(tmp_path: Any) -> None:
     assert "'perplexity_pro' not configured" in _body(flow)["error"]["message"]
 
 
-def test_empty_token_returns_503(tmp_path: Any) -> None:
+def test_empty_token_returns_503(tmp_path: Path) -> None:
     set_pplx_config(tmp_path, token="")
     handler = _handler(_make_router())
     flow = _make_flow()
@@ -137,7 +139,7 @@ def test_empty_token_returns_503(tmp_path: Any) -> None:
     assert "no session cookie resolved" in _body(flow)["error"]["message"]
 
 
-def test_happy_path_converts_thread_to_messages(tmp_path: Any) -> None:
+def test_happy_path_converts_thread_to_messages(tmp_path: Path) -> None:
     set_pplx_config(tmp_path)
     handler = _handler(_make_router())
     flow = _make_flow()
@@ -161,7 +163,7 @@ def test_happy_path_converts_thread_to_messages(tmp_path: Any) -> None:
     }
 
 
-def test_upstream_status_error_passes_through(tmp_path: Any) -> None:
+def test_upstream_status_error_passes_through(tmp_path: Path) -> None:
     set_pplx_config(tmp_path)
     handler = _handler(_make_router())
     flow = _make_flow()
@@ -174,7 +176,7 @@ def test_upstream_status_error_passes_through(tmp_path: Any) -> None:
     assert _body(flow) == {"detail": "unknown thread"}
 
 
-def test_network_error_returns_502(tmp_path: Any) -> None:
+def test_network_error_returns_502(tmp_path: Path) -> None:
     set_pplx_config(tmp_path)
     handler = _handler(_make_router())
     flow = _make_flow()

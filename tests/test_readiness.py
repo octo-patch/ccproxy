@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -16,13 +17,13 @@ from ccproxy.inspector.readiness import (
 )
 
 
-def _config(**overrides: object) -> CCProxyConfig:
-    defaults: dict[str, object] = {
+def _config(**overrides: Any) -> CCProxyConfig:
+    defaults: dict[str, Any] = {
         "readiness_probe_url": "https://canary.example.com/",
         "readiness_probe_timeout_seconds": 5.0,
     }
     defaults.update(overrides)
-    return CCProxyConfig(**defaults)  # type: ignore[arg-type]
+    return CCProxyConfig(**defaults)
 
 
 def _mock_async_client_with(behaviour: object) -> MagicMock:

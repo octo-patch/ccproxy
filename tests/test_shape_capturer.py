@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Generator
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -18,7 +19,7 @@ from ccproxy.shaping.store import ShapeStore, clear_store_instance
 
 
 @pytest.fixture()
-def store(tmp_path: Path) -> Any:
+def store(tmp_path: Path) -> Generator[ShapeStore]:
     from ccproxy.config import CCProxyConfig, set_config_instance
     from ccproxy.shaping.store import _store_lock
 
@@ -40,7 +41,10 @@ def _flow(flow_id: str = "abc123") -> http.HTTPFlow:
         "POST",
         "https://api.anthropic.com/v1/messages",
         b'{"model": "claude", "messages": [{"role": "user", "content": "hi"}]}',
-        {"x-app": "cli", "user-agent": "test-cli/1.0", "content-type": "application/json"},
+        cast(
+            dict[str | bytes, str | bytes],
+            {"x-app": "cli", "user-agent": "test-cli/1.0", "content-type": "application/json"},
+        ),
     )
     return f
 
@@ -89,7 +93,7 @@ def _run_shape(
         side_effect=lambda fid: flows_by_id.get(fid),
     ):
         result = capturer.save_shape_artifact(ids, provider, mode)
-    return json.loads(result)
+    return cast(dict[str, Any], json.loads(result))
 
 
 class TestShapeCaptureAddon:

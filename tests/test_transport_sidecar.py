@@ -56,13 +56,16 @@ class _CallableAsyncTransport(httpx.AsyncBaseTransport):
         return self.handler(request)
 
 
+type RunningSidecar = tuple[Sidecar, _CallableAsyncTransport]
+
+
 # ---------------------------------------------------------------------------
 # Shared fixture: Sidecar + pluggable transport
 # ---------------------------------------------------------------------------
 
 
 @pytest.fixture
-async def running_sidecar():
+async def running_sidecar() -> AsyncIterator[RunningSidecar]:
     """Start a Sidecar with a swappable async transport. Yield (sidecar, transport).
 
     Tests set ``transport.handler = lambda req: httpx.Response(...)`` before
@@ -189,7 +192,7 @@ class TestSidecarLifecycle:
 
 
 class TestTwoHeaderContract:
-    async def test_missing_target_url_returns_400(self, running_sidecar) -> None:
+    async def test_missing_target_url_returns_400(self, running_sidecar: RunningSidecar) -> None:
         sidecar, _ = running_sidecar
         async with httpx.AsyncClient() as client:
             resp = await client.get(
@@ -199,7 +202,7 @@ class TestTwoHeaderContract:
         assert resp.status_code == 400
         assert TARGET_URL_HEADER in resp.text
 
-    async def test_missing_impersonate_returns_400(self, running_sidecar) -> None:
+    async def test_missing_impersonate_returns_400(self, running_sidecar: RunningSidecar) -> None:
         sidecar, _ = running_sidecar
         async with httpx.AsyncClient() as client:
             resp = await client.get(
@@ -209,13 +212,13 @@ class TestTwoHeaderContract:
         assert resp.status_code == 400
         assert IMPERSONATE_HEADER in resp.text
 
-    async def test_both_headers_missing_returns_400(self, running_sidecar) -> None:
+    async def test_both_headers_missing_returns_400(self, running_sidecar: RunningSidecar) -> None:
         sidecar, _ = running_sidecar
         async with httpx.AsyncClient() as client:
             resp = await client.get(f"http://127.0.0.1:{sidecar.port}/v1/messages")
         assert resp.status_code == 400
 
-    async def test_error_body_mentions_missing_headers(self, running_sidecar) -> None:
+    async def test_error_body_mentions_missing_headers(self, running_sidecar: RunningSidecar) -> None:
         sidecar, _ = running_sidecar
         async with httpx.AsyncClient() as client:
             resp = await client.get(f"http://127.0.0.1:{sidecar.port}/v1/messages")
@@ -229,7 +232,7 @@ class TestTwoHeaderContract:
 
 
 class TestInvalidTargetUrl:
-    async def test_url_without_hostname_returns_400(self, running_sidecar) -> None:
+    async def test_url_without_hostname_returns_400(self, running_sidecar: RunningSidecar) -> None:
         sidecar, _ = running_sidecar
         async with httpx.AsyncClient() as client:
             resp = await client.get(
@@ -242,7 +245,7 @@ class TestInvalidTargetUrl:
         assert resp.status_code == 400
         assert "invalid target URL" in resp.text
 
-    async def test_invalid_url_body_includes_target(self, running_sidecar) -> None:
+    async def test_invalid_url_body_includes_target(self, running_sidecar: RunningSidecar) -> None:
         sidecar, _ = running_sidecar
         bad_url = "///no-host-here"
         async with httpx.AsyncClient() as client:
@@ -290,7 +293,7 @@ class TestInvalidProfile:
 
 
 class TestHappyPathForwarding:
-    async def test_status_code_propagates(self, running_sidecar) -> None:
+    async def test_status_code_propagates(self, running_sidecar: RunningSidecar) -> None:
         sidecar, async_transport = running_sidecar
 
         def handler(request: httpx.Request) -> httpx.Response:
@@ -315,7 +318,7 @@ class TestHappyPathForwarding:
             assert resp.status_code == 201
             await resp.aread()
 
-    async def test_response_body_propagates(self, running_sidecar) -> None:
+    async def test_response_body_propagates(self, running_sidecar: RunningSidecar) -> None:
         sidecar, async_transport = running_sidecar
         expected_body = b'{"id":"msg-123","type":"message"}'
 
@@ -341,7 +344,7 @@ class TestHappyPathForwarding:
             body = await resp.aread()
         assert body == expected_body
 
-    async def test_response_header_propagates(self, running_sidecar) -> None:
+    async def test_response_header_propagates(self, running_sidecar: RunningSidecar) -> None:
         sidecar, async_transport = running_sidecar
 
         def handler(request: httpx.Request) -> httpx.Response:
@@ -367,7 +370,7 @@ class TestHappyPathForwarding:
             await resp.aread()
         assert resp.headers.get("x-request-id") == "req-abc"
 
-    async def test_method_forwarded(self, running_sidecar) -> None:
+    async def test_method_forwarded(self, running_sidecar: RunningSidecar) -> None:
         sidecar, async_transport = running_sidecar
         received_method: list[str] = []
 
@@ -391,7 +394,7 @@ class TestHappyPathForwarding:
             await resp.aread()
         assert received_method == ["POST"]
 
-    async def test_custom_request_header_forwarded(self, running_sidecar) -> None:
+    async def test_custom_request_header_forwarded(self, running_sidecar: RunningSidecar) -> None:
         sidecar, async_transport = running_sidecar
         received_headers: list[dict[str, str]] = []
 
@@ -420,7 +423,7 @@ class TestHappyPathForwarding:
         assert hdrs.get("x-custom-header") == "custom-value"
         assert hdrs.get("authorization") == "Bearer mytoken"
 
-    async def test_request_body_forwarded(self, running_sidecar) -> None:
+    async def test_request_body_forwarded(self, running_sidecar: RunningSidecar) -> None:
         sidecar, async_transport = running_sidecar
         received_body: list[bytes] = []
 
@@ -452,7 +455,7 @@ class TestHappyPathForwarding:
 
 
 class TestRelayHeaderFiltering:
-    async def test_contract_headers_not_forwarded(self, running_sidecar) -> None:
+    async def test_contract_headers_not_forwarded(self, running_sidecar: RunningSidecar) -> None:
         """TARGET_URL_HEADER and IMPERSONATE_HEADER are not forwarded upstream."""
         sidecar, async_transport = running_sidecar
         received_headers: list[dict[str, str]] = []
@@ -479,7 +482,7 @@ class TestRelayHeaderFiltering:
         assert TARGET_URL_HEADER not in hdrs
         assert IMPERSONATE_HEADER not in hdrs
 
-    async def test_proxy_authorization_not_forwarded(self, running_sidecar) -> None:
+    async def test_proxy_authorization_not_forwarded(self, running_sidecar: RunningSidecar) -> None:
         """Hop-by-hop proxy-authorization header is stripped and not forwarded upstream.
 
         We use proxy-authorization rather than 'connection' because httpx itself
@@ -510,7 +513,7 @@ class TestRelayHeaderFiltering:
             await resp.aread()
         assert "proxy-authorization" not in received_headers[0]
 
-    async def test_transfer_encoding_not_forwarded(self, running_sidecar) -> None:
+    async def test_transfer_encoding_not_forwarded(self, running_sidecar: RunningSidecar) -> None:
         sidecar, async_transport = running_sidecar
         received_headers: list[dict[str, str]] = []
 
@@ -535,7 +538,7 @@ class TestRelayHeaderFiltering:
             await resp.aread()
         assert "transfer-encoding" not in received_headers[0]
 
-    async def test_relay_excluded_response_headers_stripped(self, running_sidecar) -> None:
+    async def test_relay_excluded_response_headers_stripped(self, running_sidecar: RunningSidecar) -> None:
         """Relay-excluded response headers are stripped before relaying.
 
         The upstream transport returns raw headers that include excluded entries;
@@ -655,7 +658,7 @@ class TestTransportError:
 
 
 class TestStreamingResponse:
-    async def test_streaming_chunks_delivered(self, running_sidecar) -> None:
+    async def test_streaming_chunks_delivered(self, running_sidecar: RunningSidecar) -> None:
         """Upstream streaming response is fully delivered to the client."""
         sidecar, async_transport = running_sidecar
         chunk_a = b"data: first chunk\n\n"
@@ -688,7 +691,7 @@ class TestStreamingResponse:
         assert chunk_a in bytes(received)
         assert chunk_b in bytes(received)
 
-    async def test_streaming_decodes_content_encoding_for_clients(self, running_sidecar) -> None:
+    async def test_streaming_decodes_content_encoding_for_clients(self, running_sidecar: RunningSidecar) -> None:
         sidecar, async_transport = running_sidecar
         body = b"data: decoded chunk\n\n"
         encoded = gzip.compress(body)
@@ -723,7 +726,7 @@ class TestStreamingResponse:
 
         assert bytes(received) == body
 
-    async def test_streaming_status_code_propagates(self, running_sidecar) -> None:
+    async def test_streaming_status_code_propagates(self, running_sidecar: RunningSidecar) -> None:
         sidecar, async_transport = running_sidecar
 
         def handler(request: httpx.Request) -> httpx.Response:
@@ -748,7 +751,7 @@ class TestStreamingResponse:
             async for _ in resp.aiter_bytes():
                 pass
 
-    async def test_streaming_delivers_correct_chunk_count(self, running_sidecar) -> None:
+    async def test_streaming_delivers_correct_chunk_count(self, running_sidecar: RunningSidecar) -> None:
         sidecar, async_transport = running_sidecar
         chunks = [b"chunk-%d\n" % i for i in range(5)]
 
@@ -813,7 +816,7 @@ MISSING_HEADER_CASES: list[MissingHeaderCase] = [
     "case",
     [pytest.param(c, id=c.name) for c in MISSING_HEADER_CASES],
 )
-async def test_missing_header_yields_400(case: MissingHeaderCase, running_sidecar) -> None:
+async def test_missing_header_yields_400(case: MissingHeaderCase, running_sidecar: RunningSidecar) -> None:
     sidecar, _ = running_sidecar
     async with httpx.AsyncClient() as client:
         resp = await client.get(

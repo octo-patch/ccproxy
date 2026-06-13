@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
 from ccproxy.specs import (
@@ -28,14 +30,14 @@ def test_long_context_betas() -> None:
 
 def test_api_request_params_round_trip_anthropic_shape() -> None:
     """A typical Anthropic request body parses cleanly and round-trips."""
-    body = {
+    body: dict[str, Any] = {
         "model": "claude-haiku-4-5-20251001",
         "messages": [{"role": "user", "content": "hi"}],
         "max_tokens": 1024,
         "stream": True,
         "system": [{"type": "text", "text": "system prompt"}],
     }
-    params = APIRequestParams(**body)
+    params = APIRequestParams.model_validate(body)
     assert params.model == "claude-haiku-4-5-20251001"
     assert params.max_tokens == 1024
     assert params.stream is True
@@ -44,7 +46,7 @@ def test_api_request_params_round_trip_anthropic_shape() -> None:
 
 def test_api_request_params_allows_extra_fields() -> None:
     """Permissive: unknown fields don't error so we don't break on new server fields."""
-    params = APIRequestParams(model="x", future_field={"k": "v"})
+    params = APIRequestParams.model_validate({"model": "x", "future_field": {"k": "v"}})
     assert params.model == "x"
     # extra="allow" exposes unknown fields via model_extra
     assert params.model_extra == {"future_field": {"k": "v"}}

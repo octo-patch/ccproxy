@@ -34,7 +34,7 @@ from ccproxy.config import clear_config_instance
 
 class TestInitConfig:
     @patch("ccproxy.cli.get_templates_dir")
-    def test_init_fresh(self, mock_get_templates: Mock, tmp_path: Path, capsys) -> None:
+    def test_init_fresh(self, mock_get_templates: Mock, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
         """Test fresh initialization."""
         templates_dir = tmp_path / "templates"
         templates_dir.mkdir()
@@ -54,7 +54,9 @@ class TestInitConfig:
         assert "Next steps:" in captured.out
 
     @patch("ccproxy.cli.get_templates_dir")
-    def test_init_exists_no_force(self, mock_get_templates: Mock, tmp_path: Path, capsys) -> None:
+    def test_init_exists_no_force(
+        self, mock_get_templates: Mock, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
         """Test init skips existing files without force and reports nothing to initialize."""
         templates_dir = tmp_path / "templates"
         templates_dir.mkdir()
@@ -75,7 +77,9 @@ class TestInitConfig:
         assert "Nothing to install" in captured.out
 
     @patch("ccproxy.cli.get_templates_dir")
-    def test_init_with_force(self, mock_get_templates: Mock, tmp_path: Path, capsys) -> None:
+    def test_init_with_force(
+        self, mock_get_templates: Mock, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
         """Test init with force overwrites existing files."""
         templates_dir = tmp_path / "templates"
         templates_dir.mkdir()
@@ -94,7 +98,9 @@ class TestInitConfig:
         assert "Installed ccproxy.yaml" in captured.out
 
     @patch("ccproxy.cli.get_templates_dir")
-    def test_init_template_not_found(self, mock_get_templates: Mock, tmp_path: Path, capsys) -> None:
+    def test_init_template_not_found(
+        self, mock_get_templates: Mock, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
         """Test init when template file is missing."""
         templates_dir = tmp_path / "templates"
         templates_dir.mkdir()
@@ -117,7 +123,7 @@ class TestInitConfig:
                 init_config(config_dir)
             assert exc_info.value.code == 1
 
-    def test_init_skip_existing_file(self, tmp_path: Path, capsys) -> None:
+    def test_init_skip_existing_file(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
         """Test init skips existing files without force flag."""
         templates_dir = tmp_path / "templates"
         templates_dir.mkdir()
@@ -137,7 +143,7 @@ class TestInitConfig:
 
 
 class TestRunWithProxy:
-    def test_run_no_config(self, tmp_path: Path, capsys) -> None:
+    def test_run_no_config(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
         """Test run when config doesn't exist."""
         with pytest.raises(SystemExit) as exc_info:
             run_with_proxy(tmp_path, ["echo", "test"])
@@ -148,7 +154,7 @@ class TestRunWithProxy:
         assert "Run 'ccproxy init' first" in captured.err
 
     @patch("subprocess.run")
-    def test_run_with_proxy_success(self, mock_run: Mock, tmp_path: Path, monkeypatch) -> None:
+    def test_run_with_proxy_success(self, mock_run: Mock, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Test successful command execution with proxy environment."""
         config_file = tmp_path / "ccproxy.yaml"
         config_file.write_text("""
@@ -174,7 +180,7 @@ ccproxy:
         assert env["ANTHROPIC_BASE_URL"] == "http://192.168.1.1:8888"
 
     @patch("subprocess.run")
-    def test_run_with_env_override(self, mock_run: Mock, tmp_path: Path, monkeypatch) -> None:
+    def test_run_with_env_override(self, mock_run: Mock, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Test run with environment variable overrides."""
         config_file = tmp_path / "ccproxy.yaml"
         config_file.write_text("""
@@ -197,7 +203,7 @@ ccproxy:
         assert env["OPENAI_API_BASE"] == "http://10.0.0.1:9999"
 
     @patch("subprocess.run")
-    def test_run_with_inspect_running(self, mock_run: Mock, tmp_path: Path, monkeypatch) -> None:
+    def test_run_with_inspect_running(self, mock_run: Mock, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Test run with inspect - client still connects to main port (transparent proxy)."""
         config_file = tmp_path / "ccproxy.yaml"
         config_file.write_text("""
@@ -226,7 +232,9 @@ ccproxy:
         assert env["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:4000"
 
     @patch("subprocess.run")
-    def test_run_with_inspect_not_running(self, mock_run: Mock, tmp_path: Path, monkeypatch) -> None:
+    def test_run_with_inspect_not_running(
+        self, mock_run: Mock, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """Test run without inspect routes directly to LiteLLM."""
         config_file = tmp_path / "ccproxy.yaml"
         config_file.write_text("""
@@ -257,7 +265,9 @@ ccproxy:
         assert "HTTP_PROXY" not in env or env.get("HTTP_PROXY") == os.environ.get("HTTP_PROXY")
 
     @patch("subprocess.run")
-    def test_run_command_not_found(self, mock_run: Mock, tmp_path: Path, capsys, monkeypatch) -> None:
+    def test_run_command_not_found(
+        self, mock_run: Mock, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """Test run with non-existent command."""
         config_file = tmp_path / "ccproxy.yaml"
         config_file.write_text("ccproxy: {}")
@@ -274,7 +284,9 @@ ccproxy:
         assert "Command not found: nonexistent" in captured.err
 
     @patch("subprocess.run")
-    def test_run_command_keyboard_interrupt(self, mock_run: Mock, tmp_path: Path, monkeypatch) -> None:
+    def test_run_command_keyboard_interrupt(
+        self, mock_run: Mock, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """Test run with keyboard interrupt."""
         config_file = tmp_path / "ccproxy.yaml"
         config_file.write_text("ccproxy: {}")
@@ -385,7 +397,9 @@ class TestViewLogs:
 
 class TestShowStatus:
     @patch("socket.create_connection")
-    def test_status_json_proxy_running(self, mock_conn: Mock, tmp_path: Path, capsys, monkeypatch) -> None:
+    def test_status_json_proxy_running(
+        self, mock_conn: Mock, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """Test status JSON output with proxy running."""
         ccproxy_config = tmp_path / "ccproxy.yaml"
         ccproxy_config.write_text("""
@@ -414,7 +428,9 @@ ccproxy:
         assert status["log"] is None
 
     @patch("socket.create_connection", side_effect=OSError)
-    def test_status_json_proxy_stopped(self, mock_conn: Mock, tmp_path: Path, capsys, monkeypatch) -> None:
+    def test_status_json_proxy_stopped(
+        self, mock_conn: Mock, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """Test status JSON output with proxy stopped."""
         ccproxy_config = tmp_path / "ccproxy.yaml"
         ccproxy_config.write_text("""
@@ -435,7 +451,9 @@ ccproxy:
         assert status["log"] is None
 
     @patch("socket.create_connection", side_effect=OSError)
-    def test_status_json_no_config(self, mock_conn: Mock, tmp_path: Path, capsys, monkeypatch) -> None:
+    def test_status_json_no_config(
+        self, mock_conn: Mock, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """Test status JSON output with no config files."""
         monkeypatch.setenv("CCPROXY_CONFIG_DIR", str(tmp_path))
         monkeypatch.chdir(tmp_path)
@@ -449,7 +467,9 @@ ccproxy:
         assert status["config"] == {}
 
     @patch("socket.create_connection", side_effect=OSError)
-    def test_status_json_proxy_not_reachable(self, mock_conn: Mock, tmp_path: Path, capsys, monkeypatch) -> None:
+    def test_status_json_proxy_not_reachable(
+        self, mock_conn: Mock, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """Test status JSON output when proxy port is not reachable."""
         monkeypatch.setenv("CCPROXY_CONFIG_DIR", str(tmp_path))
         clear_config_instance()
@@ -461,7 +481,9 @@ ccproxy:
         assert status["proxy"] is False
 
     @patch("socket.create_connection")
-    def test_status_rich_output_proxy_running(self, mock_conn: Mock, tmp_path: Path, capsys, monkeypatch) -> None:
+    def test_status_rich_output_proxy_running(
+        self, mock_conn: Mock, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """Test status rich output with proxy running."""
         ccproxy_config = tmp_path / "ccproxy.yaml"
         ccproxy_config.write_text("""
@@ -495,7 +517,9 @@ ccproxy:
         # Full-path verification lives in the JSON test (status["log"]).
         assert "log" in captured.out
 
-    def test_status_rich_output_no_config(self, tmp_path: Path, capsys, monkeypatch) -> None:
+    def test_status_rich_output_no_config(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """Test status rich output with no config files."""
         monkeypatch.setenv("CCPROXY_CONFIG_DIR", str(tmp_path))
         clear_config_instance()
@@ -647,7 +671,7 @@ class TestNamespaceCommands:
 
 class TestMainFunction:
     @patch("ccproxy.cli.start_server")
-    def test_main_start_command(self, mock_start: Mock, tmp_path: Path, monkeypatch) -> None:
+    def test_main_start_command(self, mock_start: Mock, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Test main with start command."""
         monkeypatch.setenv("CCPROXY_CONFIG_DIR", str(tmp_path))
         clear_config_instance()
@@ -657,7 +681,7 @@ class TestMainFunction:
         mock_start.assert_called_once_with(tmp_path)
 
     @patch("ccproxy.cli.init_config")
-    def test_main_init_command(self, mock_init: Mock, tmp_path: Path, monkeypatch) -> None:
+    def test_main_init_command(self, mock_init: Mock, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Test main with init command."""
         monkeypatch.setenv("CCPROXY_CONFIG_DIR", str(tmp_path))
         clear_config_instance()
@@ -667,7 +691,7 @@ class TestMainFunction:
         mock_init.assert_called_once_with(tmp_path, force=True)
 
     @patch("ccproxy.cli.run_with_proxy")
-    def test_main_run_command(self, mock_run: Mock, tmp_path: Path, monkeypatch) -> None:
+    def test_main_run_command(self, mock_run: Mock, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Test main with run command."""
         monkeypatch.setenv("CCPROXY_CONFIG_DIR", str(tmp_path))
         clear_config_instance()
@@ -676,7 +700,9 @@ class TestMainFunction:
 
         mock_run.assert_called_once_with(tmp_path, ["echo", "hello", "world"], inspect=False)
 
-    def test_main_run_no_args(self, tmp_path: Path, capsys, monkeypatch) -> None:
+    def test_main_run_no_args(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """Test main run command without arguments shows help."""
         monkeypatch.setenv("CCPROXY_CONFIG_DIR", str(tmp_path))
         clear_config_instance()
@@ -706,7 +732,7 @@ class TestMainFunction:
             mock_start.assert_called_once_with(default_dir)
 
     @patch("ccproxy.cli.view_logs")
-    def test_main_logs_command(self, mock_logs: Mock, tmp_path: Path, monkeypatch) -> None:
+    def test_main_logs_command(self, mock_logs: Mock, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Test main with logs command."""
         monkeypatch.setenv("CCPROXY_CONFIG_DIR", str(tmp_path))
         clear_config_instance()
@@ -716,7 +742,7 @@ class TestMainFunction:
         mock_logs.assert_called_once_with(follow=True, lines=50, config_dir=tmp_path)
 
     @patch("ccproxy.cli.show_status")
-    def test_main_status_command(self, mock_status: Mock, tmp_path: Path, monkeypatch) -> None:
+    def test_main_status_command(self, mock_status: Mock, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Test main with status command."""
         monkeypatch.setenv("CCPROXY_CONFIG_DIR", str(tmp_path))
         clear_config_instance()
@@ -733,7 +759,7 @@ class TestMainFunction:
         )
 
     @patch("ccproxy.cli.show_status")
-    def test_main_status_command_json(self, mock_status: Mock, tmp_path: Path, monkeypatch) -> None:
+    def test_main_status_command_json(self, mock_status: Mock, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Test main with status command with JSON output."""
         monkeypatch.setenv("CCPROXY_CONFIG_DIR", str(tmp_path))
         clear_config_instance()
@@ -750,7 +776,9 @@ class TestMainFunction:
         )
 
     @patch("ccproxy.cli.run_namespace_status")
-    def test_main_namespace_status_command(self, mock_status: Mock, tmp_path: Path, monkeypatch) -> None:
+    def test_main_namespace_status_command(
+        self, mock_status: Mock, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """Test main with namespace status command."""
         monkeypatch.setenv("CCPROXY_CONFIG_DIR", str(tmp_path))
         clear_config_instance()
@@ -760,7 +788,9 @@ class TestMainFunction:
         mock_status.assert_called_once_with(tmp_path, json_output=True)
 
     @patch("ccproxy.cli.run_namespace_doctor")
-    def test_main_namespace_doctor_command(self, mock_doctor: Mock, tmp_path: Path, monkeypatch) -> None:
+    def test_main_namespace_doctor_command(
+        self, mock_doctor: Mock, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """Test main with namespace doctor command."""
         monkeypatch.setenv("CCPROXY_CONFIG_DIR", str(tmp_path))
         clear_config_instance()
@@ -770,7 +800,9 @@ class TestMainFunction:
         mock_doctor.assert_called_once_with(tmp_path, json_output=True)
 
     @patch("ccproxy.cli.run_namespace_wireguard_config")
-    def test_main_namespace_wireguard_config_command(self, mock_wg: Mock, tmp_path: Path, monkeypatch) -> None:
+    def test_main_namespace_wireguard_config_command(
+        self, mock_wg: Mock, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """Test main with namespace wireguard-config command."""
         monkeypatch.setenv("CCPROXY_CONFIG_DIR", str(tmp_path))
         clear_config_instance()

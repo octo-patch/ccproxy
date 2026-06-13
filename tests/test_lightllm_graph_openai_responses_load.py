@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from pydantic_ai.messages import (
@@ -296,7 +296,7 @@ class TestReasoning:
         assert "Thinking about it." in part.content
         assert "Step 1: ..." in part.content
 
-        stash = result.raw_extras.get("openai_responses:reasoning:0")
+        stash = cast(dict[str, Any] | None, result.raw_extras.get("openai_responses:reasoning:0"))
         assert stash is not None
         assert stash["encrypted_content"] == "OPAQUE_BLOB"
         # Full structured dict preserved for round-trip
@@ -319,7 +319,7 @@ class TestRawExtrasStash:
         }
         body = {"model": "gpt-5", "input": [item]}
         result = parse(body)
-        stash = result.raw_extras.get("openai_responses:server_tool:0")
+        stash = cast(dict[str, Any] | None, result.raw_extras.get("openai_responses:server_tool:0"))
         assert stash is not None
         assert stash["type"] == "web_search_call"
         # Item ID also recorded for previous_response_id chaining
@@ -329,7 +329,7 @@ class TestRawExtrasStash:
         item = {"type": "speculative_future_kind", "value": 42}
         body = {"model": "gpt-5", "input": [item]}
         result = parse(body)
-        stash = result.raw_extras.get("openai_responses:unknown_item:0")
+        stash = cast(dict[str, Any] | None, result.raw_extras.get("openai_responses:unknown_item:0"))
         assert stash is not None
         assert stash["type"] == "speculative_future_kind"
 

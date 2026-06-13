@@ -5,6 +5,7 @@ covers the envelope-unwrap responsibilities of the addon.
 """
 
 import json
+from typing import Literal
 from unittest.mock import MagicMock
 
 import pytest
@@ -33,7 +34,7 @@ def _set_capacity(*, enabled: bool, fallback_models: list[str] | None = None) ->
 def _make_gemini_flow(
     *,
     is_streaming: bool = True,
-    mode: str = "redirect",
+    mode: Literal["redirect", "transform"] = "redirect",
     status_code: int = 200,
     content: bytes | None = None,
     content_type: str = "text/event-stream",
@@ -55,7 +56,7 @@ def _make_gemini_flow(
             model="gemini-2.5-flash",
             request_data={},
             is_streaming=is_streaming,
-            mode=mode,  # type: ignore[arg-type]
+            mode=mode,
         )
         metadata[InspectorMeta.RECORD] = record
 

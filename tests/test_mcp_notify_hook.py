@@ -1,6 +1,7 @@
 """Tests for inject_mcp_notifications pipeline hook."""
 
 import json
+from typing import Any
 from unittest.mock import MagicMock
 
 from pydantic_ai.messages import (
@@ -19,8 +20,11 @@ from ccproxy.mcp.buffer import get_buffer
 from ccproxy.pipeline.context import Context
 
 
-def make_ctx(messages=None, session_id=None):
-    body: dict = {"model": "test-model", "messages": messages if messages is not None else []}
+def make_ctx(
+    messages: list[dict[str, Any]] | None = None,
+    session_id: str | None = None,
+) -> Context:
+    body: dict[str, Any] = {"model": "test-model", "messages": messages if messages is not None else []}
     flow = MagicMock()
     flow.id = "test-id"
     flow.request.content = json.dumps(body).encode()
@@ -31,11 +35,11 @@ def make_ctx(messages=None, session_id=None):
     return Context.from_flow(flow)
 
 
-def user_msg(text="hello"):
+def user_msg(text: str = "hello") -> dict[str, Any]:
     return {"role": "user", "content": text}
 
 
-def assistant_msg(text="hi"):
+def assistant_msg(text: str = "hi") -> dict[str, Any]:
     return {"role": "assistant", "content": text}
 
 
@@ -44,24 +48,24 @@ def assistant_msg(text="hi"):
 # ---------------------------------------------------------------------------
 
 
-def test_guard_false_no_messages():
+def test_guard_false_no_messages() -> None:
     ctx = make_ctx(messages=[], session_id="sess-1")
     assert inject_mcp_notifications_guard(ctx) is False
 
 
-def test_guard_false_no_session_id():
+def test_guard_false_no_session_id() -> None:
     ctx = make_ctx(messages=[user_msg()], session_id=None)
     assert inject_mcp_notifications_guard(ctx) is False
 
 
-def test_guard_false_buffer_empty_for_session():
+def test_guard_false_buffer_empty_for_session() -> None:
     buf = get_buffer()
     buf.append("task-other", "sess-other", {"type": "output"})
     ctx = make_ctx(messages=[user_msg()], session_id="sess-1")
     assert inject_mcp_notifications_guard(ctx) is False
 
 
-def test_guard_true_buffer_has_events():
+def test_guard_true_buffer_has_events() -> None:
     buf = get_buffer()
     buf.append("task-1", "sess-1", {"type": "output", "text": "done"})
     ctx = make_ctx(messages=[user_msg()], session_id="sess-1")
@@ -73,7 +77,7 @@ def test_guard_true_buffer_has_events():
 # ---------------------------------------------------------------------------
 
 
-def test_noop_empty_buffer():
+def test_noop_empty_buffer() -> None:
     messages = [user_msg("hello")]
     ctx = make_ctx(messages=messages, session_id="sess-1")
     result = inject_mcp_notifications(ctx, {})
@@ -81,7 +85,7 @@ def test_noop_empty_buffer():
     assert isinstance(result.messages[0], ModelRequest)
 
 
-def test_noop_no_session_id():
+def test_noop_no_session_id() -> None:
     messages = [user_msg("hello")]
     ctx = make_ctx(messages=messages, session_id=None)
     get_buffer().append("task-1", "sess-1", {"type": "output"})
@@ -94,9 +98,9 @@ def test_noop_no_session_id():
 # ---------------------------------------------------------------------------
 
 
-def test_injects_pair_for_single_task():
+def test_injects_pair_for_single_task() -> None:
     buf = get_buffer()
-    events = [
+    events: list[dict[str, Any]] = [
         {"type": "output", "text": "line 1"},
         {"type": "output", "text": "line 2"},
         {"type": "exit", "code": 0},
@@ -126,6 +130,7 @@ def test_injects_pair_for_single_task():
     tr = user.parts[0]
     assert isinstance(tr, ToolReturnPart)
     assert tr.tool_call_id == tc.tool_call_id
+    assert isinstance(tr.content, str)
     assert json.loads(tr.content) == {
         "task_id": "task-1",
         "status": "watching",
@@ -138,7 +143,7 @@ def test_injects_pair_for_single_task():
     assert isinstance(final.parts[0], UserPromptPart)
 
 
-def test_buffer_drained_after_inject():
+def test_buffer_drained_after_inject() -> None:
     buf = get_buffer()
     buf.append("task-1", "sess-1", {"type": "output"})
 
@@ -148,7 +153,7 @@ def test_buffer_drained_after_inject():
     assert not buf.has_events_for_session("sess-1")
 
 
-def test_session_isolation():
+def test_session_isolation() -> None:
     buf = get_buffer()
     buf.append("task-a", "sess-A", {"type": "output", "text": "a"})
     buf.append("task-b", "sess-B", {"type": "output", "text": "b"})
@@ -167,7 +172,7 @@ def test_session_isolation():
     assert not buf.has_events_for_session("sess-A")
 
 
-def test_multiple_task_ids_same_session():
+def test_multiple_task_ids_same_session() -> None:
     buf = get_buffer()
     buf.append("task-1", "sess-1", {"type": "output", "text": "t1"})
     buf.append("task-2", "sess-1", {"type": "output", "text": "t2"})
@@ -189,11 +194,12 @@ def test_multiple_task_ids_same_session():
     for i in [0, 2]:
         tc = result.messages[i].parts[0]
         assert isinstance(tc, ToolCallPart)
+        assert isinstance(tc.args, dict)
         task_ids.add(tc.args["taskId"])
     assert task_ids == {"task-1", "task-2"}
 
 
-def test_insertion_before_final_user_message():
+def test_insertion_before_final_user_message() -> None:
     prior = [assistant_msg("prev"), user_msg("earlier"), assistant_msg("ok")]
     final = user_msg("final")
     messages = [*prior, final]
@@ -213,7 +219,7 @@ def test_insertion_before_final_user_message():
     assert isinstance(final_msg.parts[0], UserPromptPart)
 
 
-def test_tool_use_id_format():
+def test_tool_use_id_format() -> None:
     buf = get_buffer()
     buf.append("task-1", "sess-1", {"type": "output"})
 

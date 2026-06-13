@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from unittest.mock import MagicMock
 
+import pytest
+
 from ccproxy.hooks.verbose_mode import verbose_mode
 from ccproxy.pipeline.context import Context
 
@@ -55,10 +57,10 @@ class TestVerboseMode:
         # Empty string means header was removed by set_header("")
         assert result.get_header("anthropic-beta") == ""
 
-    def test_logs_when_stripped(self, caplog: object) -> None:
+    def test_logs_when_stripped(self, caplog: pytest.LogCaptureFixture) -> None:
         import logging
 
-        with caplog.at_level(logging.INFO, logger="ccproxy.hooks.verbose_mode"):  # type: ignore[union-attr]
+        with caplog.at_level(logging.INFO, logger="ccproxy.hooks.verbose_mode"):
             ctx = _make_ctx(anthropic_beta="redact-thinking-2025")
             verbose_mode(ctx, {})
-        assert any("stripped" in rec.message.lower() for rec in caplog.records)  # type: ignore[union-attr]
+        assert any("stripped" in rec.message.lower() for rec in caplog.records)

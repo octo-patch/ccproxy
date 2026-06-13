@@ -18,64 +18,64 @@ from ccproxy.flows.store import (
 
 
 class TestFlowRecordDataclass:
-    def test_default_values(self):
+    def test_default_values(self) -> None:
         record = FlowRecord("inbound")
         assert record.source == "unknown"
         assert record.auth is None
         assert record.otel is None
         assert record.client_request is None
 
-    def test_auth_meta_defaults(self):
+    def test_auth_meta_defaults(self) -> None:
         auth = AuthMeta(provider="anthropic", credential="tok", auth_header="Authorization")
         assert auth.injected is False
         assert auth.original_key == ""
 
-    def test_otel_meta_defaults(self):
+    def test_otel_meta_defaults(self) -> None:
         otel = OtelMeta()
         assert otel.span is None
         assert otel.ended is False
 
 
 class TestCreateFlowRecord:
-    def test_returns_uuid_and_record(self):
+    def test_returns_uuid_and_record(self) -> None:
         flow_id, record = create_flow_record("inbound")
         uuid.UUID(flow_id)
         assert isinstance(record, FlowRecord)
 
-    def test_unique_ids(self):
+    def test_unique_ids(self) -> None:
         id1, _ = create_flow_record("inbound")
         id2, _ = create_flow_record("inbound")
         assert id1 != id2
 
-    def test_inbound_direction(self):
+    def test_inbound_direction(self) -> None:
         _, record = create_flow_record("inbound")
         assert record.direction == "inbound"
 
-    def test_source_can_be_stamped(self):
+    def test_source_can_be_stamped(self) -> None:
         _, record = create_flow_record("inbound", source="wireguard")
         assert record.source == "wireguard"
 
 
 class TestGetFlowRecord:
-    def test_found(self):
+    def test_found(self) -> None:
         flow_id, record = create_flow_record("inbound")
         retrieved = get_flow_record(flow_id)
         assert retrieved is record
 
-    def test_not_found(self):
+    def test_not_found(self) -> None:
         assert get_flow_record("nonexistent-id") is None
 
-    def test_empty_string_key(self):
+    def test_empty_string_key(self) -> None:
         assert get_flow_record("") is None
 
-    def test_expired_record(self, monkeypatch: pytest.MonkeyPatch):
+    def test_expired_record(self, monkeypatch: pytest.MonkeyPatch) -> None:
         import time as stdlib_time
 
         base = stdlib_time.time()
 
         call_count = 0
 
-        def fake_time():
+        def fake_time() -> float:
             nonlocal call_count
             call_count += 1
             if call_count == 1:
@@ -86,14 +86,14 @@ class TestGetFlowRecord:
         flow_id, _ = create_flow_record("inbound")
         assert get_flow_record(flow_id) is None
 
-    def test_boundary_exactly_at_ttl(self, monkeypatch: pytest.MonkeyPatch):
+    def test_boundary_exactly_at_ttl(self, monkeypatch: pytest.MonkeyPatch) -> None:
         import time as stdlib_time
 
         base = stdlib_time.time()
 
         call_count = 0
 
-        def fake_time():
+        def fake_time() -> float:
             nonlocal call_count
             call_count += 1
             if call_count == 1:
@@ -105,14 +105,14 @@ class TestGetFlowRecord:
         retrieved = get_flow_record(flow_id)
         assert retrieved is record
 
-    def test_boundary_just_past_ttl(self, monkeypatch: pytest.MonkeyPatch):
+    def test_boundary_just_past_ttl(self, monkeypatch: pytest.MonkeyPatch) -> None:
         import time as stdlib_time
 
         base = stdlib_time.time()
 
         call_count = 0
 
-        def fake_time():
+        def fake_time() -> float:
             nonlocal call_count
             call_count += 1
             if call_count == 1:
@@ -123,14 +123,14 @@ class TestGetFlowRecord:
         flow_id, _ = create_flow_record("inbound")
         assert get_flow_record(flow_id) is None
 
-    def test_expired_record_deleted(self, monkeypatch: pytest.MonkeyPatch):
+    def test_expired_record_deleted(self, monkeypatch: pytest.MonkeyPatch) -> None:
         import time as stdlib_time
 
         base = stdlib_time.time()
 
         call_count = 0
 
-        def fake_time():
+        def fake_time() -> float:
             nonlocal call_count
             call_count += 1
             if call_count == 1:
@@ -144,13 +144,13 @@ class TestGetFlowRecord:
 
 
 class TestCleanupExpired:
-    def test_cleanup_removes_only_expired(self, monkeypatch: pytest.MonkeyPatch):
+    def test_cleanup_removes_only_expired(self, monkeypatch: pytest.MonkeyPatch) -> None:
         import time as stdlib_time
 
         t = stdlib_time.time()
         timestamps: list[float] = []
 
-        def fake_time():
+        def fake_time() -> float:
             return timestamps[-1] if timestamps else t
 
         monkeypatch.setattr(fs.time, "time", fake_time)
@@ -173,26 +173,26 @@ class TestCleanupExpired:
         assert id3 not in fs._flow_store
         assert id4 in fs._flow_store
 
-    def test_cleanup_on_empty_store(self):
+    def test_cleanup_on_empty_store(self) -> None:
         clear_flow_store()
         id_, _ = create_flow_record("inbound")
         assert get_flow_record(id_) is not None
 
 
 class TestClearFlowStore:
-    def test_clears_all(self):
+    def test_clears_all(self) -> None:
         ids = [create_flow_record("inbound")[0] for _ in range(5)]
         clear_flow_store()
         for fid in ids:
             assert get_flow_record(fid) is None
 
-    def test_clear_empty(self):
+    def test_clear_empty(self) -> None:
         clear_flow_store()
         clear_flow_store()
 
 
 class TestConcurrency:
-    def test_concurrent_create(self):
+    def test_concurrent_create(self) -> None:
         with ThreadPoolExecutor(max_workers=10) as pool:
             futures = [pool.submit(create_flow_record, "inbound") for _ in range(10)]
             results = [f.result() for f in futures]
@@ -201,10 +201,10 @@ class TestConcurrency:
         for fid in ids:
             uuid.UUID(fid)
 
-    def test_concurrent_get_during_clear(self):
+    def test_concurrent_get_during_clear(self) -> None:
         ids = [create_flow_record("inbound")[0] for _ in range(20)]
 
-        def get_all():
+        def get_all() -> None:
             for fid in ids:
                 get_flow_record(fid)
 

@@ -10,7 +10,8 @@ fmt:
     uv run ruff format .
 
 typecheck:
-    uv run mypy src/ccproxy
+    uv run mypy src/ccproxy tests --no-incremental
+    uv run ty check src tests --output-format concise
 
 package-mflows *ARGS:
     uv run python scripts/package_mflows.py {{ARGS}}

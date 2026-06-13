@@ -16,7 +16,7 @@ import stat
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 import httpx
 import pytest
@@ -72,7 +72,7 @@ def _make_source(
         def _wrapped(rt: str) -> Any:
             return original_refresh(source, rt, transport=transport)
 
-        source._refresh_token = _wrapped  # type: ignore[method-assign]
+        cast(Any, source)._refresh_token = _wrapped
     return source
 
 

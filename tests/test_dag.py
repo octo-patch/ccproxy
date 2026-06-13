@@ -2,17 +2,26 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
+
 import pytest
 
+from ccproxy.pipeline.context import Context
 from ccproxy.pipeline.dag import HookDAG
-from ccproxy.pipeline.hook import HookSpec
+from ccproxy.pipeline.hook import HookParams, HookSpec
 
 
-def _noop(ctx, params):
+def _noop(ctx: Context, params: HookParams) -> Context:
     return ctx
 
 
-def make_spec(name: str, *, reads=(), writes=(), priority: int = 0) -> HookSpec:
+def make_spec(
+    name: str,
+    *,
+    reads: Iterable[str] = (),
+    writes: Iterable[str] = (),
+    priority: int = 0,
+) -> HookSpec:
     return HookSpec(
         name=name,
         handler=_noop,
@@ -23,18 +32,18 @@ def make_spec(name: str, *, reads=(), writes=(), priority: int = 0) -> HookSpec:
 
 
 class TestExecutionOrder:
-    def test_single_hook(self):
+    def test_single_hook(self) -> None:
         dag = HookDAG([make_spec("only")])
         assert dag.execution_order == ["only"]
 
-    def test_no_deps_alphabetic_fallback(self):
+    def test_no_deps_alphabetic_fallback(self) -> None:
         """Independent hooks with equal priority fall back to insertion/heap order."""
         hooks = [make_spec("a"), make_spec("b"), make_spec("c")]
         dag = HookDAG(hooks)
         assert set(dag.execution_order) == {"a", "b", "c"}
         assert len(dag.execution_order) == 3
 
-    def test_dependency_ordering(self):
+    def test_dependency_ordering(self) -> None:
         """Writer must precede reader when priority is consistent."""
         hooks = [
             make_spec("reader", reads=["key"], priority=1),
@@ -44,7 +53,7 @@ class TestExecutionOrder:
         order = dag.execution_order
         assert order.index("writer") < order.index("reader")
 
-    def test_chain_ordering(self):
+    def test_chain_ordering(self) -> None:
         """A writes key1 -> B reads key1 writes key2 -> C reads key2."""
         hooks = [
             make_spec("c", reads=["key2"], priority=2),
@@ -56,7 +65,7 @@ class TestExecutionOrder:
         assert order.index("a") < order.index("b")
         assert order.index("b") < order.index("c")
 
-    def test_bidirectional_keys_resolve_via_priority(self):
+    def test_bidirectional_keys_resolve_via_priority(self) -> None:
         """Two hooks that read+write overlapping keys order by priority."""
         hooks = [
             make_spec("x", reads=["b_key"], writes=["a_key"], priority=0),
@@ -67,7 +76,7 @@ class TestExecutionOrder:
 
 
 class TestPriorityTiebreaking:
-    def test_priority_tiebreaking(self):
+    def test_priority_tiebreaking(self) -> None:
         """Priority field breaks ties among independent hooks."""
         hooks = [
             make_spec("c_hook", priority=2),
@@ -79,7 +88,7 @@ class TestPriorityTiebreaking:
             f"Expected priority ordering, got {dag.execution_order}"
         )
 
-    def test_priority_gates_dependencies(self):
+    def test_priority_gates_dependencies(self) -> None:
         """Dependency edges only form from lower-priority writer to higher-priority reader.
 
         Here the writer has a later priority than the reader, so the reader
@@ -92,7 +101,7 @@ class TestPriorityTiebreaking:
         dag = HookDAG(hooks)
         assert dag.execution_order == ["early_reader", "late_writer"]
 
-    def test_dependency_when_priority_is_consistent(self):
+    def test_dependency_when_priority_is_consistent(self) -> None:
         """Writer with lower priority → reader with higher priority gets an edge."""
         hooks = [
             make_spec("writer", writes=["key"], priority=0),
@@ -102,11 +111,11 @@ class TestPriorityTiebreaking:
         assert dag.execution_order == ["writer", "reader"]
         assert dag.get_dependencies("reader") == {"writer"}
 
-    def test_priority_default_is_zero(self):
+    def test_priority_default_is_zero(self) -> None:
         spec = make_spec("h")
         assert spec.priority == 0
 
-    def test_priority_negative_runs_first(self):
+    def test_priority_negative_runs_first(self) -> None:
         """Negative priority values are valid and sort before zero."""
         hooks = [
             make_spec("normal", priority=0),
@@ -115,7 +124,7 @@ class TestPriorityTiebreaking:
         dag = HookDAG(hooks)
         assert dag.execution_order == ["urgent", "normal"]
 
-    def test_priority_mixed_deps_and_priority(self):
+    def test_priority_mixed_deps_and_priority(self) -> None:
         """Three hooks: x (prio 5) is independent, a->b chain (prio 0)."""
         hooks = [
             make_spec("x", priority=5),
@@ -131,14 +140,14 @@ class TestPriorityTiebreaking:
 
 
 class TestParallelGroups:
-    def test_independent_hooks_in_one_group(self):
+    def test_independent_hooks_in_one_group(self) -> None:
         hooks = [make_spec("a"), make_spec("b"), make_spec("c")]
         dag = HookDAG(hooks)
         groups = dag.parallel_groups
         assert len(groups) == 1
         assert groups[0] == {"a", "b", "c"}
 
-    def test_chain_produces_sequential_groups(self):
+    def test_chain_produces_sequential_groups(self) -> None:
         hooks = [
             make_spec("a", writes=["k1"], priority=0),
             make_spec("b", reads=["k1"], writes=["k2"], priority=1),
@@ -151,7 +160,7 @@ class TestParallelGroups:
         assert groups[1] == {"b"}
         assert groups[2] == {"c"}
 
-    def test_parallel_groups_contain_all_hooks(self):
+    def test_parallel_groups_contain_all_hooks(self) -> None:
         hooks = [
             make_spec("a", writes=["k"], priority=0),
             make_spec("b", priority=1),
@@ -165,7 +174,7 @@ class TestParallelGroups:
 
 
 class TestGetHooksInOrder:
-    def test_returns_specs_in_order(self):
+    def test_returns_specs_in_order(self) -> None:
         hooks = [
             make_spec("writer", writes=["k"], priority=0),
             make_spec("reader", reads=["k"], priority=1),
@@ -174,19 +183,19 @@ class TestGetHooksInOrder:
         specs = dag.get_hooks_in_order()
         assert [s.name for s in specs] == dag.execution_order
 
-    def test_get_hook_by_name(self):
+    def test_get_hook_by_name(self) -> None:
         dag = HookDAG([make_spec("foo")])
         spec = dag.get_hook("foo")
         assert spec.name == "foo"
 
-    def test_get_hook_missing_raises(self):
+    def test_get_hook_missing_raises(self) -> None:
         dag = HookDAG([make_spec("foo")])
         with pytest.raises(KeyError):
             dag.get_hook("missing")
 
 
 class TestDependencyQueries:
-    def test_get_dependencies(self):
+    def test_get_dependencies(self) -> None:
         hooks = [
             make_spec("writer", writes=["k"], priority=0),
             make_spec("reader", reads=["k"], priority=1),
@@ -195,7 +204,7 @@ class TestDependencyQueries:
         assert dag.get_dependencies("reader") == {"writer"}
         assert dag.get_dependencies("writer") == set()
 
-    def test_get_dependents(self):
+    def test_get_dependents(self) -> None:
         hooks = [
             make_spec("writer", writes=["k"], priority=0),
             make_spec("reader", reads=["k"], priority=1),
@@ -206,7 +215,7 @@ class TestDependencyQueries:
 
 
 class TestMermaidRender:
-    def test_render_golden_chain(self):
+    def test_render_golden_chain(self) -> None:
         """Golden test: A writes k1 -> B reads k1 + writes k2 -> C reads k2."""
         hooks = [
             make_spec("c", reads=["k2"], priority=2),
@@ -232,13 +241,13 @@ class TestMermaidRender:
         )
         assert rendered == expected
 
-    def test_render_single_hook_is_source_and_sink(self):
+    def test_render_single_hook_is_source_and_sink(self) -> None:
         dag = HookDAG([make_spec("solo")])
         rendered = dag.render()
         assert "[*] --> solo" in rendered
         assert "solo --> [*]" in rendered
 
-    def test_render_default_title_and_direction(self):
+    def test_render_default_title_and_direction(self) -> None:
         dag = HookDAG([make_spec("h1")])
         rendered = dag.render()
         assert "title: hook_dag" in rendered

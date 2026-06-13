@@ -1,6 +1,7 @@
 """Tests for MitmwebClient and the flows CLI subcommands in ccproxy.flows."""
 
 from pathlib import Path
+from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
 import httpx
@@ -141,11 +142,12 @@ class TestMitmwebClientPost:
         client._client = MagicMock()
         client._client.post.return_value = mock_resp
 
-        assert client._xsrf is None
+        assert cast(Any, client)._xsrf is None
         client._post("/clear")
 
-        assert client._xsrf is not None
-        assert len(client._xsrf) == 32  # secrets.token_hex(16) → 32 hex chars
+        xsrf = cast(Any, client)._xsrf
+        assert isinstance(xsrf, str)
+        assert len(xsrf) == 32  # secrets.token_hex(16) → 32 hex chars
 
     def test_post_reuses_existing_xsrf_token(self) -> None:
         mock_resp = MagicMock()
@@ -460,7 +462,7 @@ class TestRunJq:
 class TestFlowReplSession:
     """Tests for the interactive flows REPL facade."""
 
-    def _flow(self, id: str, status_code: int = 200) -> dict:
+    def _flow(self, id: str, status_code: int = 200) -> dict[str, Any]:
         return {
             "id": id,
             "request": {
@@ -575,7 +577,7 @@ class TestDoList:
         path: str = "/v1/chat/completions",
         method: str = "POST",
         status_code: int = 200,
-    ) -> dict:
+    ) -> dict[str, Any]:
         return {
             "id": id,
             "request": {
@@ -702,7 +704,7 @@ class TestDoDiff:
 class TestDoCompare:
     """Tests for _do_compare — per-flow client-vs-forwarded diff."""
 
-    def _make_har_json(self, flows: list[dict]) -> str:
+    def _make_har_json(self, flows: list[dict[str, Any]]) -> str:
         """Build a minimal HAR JSON string for compare testing."""
         import json
 

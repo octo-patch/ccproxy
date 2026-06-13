@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
+from typing import cast
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -46,10 +48,10 @@ def _run_dump(flow: http.HTTPFlow | None, flow_id: str) -> str:
     master.addons.get.return_value = view
     with patch("ccproxy.inspector.flow_lookup.ctx") as mock_ctx:
         mock_ctx.master = master
-        return saver.dump_flows(flow_id)
+        return cast(str, saver.dump_flows(flow_id))
 
 
-def _run_dump_multi(flows_by_id: dict[str, http.HTTPFlow | None], flow_ids_csv: str) -> str:
+def _run_dump_multi(flows_by_id: Mapping[str, http.HTTPFlow | None], flow_ids_csv: str) -> str:
     """Invoke dump_flows with multiple flows identified by comma-separated ids."""
     saver = MultiHARSaver()
     view = MagicMock()
@@ -58,7 +60,7 @@ def _run_dump_multi(flows_by_id: dict[str, http.HTTPFlow | None], flow_ids_csv: 
     master.addons.get.return_value = view
     with patch("ccproxy.inspector.flow_lookup.ctx") as mock_ctx:
         mock_ctx.master = master
-        return saver.dump_flows(flow_ids_csv)
+        return cast(str, saver.dump_flows(flow_ids_csv))
 
 
 class TestFlowLookup:

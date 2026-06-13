@@ -57,7 +57,8 @@ def _frames(events: Iterable[dict[str, Any]]) -> bytes:
 class _IntakeLike(Protocol):
     """Sync-callable surface around the async FSM intake."""
 
-    upstream_raw_bytes: bytearray
+    @property
+    def upstream_raw_bytes(self) -> bytearray: ...
 
     @property
     def parts_manager(self) -> ModelResponsePartsManager: ...
@@ -370,7 +371,7 @@ class TestRoundtrip:
             request_params=request_params,
         )
 
-        events = [
+        events: list[dict[str, Any]] = [
             {
                 "type": "message_start",
                 "message": {
@@ -414,7 +415,7 @@ class TestRoundtrip:
         assert len(parts) == 1
         promoted = parts[0]
         assert isinstance(promoted, ToolSearchCallPart)
-        assert promoted.tool_name == "web_search"
+        assert str(promoted.tool_name) == "web_search"
         assert promoted.tool_kind == "tool-search"
 
     def test_thinking_stream_assembles_thinking_part(self, intake_factory: _IntakeFactory) -> None:

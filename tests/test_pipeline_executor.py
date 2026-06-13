@@ -3,31 +3,33 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Generator, Iterable
+from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
 
 from ccproxy.pipeline.context import Context
 from ccproxy.pipeline.executor import PipelineExecutor
-from ccproxy.pipeline.hook import HookSpec, always_true
+from ccproxy.pipeline.hook import GuardFn, HandlerFn, HookParams, HookSpec, always_true
 
 
-def _noop(ctx: Context, params: dict) -> Context:
+def _noop(ctx: Context, params: HookParams) -> Context:
     return ctx
 
 
-def _failing(ctx: Context, params: dict) -> Context:
+def _failing(ctx: Context, params: HookParams) -> Context:
     raise ValueError("intentional failure")
 
 
 def make_spec(
     name: str,
     *,
-    handler=None,
-    reads=(),
-    writes=(),
+    handler: HandlerFn | None = None,
+    reads: Iterable[str] = (),
+    writes: Iterable[str] = (),
     priority: int = 0,
-    guard=None,
+    guard: GuardFn | None = None,
 ) -> HookSpec:
     return HookSpec(
         name=name,
@@ -39,7 +41,7 @@ def make_spec(
     )
 
 
-def _make_flow(body: dict | None = None) -> MagicMock:
+def _make_flow(body: dict[str, Any] | None = None) -> MagicMock:
     flow = MagicMock()
     flow.id = "test-flow-id"
     flow.metadata = {}
@@ -55,7 +57,7 @@ def _make_flow(body: dict | None = None) -> MagicMock:
 
 
 @pytest.fixture(autouse=True)
-def cleanup():
+def cleanup() -> Generator[None]:
     from ccproxy.config import clear_config_instance
 
     yield
@@ -63,17 +65,17 @@ def cleanup():
 
 
 class TestPipelineExecutorBasic:
-    def test_executes_empty_pipeline(self):
+    def test_executes_empty_pipeline(self) -> None:
         flow = _make_flow()
         executor = PipelineExecutor(hooks=[])
         executor.execute(flow)
         body = json.loads(flow.request.content)
         assert body["model"] == "test-model"
 
-    def test_executes_single_hook(self):
-        calls = []
+    def test_executes_single_hook(self) -> None:
+        calls: list[str] = []
 
-        def record(ctx, params):
+        def record(ctx: Context, params: HookParams) -> Context:
             calls.append("ran")
             return ctx
 
@@ -82,11 +84,11 @@ class TestPipelineExecutorBasic:
         executor.execute(flow)
         assert calls == ["ran"]
 
-    def test_error_isolation_continues(self):
+    def test_error_isolation_continues(self) -> None:
         """A failing hook should not block subsequent hooks."""
-        calls = []
+        calls: list[str] = []
 
-        def after(ctx, params):
+        def after(ctx: Context, params: HookParams) -> Context:
             calls.append("after")
             return ctx
 
@@ -100,10 +102,10 @@ class TestPipelineExecutorBasic:
         executor.execute(flow)
         assert "after" in calls
 
-    def test_passes_extra_params(self):
-        received = {}
+    def test_passes_extra_params(self) -> None:
+        received: dict[str, Any] = {}
 
-        def capture(ctx, params):
+        def capture(ctx: Context, params: HookParams) -> Context:
             received.update(params)
             return ctx
 
@@ -115,10 +117,10 @@ class TestPipelineExecutorBasic:
         executor.execute(flow)
         assert received["my_key"] == "my_val"
 
-    def test_hook_override_force_skip(self):
-        calls = []
+    def test_hook_override_force_skip(self) -> None:
+        calls: list[str] = []
 
-        def record(ctx, params):
+        def record(ctx: Context, params: HookParams) -> Context:
             calls.append("ran")
             return ctx
 
@@ -128,13 +130,13 @@ class TestPipelineExecutorBasic:
         executor.execute(flow)
         assert calls == []
 
-    def test_hook_override_force_run_skips_guard(self):
-        calls = []
+    def test_hook_override_force_run_skips_guard(self) -> None:
+        calls: list[str] = []
 
         def never_run(ctx: Context) -> bool:
             return False
 
-        def record(ctx, params):
+        def record(ctx: Context, params: HookParams) -> Context:
             calls.append("ran")
             return ctx
 
@@ -144,7 +146,7 @@ class TestPipelineExecutorBasic:
         executor.execute(flow)
         assert calls == ["ran"]
 
-    def test_hook_override_logs_debug(self, caplog):
+    def test_hook_override_logs_debug(self, caplog: pytest.LogCaptureFixture) -> None:
         import logging
 
         flow = _make_flow()
@@ -153,7 +155,7 @@ class TestPipelineExecutorBasic:
         with caplog.at_level(logging.DEBUG, logger="ccproxy.pipeline.executor"):
             executor.execute(flow)
 
-    def test_runtime_warning_on_missing_read_key(self, caplog):
+    def test_runtime_warning_on_missing_read_key(self, caplog: pytest.LogCaptureFixture) -> None:
         """Hook reads a key not in the request body or headers → runtime warning."""
         import logging
 
@@ -168,7 +170,7 @@ class TestPipelineExecutorBasic:
         assert any("trace_id=test-flow-id" in r.message for r in caplog.records)
         assert any("path=/v1/messages" in r.message for r in caplog.records)
 
-    def test_no_warning_when_key_present_in_body(self, caplog):
+    def test_no_warning_when_key_present_in_body(self, caplog: pytest.LogCaptureFixture) -> None:
         """`reads=["metadata"]` resolves silently when body has metadata."""
         import logging
 
@@ -180,7 +182,7 @@ class TestPipelineExecutorBasic:
 
         assert not any("unavailable keys" in r.message for r in caplog.records)
 
-    def test_no_warning_when_key_present_in_header(self, caplog):
+    def test_no_warning_when_key_present_in_header(self, caplog: pytest.LogCaptureFixture) -> None:
         """`reads=["authorization"]` resolves silently when header is set."""
         import logging
 
@@ -193,7 +195,7 @@ class TestPipelineExecutorBasic:
 
         assert not any("unavailable keys" in r.message for r in caplog.records)
 
-    def test_earlier_hook_writes_satisfy_later_reads(self, caplog):
+    def test_earlier_hook_writes_satisfy_later_reads(self, caplog: pytest.LogCaptureFixture) -> None:
         """A key produced by an earlier hook's writes must not trigger a warning
         for a later hook that reads it."""
         import logging
@@ -211,7 +213,7 @@ class TestPipelineExecutorBasic:
 
         assert not any("computed_key" in r.message for r in caplog.records)
 
-    def test_dot_path_read_resolves(self, caplog):
+    def test_dot_path_read_resolves(self, caplog: pytest.LogCaptureFixture) -> None:
         """`reads=["metadata.user_id"]` resolves against nested body dict."""
         import logging
 
@@ -223,7 +225,7 @@ class TestPipelineExecutorBasic:
 
         assert not any("unavailable keys" in r.message for r in caplog.records)
 
-    def test_guard_skip_logs_debug(self, caplog):
+    def test_guard_skip_logs_debug(self, caplog: pytest.LogCaptureFixture) -> None:
         import logging
 
         def never_run(ctx: Context) -> bool:
@@ -235,10 +237,10 @@ class TestPipelineExecutorBasic:
             executor.execute(flow)
         assert any("skipped" in r.message for r in caplog.records)
 
-    def test_hook_mutates_metadata_proxy(self):
+    def test_hook_mutates_metadata_proxy(self) -> None:
         """Hook metadata mutations are stored in the ccproxy flow namespace."""
 
-        def touch_metadata(ctx, params):
+        def touch_metadata(ctx: Context, params: HookParams) -> Context:
             ctx.metadata.auth_injected = True
             return ctx
 
@@ -247,10 +249,10 @@ class TestPipelineExecutorBasic:
         executor.execute(flow)
         assert flow.metadata["ccproxy.auth_injected"] is True
 
-    def test_hook_mutates_headers_live(self):
+    def test_hook_mutates_headers_live(self) -> None:
         """Hook header mutations are applied to flow.request.headers immediately."""
 
-        def set_hdr(ctx, params):
+        def set_hdr(ctx: Context, params: HookParams) -> Context:
             ctx.set_header("x-test", "injected")
             return ctx
 
@@ -261,12 +263,12 @@ class TestPipelineExecutorBasic:
 
 
 class TestPipelineExecutorIntrospection:
-    def test_get_execution_order(self):
+    def test_get_execution_order(self) -> None:
         executor = PipelineExecutor(hooks=[make_spec("a", writes=["k"]), make_spec("b", reads=["k"])])
         order = executor.get_execution_order()
         assert order.index("a") < order.index("b")
 
-    def test_get_parallel_groups(self):
+    def test_get_parallel_groups(self) -> None:
         executor = PipelineExecutor(hooks=[make_spec("x"), make_spec("y")])
         groups = executor.get_parallel_groups()
         assert len(groups) == 1
@@ -274,34 +276,34 @@ class TestPipelineExecutorIntrospection:
 
 
 class TestHookSpec:
-    def _make_flow_ctx(self, body: dict | None = None) -> Context:
+    def _make_flow_ctx(self, body: dict[str, Any] | None = None) -> Context:
         flow = _make_flow(body)
         return Context.from_flow(flow)
 
-    def test_hash_by_name(self):
+    def test_hash_by_name(self) -> None:
         s1 = make_spec("h")
         s2 = make_spec("h")
         assert hash(s1) == hash(s2)
         assert s1 == s2
 
-    def test_eq_different_names(self):
+    def test_eq_different_names(self) -> None:
         s1 = make_spec("a")
         s2 = make_spec("b")
         assert s1 != s2
 
-    def test_eq_non_hookspec(self):
+    def test_eq_non_hookspec(self) -> None:
         s = make_spec("h")
         assert s.__eq__("not-a-hookspec") == NotImplemented
 
-    def test_should_run_default_guard(self):
+    def test_should_run_default_guard(self) -> None:
         s = make_spec("h")
         ctx = self._make_flow_ctx()
         assert s.should_run(ctx) is True
 
-    def test_execute_passes_params(self):
-        received = {}
+    def test_execute_passes_params(self) -> None:
+        received: dict[str, Any] = {}
 
-        def capture(ctx, params):
+        def capture(ctx: Context, params: HookParams) -> Context:
             received.update(params)
             return ctx
 

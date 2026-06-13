@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, cast
 
 from mitmproxy import http
 
@@ -18,7 +18,7 @@ def _shape_ctx(body: dict[str, Any]) -> Context:
         "POST",
         "https://shape.example/v1/messages?beta=true",
         json.dumps(body).encode(),
-        {"user-agent": "claude-cli/2.0", "anthropic-beta": "oauth-2025"},
+        cast(dict[str | bytes, str | bytes], {"user-agent": "claude-cli/2.0", "anthropic-beta": "oauth-2025"}),
     )
     return Context.from_request(req)
 
@@ -28,7 +28,7 @@ def _incoming_ctx(body: dict[str, Any]) -> Context:
         "POST",
         "https://incoming.example/v1/messages",
         json.dumps(body).encode(),
-        {},
+        cast(dict[str | bytes, str | bytes], {}),
     )
     return Context.from_request(req)
 
@@ -165,14 +165,14 @@ class TestQueryParamMerge:
             "POST",
             "https://api.example.com/v1/messages?beta=true&version=2",
             b"{}",
-            {},
+            cast(dict[str | bytes, str | bytes], {}),
         )
         flow = tflow.tflow()
         flow.request = http.Request.make(
             "POST",
             "https://api.example.com/v1/messages",
             b"{}",
-            {"authorization": "Bearer token"},
+            cast(dict[str | bytes, str | bytes], {"authorization": "Bearer token"}),
         )
         ctx = Context.from_flow(flow)
 

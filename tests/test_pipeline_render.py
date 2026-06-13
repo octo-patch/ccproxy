@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 from pydantic import BaseModel
 from rich.console import Console
@@ -76,7 +76,7 @@ class TestRenderPipeline:
         spec = _spec("rate_limit", reads=[], writes=[], model=RateLimitParams)
         sig = _render_signature(spec)
         assert sig is not None
-        assert sig.plain == "max_rpm: int\nburst: int"  # type: ignore[union-attr]
+        assert cast(Any, sig).plain == "max_rpm: int\nburst: int"
 
         text = _render(spec)
         assert "max_rpm: int" in text
@@ -86,7 +86,7 @@ class TestRenderPipeline:
         spec = _spec("rate_limit", reads=[], writes=[], model=RateLimitParams, params={"max_rpm": 120})
         sig = _render_signature(spec)
         assert sig is not None
-        assert sig.plain == "max_rpm: 120\nburst: int"  # type: ignore[union-attr]
+        assert cast(Any, sig).plain == "max_rpm: 120\nburst: int"
 
         text = _render(spec)
         assert "max_rpm: 120" in text

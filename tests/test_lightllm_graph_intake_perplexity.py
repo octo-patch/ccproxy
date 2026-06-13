@@ -48,7 +48,8 @@ class _StateView(Protocol):
 class _IntakeLike(Protocol):
     """Sync-callable surface around the async FSM intake."""
 
-    upstream_raw_bytes: bytearray
+    @property
+    def upstream_raw_bytes(self) -> bytearray: ...
 
     @property
     def parts_manager(self) -> ModelResponsePartsManager: ...

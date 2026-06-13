@@ -267,7 +267,7 @@ FlowRef = int | str | dict[str, Any]
 def _run_jq(
     flows: list[dict[str, Any]],
     filter_str: str,
-) -> list[dict[str, Any]]:
+) -> list[Any]:
     """Run a jq filter over a flows list. Filter must produce a JSON array."""
     proc = subprocess.run(  # noqa: S603
         ["jq", "-c", filter_str],  # noqa: S607
@@ -285,7 +285,7 @@ def _run_jq(
         raise ValueError(
             f"jq filter must produce a JSON array, got {type(output).__name__}",
         )
-    return output  # type: ignore[no-any-return]
+    return cast(list[Any], output)
 
 
 def _resolve_flow_set(
@@ -298,7 +298,7 @@ def _resolve_flow_set(
     filters = [*flows_cfg.default_jq_filters, *cmd.jq_filter]
     if not filters:
         return raw
-    return _run_jq(raw, " | ".join(filters))
+    return cast(list[dict[str, Any]], _run_jq(raw, " | ".join(filters)))
 
 
 def _resolve_flow_ref(flow_set: list[dict[str, Any]], ref: FlowRef) -> dict[str, Any]:
@@ -381,13 +381,13 @@ class FlowReplSession:
         """Reload flows from mitmweb and reapply config + CLI filters."""
         flow_set = self.client.list_flows()
         for filter_str in [*self.default_jq_filters, *self.jq_filter]:
-            flow_set = _run_jq(flow_set, filter_str)
+            flow_set = cast(list[dict[str, Any]], _run_jq(flow_set, filter_str))
         self._set_flows(list(flow_set))
         return self.flows
 
     def apply(self, filter_str: str) -> list[dict[str, Any]]:
         """Apply a jq array filter to the current in-memory flow set."""
-        self._set_flows(_run_jq(self.flows, filter_str))
+        self._set_flows(cast(list[dict[str, Any]], _run_jq(self.flows, filter_str)))
         return self.flows
 
     def request(self, ref: FlowRef = 0, *, pretty: bool = True) -> str:

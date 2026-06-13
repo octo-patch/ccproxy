@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
+from typing import Any, cast
 from unittest.mock import MagicMock
 
 from ccproxy.pipeline.context import Context
 from ccproxy.pipeline.hook import (
+    HookParams,
     HookSpec,
     _HookRegistry,
     get_registry,
@@ -23,18 +25,18 @@ def _make_ctx() -> Context:
 
 
 class TestHookRegistry:
-    def setup_method(self):
+    def setup_method(self) -> None:
         self.reg = _HookRegistry()
 
-    def test_register_and_get(self):
+    def test_register_and_get(self) -> None:
         spec = HookSpec(name="my_hook", handler=lambda ctx, p: ctx)
         self.reg.register_spec(spec)
         assert self.reg.get_spec("my_hook") is spec
 
-    def test_get_missing_returns_none(self):
+    def test_get_missing_returns_none(self) -> None:
         assert self.reg.get_spec("nonexistent") is None
 
-    def test_get_all_specs(self):
+    def test_get_all_specs(self) -> None:
         spec1 = HookSpec(name="a", handler=lambda ctx, p: ctx)
         spec2 = HookSpec(name="b", handler=lambda ctx, p: ctx)
         self.reg.register_spec(spec1)
@@ -43,23 +45,23 @@ class TestHookRegistry:
         assert "a" in all_specs
         assert "b" in all_specs
 
-    def test_clear(self):
+    def test_clear(self) -> None:
         spec = HookSpec(name="h", handler=lambda ctx, p: ctx)
         self.reg.register_spec(spec)
         self.reg.clear()
         assert self.reg.get_all_specs() == {}
 
-    def test_get_registry_returns_global(self):
+    def test_get_registry_returns_global(self) -> None:
         reg = get_registry()
         assert isinstance(reg, _HookRegistry)
 
 
 class TestHookDecorator:
-    def test_registers_hook(self):
+    def test_registers_hook(self) -> None:
         reg = get_registry()
 
         @hook(reads=["key"], writes=["out"])
-        def my_unique_test_hook(ctx: Context, params: dict) -> Context:
+        def my_unique_test_hook(ctx: Context, params: HookParams) -> Context:
             return ctx
 
         spec = reg.get_spec("my_unique_test_hook")
@@ -67,15 +69,15 @@ class TestHookDecorator:
         assert "key" in spec.reads
         assert "out" in spec.writes
 
-    def test_attaches_spec_to_function(self):
+    def test_attaches_spec_to_function(self) -> None:
         @hook(reads=[], writes=[])
-        def another_test_hook(ctx: Context, params: dict) -> Context:
+        def another_test_hook(ctx: Context, params: HookParams) -> Context:
             return ctx
 
         assert hasattr(another_test_hook, "_hook_spec")
-        assert another_test_hook._hook_spec.name == "another_test_hook"
+        assert cast(Any, another_test_hook)._hook_spec.name == "another_test_hook"
 
-    def test_finds_guard_by_convention(self):
+    def test_finds_guard_by_convention(self) -> None:
         import sys
         import types
 
@@ -86,9 +88,9 @@ class TestHookDecorator:
         def my_conv_hook_guard(ctx: Context) -> bool:
             return False
 
-        mod.my_conv_hook_guard = my_conv_hook_guard
+        cast(Any, mod).my_conv_hook_guard = my_conv_hook_guard
 
-        def my_conv_hook(ctx: Context, params: dict) -> Context:
+        def my_conv_hook(ctx: Context, params: HookParams) -> Context:
             return ctx
 
         my_conv_hook.__module__ = "fake_hook_module"
@@ -102,9 +104,9 @@ class TestHookDecorator:
         finally:
             del sys.modules["fake_hook_module"]
 
-    def test_default_guard_is_always_true(self):
+    def test_default_guard_is_always_true(self) -> None:
         @hook(reads=[], writes=[])
-        def no_guard_hook(ctx: Context, params: dict) -> Context:
+        def no_guard_hook(ctx: Context, params: HookParams) -> Context:
             return ctx
 
         spec = get_registry().get_spec("no_guard_hook")
@@ -112,12 +114,12 @@ class TestHookDecorator:
         ctx = _make_ctx()
         assert spec.guard(ctx) is True
 
-    def test_explicit_guard_overrides_convention(self):
+    def test_explicit_guard_overrides_convention(self) -> None:
         def my_guard(ctx: Context) -> bool:
             return False
 
         @hook(reads=[], writes=[], guard=my_guard)
-        def explicit_guard_hook(ctx: Context, params: dict) -> Context:
+        def explicit_guard_hook(ctx: Context, params: HookParams) -> Context:
             return ctx
 
         spec = get_registry().get_spec("explicit_guard_hook")

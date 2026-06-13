@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import cast
+
 from mitmproxy import http
 from mitmproxy.test import tflow
 
@@ -21,7 +23,7 @@ def _husk(
         method,
         url,
         content,
-        headers or {"x-seed": "a", "content-type": "application/json"},
+        cast(dict[str | bytes, str | bytes], headers or {"x-seed": "a", "content-type": "application/json"}),
     )
 
 
@@ -31,7 +33,7 @@ def _target_flow() -> http.HTTPFlow:
         "GET",
         "http://orig.example:8080/old",
         b"",
-        {"x-old": "1", "content-type": "text/plain"},
+        cast(dict[str | bytes, str | bytes], {"x-old": "1", "content-type": "text/plain"}),
     )
     return flow
 

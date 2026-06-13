@@ -5,12 +5,14 @@ from __future__ import annotations
 
 import base64
 import json
+from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
 
 import httpx
 import pytest
 
+from ccproxy.auth.sources import FileAuthSource
 from ccproxy.config import CCProxyConfig, PplxConfig, PplxUploadConfig, Provider, set_config_instance
 from ccproxy.hooks.extract_pplx_files import (
     FileInfo,
@@ -42,14 +44,14 @@ def make_ctx(body: dict[str, Any], *, auth_provider: str = "perplexity_pro") -> 
     return Context.from_flow(flow)
 
 
-def set_pplx_config(tmp_path: Any, *, upload: PplxUploadConfig | None = None, token: str = "cookie-token") -> None:
+def set_pplx_config(tmp_path: Path, *, upload: PplxUploadConfig | None = None, token: str = "cookie-token") -> None:
     token_file = tmp_path / "pplx-token"
     token_file.write_text(token)
     set_config_instance(
         CCProxyConfig(
             providers={
                 "perplexity_pro": Provider(
-                    auth={"type": "file", "file": str(token_file)},
+                    auth=FileAuthSource(file=str(token_file)),
                     host="www.perplexity.ai",
                     path="/rest/sse/perplexity_ask",
                     type="perplexity_pro",
@@ -170,7 +172,7 @@ def test_fetch_part_skips_unsupported_shapes() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_fetch_url_builds_fileinfo_from_response(tmp_path: Any) -> None:
+def test_fetch_url_builds_fileinfo_from_response(tmp_path: Path) -> None:
     set_pplx_config(tmp_path)
     response = httpx.Response(
         200,
@@ -185,7 +187,7 @@ def test_fetch_url_builds_fileinfo_from_response(tmp_path: Any) -> None:
     assert info == FileInfo(filename="cat.png", mimetype="image/png", data=_PNG_BYTES, is_image=True)
 
 
-def test_fetch_url_http_error_raises_structured_400(tmp_path: Any) -> None:
+def test_fetch_url_http_error_raises_structured_400(tmp_path: Path) -> None:
     set_pplx_config(tmp_path)
 
     with (
@@ -203,21 +205,21 @@ def test_fetch_url_http_error_raises_structured_400(tmp_path: Any) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_validate_too_many_files(tmp_path: Any) -> None:
+def test_validate_too_many_files(tmp_path: Path) -> None:
     set_pplx_config(tmp_path, upload=PplxUploadConfig(max_files=2))
 
     with pytest.raises(PerplexityFileError, match=r"Too many attachments: 3\. Maximum allowed is 2\."):
         _validate([_file("a.png"), _file("b.png"), _file("c.png")])
 
 
-def test_validate_empty_file(tmp_path: Any) -> None:
+def test_validate_empty_file(tmp_path: Path) -> None:
     set_pplx_config(tmp_path)
 
     with pytest.raises(PerplexityFileError, match=r"Attachment 'empty\.png' is empty\."):
         _validate([_file("empty.png", data=b"")])
 
 
-def test_validate_oversized_file(tmp_path: Any) -> None:
+def test_validate_oversized_file(tmp_path: Path) -> None:
     set_pplx_config(tmp_path, upload=PplxUploadConfig(max_file_size_bytes=4))
 
     with pytest.raises(PerplexityFileError, match=r"Attachment 'big\.png' exceeds 0\.0 MB limit"):
@@ -231,7 +233,7 @@ def test_validate_oversized_file(tmp_path: Any) -> None:
 _BATCH_URL_REQ = httpx.Request("POST", "https://www.perplexity.ai/rest/uploads/batch_create_upload_urls")
 
 
-def test_batch_create_upload_urls_maps_results(tmp_path: Any) -> None:
+def test_batch_create_upload_urls_maps_results(tmp_path: Path) -> None:
     set_pplx_config(tmp_path)
     upstream = {
         "results": {
@@ -257,7 +259,7 @@ def test_batch_create_upload_urls_maps_results(tmp_path: Any) -> None:
     assert result["file_uuid"] == "f1"
 
 
-def test_batch_create_upload_urls_missing_results_raises(tmp_path: Any) -> None:
+def test_batch_create_upload_urls_missing_results_raises(tmp_path: Path) -> None:
     set_pplx_config(tmp_path)
 
     with (
@@ -270,7 +272,7 @@ def test_batch_create_upload_urls_missing_results_raises(tmp_path: Any) -> None:
         _batch_create_upload_urls([_file()], token="cookie-token")
 
 
-def test_batch_create_upload_urls_rate_limited_raises_429(tmp_path: Any) -> None:
+def test_batch_create_upload_urls_rate_limited_raises_429(tmp_path: Path) -> None:
     set_pplx_config(tmp_path)
     upstream = {"results": {"u1": {}}, "rate_limited": True}
 
@@ -284,7 +286,7 @@ def test_batch_create_upload_urls_rate_limited_raises_429(tmp_path: Any) -> None
         _batch_create_upload_urls([_file()], token="cookie-token")
 
 
-def test_batch_create_upload_urls_http_error_raises_502(tmp_path: Any) -> None:
+def test_batch_create_upload_urls_http_error_raises_502(tmp_path: Path) -> None:
     set_pplx_config(tmp_path)
 
     with (
@@ -322,7 +324,7 @@ def test_await_processing_no_uuids_is_noop() -> None:
     _await_processing([], token="cookie-token")
 
 
-def test_await_processing_swallows_http_errors(tmp_path: Any) -> None:
+def test_await_processing_swallows_http_errors(tmp_path: Path) -> None:
     set_pplx_config(tmp_path)
 
     with patch(
@@ -337,7 +339,7 @@ def test_await_processing_swallows_http_errors(tmp_path: Any) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_hook_no_multimodal_parts_is_noop(tmp_path: Any) -> None:
+def test_hook_no_multimodal_parts_is_noop(tmp_path: Path) -> None:
     set_pplx_config(tmp_path)
     body = {"messages": [{"role": "user", "content": "text only"}]}
     ctx = make_ctx(body)
@@ -348,7 +350,7 @@ def test_hook_no_multimodal_parts_is_noop(tmp_path: Any) -> None:
     assert "pplx" not in result._body
 
 
-def test_hook_no_token_strips_parts_without_upload(tmp_path: Any) -> None:
+def test_hook_no_token_strips_parts_without_upload(tmp_path: Path) -> None:
     set_config_instance(CCProxyConfig(providers={}))
     ctx = make_ctx(
         {
@@ -370,7 +372,7 @@ def test_hook_no_token_strips_parts_without_upload(tmp_path: Any) -> None:
     assert "pplx" not in result._body
 
 
-def test_hook_unresolvable_parts_stripped_without_upload(tmp_path: Any) -> None:
+def test_hook_unresolvable_parts_stripped_without_upload(tmp_path: Path) -> None:
     set_pplx_config(tmp_path)
     ctx = make_ctx(
         {
@@ -392,7 +394,7 @@ def test_hook_unresolvable_parts_stripped_without_upload(tmp_path: Any) -> None:
     assert "pplx" not in result._body
 
 
-def test_hook_uploads_data_uri_and_attaches_object_url(tmp_path: Any) -> None:
+def test_hook_uploads_data_uri_and_attaches_object_url(tmp_path: Path) -> None:
     set_pplx_config(tmp_path)
     ctx = make_ctx(
         {
