@@ -1,5 +1,5 @@
 [project]
-name = "claude-ccproxy"
+name = "ai-ccproxy"
 version = "2.0.0"
 description = "Scriptable mitmproxy-based LLM API interceptor for Claude Code"
 readme = "README.md"
@@ -82,7 +82,8 @@ build-backend = "hatchling.build"
 packages = ["src/ccproxy"]
 
 [tool.hatch.build.targets.sdist]
-include = ["src/ccproxy", "tests", "README.md", "LICENSE"]
+only-include = ["src/ccproxy", "README.md", "LICENSE", "pyproject.toml"]
+exclude = [".gitignore"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -150,11 +151,6 @@ module = [
   "opentelemetry",
   "opentelemetry.*",
 ]
-
-[[tool.mypy.overrides]]
-module = "tests.*"
-disallow_untyped_defs = false
-check_untyped_defs = true
 
 # FastMCP's ``Context`` class is generic over three TypeVars
 # (ServerSessionT, LifespanContextT, RequestT) and FastMCP's runtime detection

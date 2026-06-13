@@ -62,6 +62,7 @@ site/
 
 # Package managers
 .uv/
+.direnv/
 poetry.lock
 
 # Project specific

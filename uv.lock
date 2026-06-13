@@ -13,6 +13,128 @@ name = "systemd-python"
 version = "235"
 
 [[package]]
+name = "ai-ccproxy"
+version = "2.0.0"
+source = { editable = "." }
+dependencies = [
+    { name = "anthropic" },
+    { name = "certifi" },
+    { name = "curl-cffi" },
+    { name = "glom" },
+    { name = "httpx" },
+    { name = "httpx-curl-cffi" },
+    { name = "humanize" },
+    { name = "mcp" },
+    { name = "mitmproxy" },
+    { name = "pydantic" },
+    { name = "pydantic-ai-slim", extra = ["anthropic", "google", "openai"] },
+    { name = "pydantic-graph" },
+    { name = "pydantic-settings" },
+    { name = "python-dotenv" },
+    { name = "pyyaml" },
+    { name = "rich" },
+    { name = "tyro" },
+    { name = "xepor-ccproxy" },
+    { name = "xxhash" },
+]
+
+[package.optional-dependencies]
+dev = [
+    { name = "coverage" },
+    { name = "mypy" },
+    { name = "pre-commit" },
+    { name = "pytest" },
+    { name = "pytest-asyncio" },
+    { name = "pytest-cov" },
+    { name = "ruff" },
+    { name = "types-pyyaml" },
+    { name = "types-requests" },
+]
+journal = [
+    { name = "systemd-python" },
+]
+otel = [
+    { name = "opentelemetry-api" },
+    { name = "opentelemetry-exporter-otlp-proto-grpc" },
+    { name = "opentelemetry-sdk" },
+    { name = "opentelemetry-semantic-conventions" },
+]
+sdk = [
+    { name = "google-genai" },
+    { name = "openai" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "beautysh" },
+    { name = "coverage" },
+    { name = "mypy" },
+    { name = "pre-commit" },
+    { name = "pytest" },
+    { name = "pytest-asyncio" },
+    { name = "pytest-cov" },
+    { name = "ruff" },
+    { name = "setuptools" },
+    { name = "types-pyyaml" },
+    { name = "types-requests" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "anthropic", specifier = ">=0.39.0" },
+    { name = "certifi", specifier = ">=2024.0.0" },
+    { name = "coverage", marker = "extra == 'dev'", specifier = ">=7.10.1" },
+    { name = "curl-cffi", specifier = ">=0.15.0" },
+    { name = "glom", specifier = ">=24.1.0" },
+    { name = "google-genai", marker = "extra == 'sdk'", specifier = ">=1.0.0" },
+    { name = "httpx", specifier = ">=0.27.0" },
+    { name = "httpx-curl-cffi", specifier = ">=0.1.5" },
+    { name = "humanize", specifier = ">=4.0.0" },
+    { name = "mcp", specifier = ">=1.0.0" },
+    { name = "mitmproxy", specifier = ">=10.0.0" },
+    { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.17.0" },
+    { name = "openai", marker = "extra == 'sdk'", specifier = ">=1.0.0" },
+    { name = "opentelemetry-api", marker = "extra == 'otel'", specifier = ">=1.20.0" },
+    { name = "opentelemetry-exporter-otlp-proto-grpc", marker = "extra == 'otel'", specifier = ">=1.20.0" },
+    { name = "opentelemetry-sdk", marker = "extra == 'otel'", specifier = ">=1.20.0" },
+    { name = "opentelemetry-semantic-conventions", marker = "extra == 'otel'", specifier = ">=0.41b0" },
+    { name = "pre-commit", marker = "extra == 'dev'", specifier = ">=4.2.0" },
+    { name = "pydantic", specifier = ">=2.0.0" },
+    { name = "pydantic-ai-slim", extras = ["anthropic", "google", "openai"], specifier = ">=1.99.0" },
+    { name = "pydantic-graph", specifier = ">=1.99.0" },
+    { name = "pydantic-settings", specifier = ">=2.0.0" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.4.1" },
+    { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=1.1.0" },
+    { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=6.2.1" },
+    { name = "python-dotenv", specifier = ">=1.0.0" },
+    { name = "pyyaml", specifier = ">=6.0" },
+    { name = "rich", specifier = ">=13.7.1" },
+    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.12.6" },
+    { name = "systemd-python", marker = "extra == 'journal'", specifier = ">=235" },
+    { name = "types-pyyaml", marker = "extra == 'dev'", specifier = ">=6.0.12.20250516" },
+    { name = "types-requests", marker = "extra == 'dev'", specifier = ">=2.32.4.20250611" },
+    { name = "tyro", specifier = ">=0.7.0" },
+    { name = "xepor-ccproxy", specifier = ">=0.7.0" },
+    { name = "xxhash", specifier = ">=3.0.0" },
+]
+provides-extras = ["otel", "journal", "sdk", "dev"]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "beautysh", specifier = ">=6.2.1" },
+    { name = "coverage", specifier = ">=7.10.1" },
+    { name = "mypy", specifier = ">=1.17.0" },
+    { name = "pre-commit", specifier = ">=4.2.0" },
+    { name = "pytest", specifier = ">=8.4.1" },
+    { name = "pytest-asyncio", specifier = ">=1.1.0" },
+    { name = "pytest-cov", specifier = ">=6.2.1" },
+    { name = "ruff", specifier = ">=0.12.6" },
+    { name = "setuptools", specifier = ">=80.9.0" },
+    { name = "types-pyyaml", specifier = ">=6.0.12.20250516" },
+    { name = "types-requests", specifier = ">=2.32.4.20250611" },
+]
+
+[[package]]
 name = "aioquic"
 version = "1.2.0"
 source = { registry = "https://pypi.org/simple" }
@@ -378,128 +500,6 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/5d/7a/d269d834cb3a76291651256f3b9a5945e81d0a49ab9f4a498964e83c0416/charset_normalizer-3.4.6-cp314-cp314t-win_amd64.whl", hash = "sha256:cd5e2801c89992ed8c0a3f0293ae83c159a60d9a5d685005383ef4caca77f2c4", size = 169043, upload-time = "2026-03-15T18:52:28.502Z" },
     { url = "https://files.pythonhosted.org/packages/23/06/28b29fba521a37a8932c6a84192175c34d49f84a6d4773fa63d05f9aff22/charset_normalizer-3.4.6-cp314-cp314t-win_arm64.whl", hash = "sha256:47955475ac79cc504ef2704b192364e51d0d473ad452caedd0002605f780101c", size = 148523, upload-time = "2026-03-15T18:52:29.956Z" },
     { url = "https://files.pythonhosted.org/packages/2a/68/687187c7e26cb24ccbd88e5069f5ef00eba804d36dde11d99aad0838ab45/charset_normalizer-3.4.6-py3-none-any.whl", hash = "sha256:947cf925bc916d90adba35a64c82aace04fa39b46b52d4630ece166655905a69", size = 61455, upload-time = "2026-03-15T18:53:23.833Z" },
-]
-
-[[package]]
-name = "claude-ccproxy"
-version = "2.0.0"
-source = { editable = "." }
-dependencies = [
-    { name = "anthropic" },
-    { name = "certifi" },
-    { name = "curl-cffi" },
-    { name = "glom" },
-    { name = "httpx" },
-    { name = "httpx-curl-cffi" },
-    { name = "humanize" },
-    { name = "mcp" },
-    { name = "mitmproxy" },
-    { name = "pydantic" },
-    { name = "pydantic-ai-slim", extra = ["anthropic", "google", "openai"] },
-    { name = "pydantic-graph" },
-    { name = "pydantic-settings" },
-    { name = "python-dotenv" },
-    { name = "pyyaml" },
-    { name = "rich" },
-    { name = "tyro" },
-    { name = "xepor-ccproxy" },
-    { name = "xxhash" },
-]
-
-[package.optional-dependencies]
-dev = [
-    { name = "coverage" },
-    { name = "mypy" },
-    { name = "pre-commit" },
-    { name = "pytest" },
-    { name = "pytest-asyncio" },
-    { name = "pytest-cov" },
-    { name = "ruff" },
-    { name = "types-pyyaml" },
-    { name = "types-requests" },
-]
-journal = [
-    { name = "systemd-python" },
-]
-otel = [
-    { name = "opentelemetry-api" },
-    { name = "opentelemetry-exporter-otlp-proto-grpc" },
-    { name = "opentelemetry-sdk" },
-    { name = "opentelemetry-semantic-conventions" },
-]
-sdk = [
-    { name = "google-genai" },
-    { name = "openai" },
-]
-
-[package.dev-dependencies]
-dev = [
-    { name = "beautysh" },
-    { name = "coverage" },
-    { name = "mypy" },
-    { name = "pre-commit" },
-    { name = "pytest" },
-    { name = "pytest-asyncio" },
-    { name = "pytest-cov" },
-    { name = "ruff" },
-    { name = "setuptools" },
-    { name = "types-pyyaml" },
-    { name = "types-requests" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "anthropic", specifier = ">=0.39.0" },
-    { name = "certifi", specifier = ">=2024.0.0" },
-    { name = "coverage", marker = "extra == 'dev'", specifier = ">=7.10.1" },
-    { name = "curl-cffi", specifier = ">=0.15.0" },
-    { name = "glom", specifier = ">=24.1.0" },
-    { name = "google-genai", marker = "extra == 'sdk'", specifier = ">=1.0.0" },
-    { name = "httpx", specifier = ">=0.27.0" },
-    { name = "httpx-curl-cffi", specifier = ">=0.1.5" },
-    { name = "humanize", specifier = ">=4.0.0" },
-    { name = "mcp", specifier = ">=1.0.0" },
-    { name = "mitmproxy", specifier = ">=10.0.0" },
-    { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.17.0" },
-    { name = "openai", marker = "extra == 'sdk'", specifier = ">=1.0.0" },
-    { name = "opentelemetry-api", marker = "extra == 'otel'", specifier = ">=1.20.0" },
-    { name = "opentelemetry-exporter-otlp-proto-grpc", marker = "extra == 'otel'", specifier = ">=1.20.0" },
-    { name = "opentelemetry-sdk", marker = "extra == 'otel'", specifier = ">=1.20.0" },
-    { name = "opentelemetry-semantic-conventions", marker = "extra == 'otel'", specifier = ">=0.41b0" },
-    { name = "pre-commit", marker = "extra == 'dev'", specifier = ">=4.2.0" },
-    { name = "pydantic", specifier = ">=2.0.0" },
-    { name = "pydantic-ai-slim", extras = ["anthropic", "google", "openai"], specifier = ">=1.99.0" },
-    { name = "pydantic-graph", specifier = ">=1.99.0" },
-    { name = "pydantic-settings", specifier = ">=2.0.0" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.4.1" },
-    { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=1.1.0" },
-    { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=6.2.1" },
-    { name = "python-dotenv", specifier = ">=1.0.0" },
-    { name = "pyyaml", specifier = ">=6.0" },
-    { name = "rich", specifier = ">=13.7.1" },
-    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.12.6" },
-    { name = "systemd-python", marker = "extra == 'journal'", specifier = ">=235" },
-    { name = "types-pyyaml", marker = "extra == 'dev'", specifier = ">=6.0.12.20250516" },
-    { name = "types-requests", marker = "extra == 'dev'", specifier = ">=2.32.4.20250611" },
-    { name = "tyro", specifier = ">=0.7.0" },
-    { name = "xepor-ccproxy", specifier = ">=0.7.0" },
-    { name = "xxhash", specifier = ">=3.0.0" },
-]
-provides-extras = ["otel", "journal", "sdk", "dev"]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "beautysh", specifier = ">=6.2.1" },
-    { name = "coverage", specifier = ">=7.10.1" },
-    { name = "mypy", specifier = ">=1.17.0" },
-    { name = "pre-commit", specifier = ">=4.2.0" },
-    { name = "pytest", specifier = ">=8.4.1" },
-    { name = "pytest-asyncio", specifier = ">=1.1.0" },
-    { name = "pytest-cov", specifier = ">=6.2.1" },
-    { name = "ruff", specifier = ">=0.12.6" },
-    { name = "setuptools", specifier = ">=80.9.0" },
-    { name = "types-pyyaml", specifier = ">=6.0.12.20250516" },
-    { name = "types-requests", specifier = ">=2.32.4.20250611" },
 ]
 
 [[package]]

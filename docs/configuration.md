@@ -14,7 +14,7 @@ ccproxy reads a single configuration file: `ccproxy.yaml`.
 Install ccproxy via uv:
 
 ```bash
-uv tool install claude-ccproxy
+uv tool install ai-ccproxy
 ```
 
 Initialize the config file:
@@ -118,7 +118,7 @@ Daemon log file path. Relative paths resolve against the config file's directory
 
 ### `use_journal` and `journal_identifier`
 
-When `use_journal: true`, ccproxy attaches a `systemd.journal.JournalHandler` to the root logger so daemon output is routed to the systemd journal. Requires the `journal` optional extra (`pip install claude-ccproxy[journal]`). Falls back to stderr with a warning when `systemd-python` is unavailable or the host lacks systemd. Only applies to `ccproxy start`.
+When `use_journal: true`, ccproxy attaches a `systemd.journal.JournalHandler` to the root logger so daemon output is routed to the systemd journal. Requires the `journal` optional extra (`pip install ai-ccproxy[journal]`). Falls back to stderr with a warning when `systemd-python` is unavailable or the host lacks systemd. Only applies to `ccproxy start`.
 
 `journal_identifier` sets the `SYSLOG_IDENTIFIER` field in journal entries. When unset (default), it derives from the config-dir basename:
 

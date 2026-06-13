@@ -69,7 +69,7 @@ fi
 
 # Locate wheel
 shopt -s nullglob
-wheels=("$WHEEL_DIR"/claude_ccproxy-*.whl "$WHEEL_DIR"/claude-ccproxy-*.whl)
+wheels=("$WHEEL_DIR"/ai_ccproxy-*.whl "$WHEEL_DIR"/ai-ccproxy-*.whl)
 shopt -u nullglob
 test "${#wheels[@]}" -ge 1 || die "no wheel found in $WHEEL_DIR (run: uv build --wheel)"
 readonly WHEEL_PATH="${wheels[0]}"

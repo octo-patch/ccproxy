@@ -105,10 +105,10 @@ Then install ccproxy:
 
 ```bash
 # Recommended: uv tool (isolated venv, console scripts on PATH)
-uv tool install claude-ccproxy
+uv tool install ai-ccproxy
 
 # Alternative: pip
-pip install claude-ccproxy
+pip install ai-ccproxy
 ```
 
 On Ubuntu 24.04+, unprivileged user namespaces are restricted by AppArmor by
@@ -128,9 +128,9 @@ sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
 Only the reverse proxy is supported. No system packages are required.
 
 ```bash
-uv tool install claude-ccproxy
+uv tool install ai-ccproxy
 # or
-pip install claude-ccproxy
+pip install ai-ccproxy
 ```
 
 `ccproxy start` and SDK use (`ANTHROPIC_BASE_URL=http://localhost:4000`) work

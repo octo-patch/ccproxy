@@ -9,7 +9,7 @@ These examples show how to route SDK requests through ccproxy to leverage provid
 To install all SDK dependencies needed by these examples:
 
 ```bash
-uv add claude-ccproxy[sdk]
+uv add ai-ccproxy[sdk]
 ```
 
 ## Auth Sentinel Key
@@ -152,7 +152,7 @@ google-genai SDK through ccproxy using the Gemini sentinel key.
 **Prerequisites:**
 ```bash
 # Install google-genai (included in ccproxy[sdk])
-uv add claude-ccproxy[sdk]
+uv add ai-ccproxy[sdk]
 
 # Ensure Gemini OAuth credentials exist
 gemini -p ""
@@ -234,7 +234,7 @@ to call Anthropic and Gemini models through the transform pipeline.
 **Prerequisites:**
 ```bash
 # Install openai (included in ccproxy[sdk])
-uv add claude-ccproxy[sdk]
+uv add ai-ccproxy[sdk]
 
 # Start ccproxy
 ccproxy start

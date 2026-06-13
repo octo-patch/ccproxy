@@ -709,7 +709,7 @@ class CCProxyConfig(BaseSettings):
     """Route daemon logging to the systemd journal via JournalHandler.
 
     Requires the ``journal`` optional extra
-    (``pip install claude-ccproxy[journal]``) which pulls in
+    (``pip install ai-ccproxy[journal]``) which pulls in
     ``systemd-python``. Only applies to ``ccproxy start`` — interactive
     commands (run, status, logs) always write to stderr.
 
