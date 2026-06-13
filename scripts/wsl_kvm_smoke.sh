@@ -22,6 +22,8 @@ collector_log="$root/collector.log"
 timeout_seconds="${CCPROXY_WSL_KVM_TIMEOUT_SECONDS:-14400}"
 disk_size="${CCPROXY_WSL_KVM_DISK_SIZE:-96G}"
 reuse_disk="${CCPROXY_WSL_KVM_REUSE_DISK:-0}"
+setup_stall_seconds="${CCPROXY_WSL_KVM_SETUP_STALL_SECONDS:-300}"
+setup_stall_min_bytes="${CCPROXY_WSL_KVM_SETUP_STALL_MIN_BYTES:-10485760}"
 memory="${CCPROXY_WSL_KVM_MEMORY:-16G}"
 cpus="${CCPROXY_WSL_KVM_CPUS:-8}"
 vnc_display="${CCPROXY_WSL_KVM_VNC:-127.0.0.1:9}"
@@ -69,11 +71,33 @@ is_iso_image() {
   xorriso -indev "$image" -toc >/dev/null 2>&1
 }
 
+allocated_bytes() {
+  du -B1 "$1" | awk '{print $1}'
+}
+
+prepare_windows_disk() {
+  local force="${1:-0}"
+  if [[ "$force" == "1" ]]; then
+    rm -f "$disk" "$vars"
+  fi
+
+  if [[ ! -f "$disk" ]]; then
+    echo "[wsl-kvm] Creating Windows disk: $disk"
+    qemu-img create -f qcow2 "$disk" "$disk_size"
+  fi
+
+  if [[ ! -f "$vars" ]]; then
+    cp "$OVMF_VARS_TEMPLATE" "$vars"
+    chmod 0644 "$vars"
+  fi
+}
+
 start_collector() {
   rm -f "$collector_port_file"
   : > "$collector_log"
   python3 -u - "$share" "$collector_port_file" >>"$collector_log" 2>&1 <<'PY' &
 import http.server
+import json
 import pathlib
 import sys
 
@@ -101,6 +125,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             "/result": "result.json",
             "/bootstrap-log": "bootstrap.log",
             "/stage": "bootstrap-stage.txt",
+            "/wsl-start-log": "wsl-start-ready.log",
+            "/ccproxy-log": "ccproxy.log",
         }
         target = targets.get(self.path)
         if target is None:
@@ -108,6 +134,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
         length = int(self.headers.get("Content-Length", "0"))
         body = self.rfile.read(length)
+        if target == "result.json":
+            try:
+                payload = json.loads(body.decode("utf-8"))
+                for field, filename in (
+                    ("wsl_start_log", "wsl-start-ready.log"),
+                    ("ccproxy_log", "ccproxy.log"),
+                ):
+                    path = out_dir / filename
+                    if not payload.get(field) and path.exists():
+                        payload[field] = path.read_text(encoding="utf-8", errors="replace")[:8000]
+                body = json.dumps(payload, indent=2).encode("utf-8")
+            except Exception:
+                pass
         (out_dir / target).write_bytes(body)
         self.send_response(204)
         self.end_headers()
@@ -152,22 +191,21 @@ EOF
 fi
 
 if [[ "$reuse_disk" != "1" ]]; then
-  rm -f "$disk" "$vars"
-fi
-
-if [[ ! -f "$disk" ]]; then
-  echo "[wsl-kvm] Creating Windows disk: $disk"
-  qemu-img create -f qcow2 "$disk" "$disk_size"
-fi
-
-if [[ ! -f "$vars" ]]; then
-  cp "$OVMF_VARS_TEMPLATE" "$vars"
-  chmod 0644 "$vars"
+  prepare_windows_disk 1
+else
+  prepare_windows_disk 0
 fi
 
 echo "[wsl-kvm] Preparing host-visible share"
 printf 'ccproxy WSL smoke result share\n' > "$share/$share_marker"
-rm -f "$result" "$share/bootstrap.log" "$share/bootstrap-stage.txt" "$share/ccproxy.wsl" "$share/ccproxy-wsl-smoke-write-test.txt"
+rm -f \
+  "$result" \
+  "$share/bootstrap.log" \
+  "$share/bootstrap-stage.txt" \
+  "$share/wsl-start-ready.log" \
+  "$share/ccproxy.log" \
+  "$share/ccproxy.wsl" \
+  "$share/ccproxy-wsl-smoke-write-test.txt"
 
 echo "[wsl-kvm] Starting result collector"
 start_collector
@@ -354,6 +392,7 @@ CMD
 cat > "$answer_dir/Bootstrap.ps1" <<'POWERSHELL'
 $ErrorActionPreference = "Stop"
 $stateDir = "C:\ccproxy-wsl-smoke"
+$phasePath = Join-Path $stateDir "phase.txt"
 $stagePath = Join-Path $stateDir "stage.txt"
 $logPath = Join-Path $stateDir "bootstrap.log"
 $bootstrapPath = Join-Path $stateDir "Bootstrap.ps1"
@@ -431,6 +470,33 @@ function Send-CollectorFile {
     }
 }
 
+function Convert-SmokeString {
+    param([object]$Value)
+
+    try {
+        $text = [string]$Value
+    }
+    catch {
+        $text = "<unstringifiable: $($_.Exception.GetType().FullName)>"
+    }
+    if ($text.Length -gt 8000) {
+        return $text.Substring(0, 8000) + "`n<truncated>"
+    }
+    return $text
+}
+
+function Escape-JsonString {
+    param([string]$Value)
+
+    $text = Convert-SmokeString $Value
+    $text = $text.Replace("\", "\\")
+    $text = $text.Replace('"', '\"')
+    $text = $text.Replace("`r", "\r")
+    $text = $text.Replace("`n", "\n")
+    $text = $text.Replace("`t", "\t")
+    return $text
+}
+
 function Publish-Stage {
     param([string]$Name)
 
@@ -453,15 +519,22 @@ function Invoke-Step {
 
     Write-Host "[ccproxy-wsl-smoke] $Name"
     Publish-Stage -Name $Name
-    $output = & $Script 2>&1
-    $code = if ($null -eq $LASTEXITCODE) { 0 } else { $LASTEXITCODE }
+    try {
+        $output = & $Script 2>&1
+        $code = if ($null -eq $LASTEXITCODE) { 0 } else { $LASTEXITCODE }
+    }
+    catch {
+        $output = @($_.Exception.ToString())
+        $code = if ($null -ne $LASTEXITCODE -and $LASTEXITCODE -ne 0) { $LASTEXITCODE } else { -1 }
+    }
+    $safeOutput = @($output | ForEach-Object { Convert-SmokeString $_ })
     $script:steps += [ordered]@{
-        name = $Name
+        name = Convert-SmokeString $Name
         exit_code = $code
-        output = @($output | ForEach-Object { "$_" })
+        output = $safeOutput
     }
     if ($code -ne 0) {
-        throw "Step failed: $Name ($code)"
+        throw "Step failed: $Name ($code)`n$($safeOutput -join "`n")"
     }
 }
 
@@ -551,9 +624,16 @@ function Invoke-Native {
 
     if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
         try {
-            $process.Kill()
+            taskkill.exe /PID $process.Id /T /F | Out-Null
+            [void]$process.WaitForExit(10000)
         }
         catch {
+            try {
+                $process.Kill()
+                [void]$process.WaitForExit(10000)
+            }
+            catch {
+            }
         }
         $global:LASTEXITCODE = -1
         $stdout = $stdoutLines -join "`n"
@@ -561,7 +641,7 @@ function Invoke-Native {
         throw "Timed out after $TimeoutSeconds seconds: $FilePath $($Arguments -join ' ')`n$stdout`n$stderr"
     }
 
-    $process.WaitForExit()
+    [void]$process.WaitForExit(5000)
     $stdout = $stdoutLines -join "`n"
     $stderr = $stderrLines -join "`n"
     $global:LASTEXITCODE = $process.ExitCode
@@ -576,6 +656,49 @@ function Invoke-Native {
     $lines | Where-Object { $_ -ne "" }
 }
 
+function Invoke-WslScript {
+    param(
+        [string]$Script,
+        [int]$TimeoutSeconds = 300
+    )
+
+    $psi = [System.Diagnostics.ProcessStartInfo]::new()
+    $psi.FileName = "wsl.exe"
+    $psi.Arguments = (@("-d", "ccproxy-smoke", "--", "bash", "-s") | ForEach-Object { ConvertTo-NativeArgument $_ }) -join " "
+    $psi.RedirectStandardInput = $true
+    $psi.RedirectStandardOutput = $false
+    $psi.RedirectStandardError = $false
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $false
+
+    $process = [System.Diagnostics.Process]::new()
+    $process.StartInfo = $psi
+    [void]$process.Start()
+    $process.StandardInput.Write($Script)
+    $process.StandardInput.Close()
+
+    if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
+        try {
+            taskkill.exe /PID $process.Id /T /F | Out-Null
+            [void]$process.WaitForExit(10000)
+        }
+        catch {
+            try {
+                $process.Kill()
+                [void]$process.WaitForExit(10000)
+            }
+            catch {
+            }
+        }
+        $global:LASTEXITCODE = -1
+        throw "Timed out after $TimeoutSeconds seconds: wsl.exe -d ccproxy-smoke -- bash -s"
+    }
+
+    [void]$process.WaitForExit(5000)
+    $global:LASTEXITCODE = $process.ExitCode
+    @()
+}
+
 function Write-SmokeResult {
     param(
         [string]$CollectorBase,
@@ -585,15 +708,23 @@ function Write-SmokeResult {
 
     $payload = [ordered]@{
         ok = $Ok
-        error = $ErrorMessage
-        stage = if (Test-Path $stagePath) { Get-Content $stagePath -Raw } else { "" }
+        error = Convert-SmokeString $ErrorMessage
+        phase = if (Test-Path $phasePath) { Convert-SmokeString (Get-Content $phasePath -Raw) } else { "" }
+        stage = if (Test-Path $stagePath) { Convert-SmokeString (Get-Content $stagePath -Raw) } else { "" }
         timestamp = (Get-Date).ToUniversalTime().ToString("o")
-        computer = $env:COMPUTERNAME
-        user = "$env:USERDOMAIN\$env:USERNAME"
+        computer = Convert-SmokeString $env:COMPUTERNAME
+        user = Convert-SmokeString "$env:USERDOMAIN\$env:USERNAME"
+        wsl_start_log = ""
+        ccproxy_log = ""
         steps = $script:steps
     }
 
-    $json = $payload | ConvertTo-Json -Depth 20
+    try {
+        $json = $payload | ConvertTo-Json -Depth 8
+    }
+    catch {
+        $json = '{"ok":false,"error":"' + (Escape-JsonString $payload.error) + '","stage":"' + (Escape-JsonString $payload.stage) + '","json_error":"' + (Escape-JsonString $_.Exception.Message) + '"}'
+    }
     Send-CollectorText -CollectorBase $CollectorBase -Path "result" -Body $json -ContentType "application/json"
     Send-CollectorFile -CollectorBase $CollectorBase -Path "bootstrap-log" -FilePath $logPath
     Send-CollectorText -CollectorBase $CollectorBase -Path "stage" -Body $payload.stage
@@ -603,11 +734,13 @@ $script:steps = @()
 $script:collectorBase = ""
 
 try {
-    Set-BootstrapRunKey
-    $stage = if (Test-Path $stagePath) { (Get-Content $stagePath -Raw).Trim() } else { "0" }
+    $phase = if (Test-Path $phasePath) { (Get-Content $phasePath -Raw).Trim() } else { "0" }
+    if ($phase -eq "0") {
+        Set-BootstrapRunKey
+    }
 
-    if ($stage -eq "0") {
-        Set-Content -Path $stagePath -Value "1" -Encoding ASCII
+    if ($phase -eq "0") {
+        Set-Content -Path $phasePath -Value "1" -Encoding ASCII
         Invoke-Step "enable-wsl-feature" { Invoke-Native -FilePath "dism.exe" -Arguments @("/online", "/enable-feature", "/featurename:Microsoft-Windows-Subsystem-Linux", "/all", "/norestart") -TimeoutSeconds 900 }
         Invoke-Step "enable-vmp-feature" { Invoke-Native -FilePath "dism.exe" -Arguments @("/online", "/enable-feature", "/featurename:VirtualMachinePlatform", "/all", "/norestart") -TimeoutSeconds 900 }
         Restart-Computer -Force
@@ -621,6 +754,18 @@ try {
     $distroRoot = Join-Path $installRoot "distro"
     New-Item -ItemType Directory -Force -Path $installRoot | Out-Null
 
+    if ($phase -eq "1") {
+        Set-Content -Path $phasePath -Value "2" -Encoding ASCII
+        Invoke-Step "wsl-install-no-distribution" { Invoke-Native -FilePath "wsl.exe" -Arguments @("--install", "--no-distribution", "--web-download") -TimeoutSeconds 1800 }
+        Set-Content -Path $phasePath -Value "2" -Encoding ASCII
+        Restart-Computer -Force
+        exit 0
+    }
+
+    Invoke-Step "wsl-remove-existing" {
+        Invoke-Native -FilePath "wsl.exe" -Arguments @("--unregister", "ccproxy-smoke") -TimeoutSeconds 180
+        $global:LASTEXITCODE = 0
+    }
     Invoke-Step "wsl-import-ccproxy" { Invoke-Native -FilePath "wsl.exe" -Arguments @("--import", "ccproxy-smoke", $distroRoot, $artifact, "--version", "2") -TimeoutSeconds 900 }
     Invoke-Step "wsl-version-list" { Invoke-Native -FilePath "wsl.exe" -Arguments @("-l", "-v") -TimeoutSeconds 180 }
     Invoke-Step "ccproxy-help" { Invoke-Native -FilePath "wsl.exe" -Arguments @("-d", "ccproxy-smoke", "--", "bash", "-lc", "ccproxy --help >/dev/null") -TimeoutSeconds 180 }
@@ -628,42 +773,64 @@ try {
 
     $bashStart = @'
 set -euo pipefail
-export CCPROXY_CONFIG_DIR=/tmp/ccproxy-wsl-smoke
+
+export CCPROXY_CONFIG_DIR=/var/tmp/ccproxy-wsl-smoke
+collector_base="__COLLECTOR_BASE__"
+
 rm -rf "$CCPROXY_CONFIG_DIR"
 mkdir -p "$CCPROXY_CONFIG_DIR"
-ccproxy init
-nohup ccproxy start > "$CCPROXY_CONFIG_DIR/ccproxy.log" 2>&1 &
-daemon="$!"
-echo "$daemon" > "$CCPROXY_CONFIG_DIR/ccproxy.pid"
-for i in $(seq 1 120); do
-  if ccproxy status --proxy >/dev/null 2>&1 && test -s "$CCPROXY_CONFIG_DIR/.inspector-wireguard-client.conf"; then
-    break
+printf 'ccproxy: {}\n' > "$CCPROXY_CONFIG_DIR/ccproxy.yaml"
+
+post_file() {
+  local file="$1"
+  local route="$2"
+  if [ -s "$file" ] && command -v curl >/dev/null 2>&1; then
+    curl -fsS -X POST --data-binary @"$file" "$collector_base/$route" >/dev/null 2>&1 || true
   fi
-  sleep 1
-done
-ccproxy status --proxy
-test -s "$CCPROXY_CONFIG_DIR/.inspector-wireguard-client.conf"
+}
+
+finish() {
+  local code="$?"
+  post_file "$CCPROXY_CONFIG_DIR/wsl-start-ready.log" wsl-start-log
+  post_file "$CCPROXY_CONFIG_DIR/ccproxy.log" ccproxy-log
+  exit "$code"
+}
+trap finish EXIT
+
+{
+  set -x
+  command -v ccproxy
+  nohup ccproxy start > "$CCPROXY_CONFIG_DIR/ccproxy.log" 2>&1 &
+  daemon="$!"
+  echo "$daemon" > "$CCPROXY_CONFIG_DIR/ccproxy.pid"
+  for i in $(seq 1 120); do
+    if ccproxy status --proxy >/dev/null 2>&1 && test -s "$CCPROXY_CONFIG_DIR/.inspector-wireguard-client.conf"; then
+      break
+    fi
+    sleep 1
+  done
+  ccproxy status --proxy
+  test -s "$CCPROXY_CONFIG_DIR/.inspector-wireguard-client.conf"
+} > "$CCPROXY_CONFIG_DIR/wsl-start-ready.log" 2>&1
 '@
+    $bashStart = $bashStart.Trim().Replace("__COLLECTOR_BASE__", $collector)
 
     $bashStatus = @'
-set -euo pipefail
-export CCPROXY_CONFIG_DIR=/tmp/ccproxy-wsl-smoke
-ccproxy namespace status --json | tee "$CCPROXY_CONFIG_DIR/namespace-status.json"
+set -euo pipefail; export CCPROXY_CONFIG_DIR=/var/tmp/ccproxy-wsl-smoke; ccproxy namespace status --json | tee "$CCPROXY_CONFIG_DIR/namespace-status.json"
 '@
+    $bashStatus = $bashStatus.Trim()
 
     $bashDoctor = @'
-set -euo pipefail
-export CCPROXY_CONFIG_DIR=/tmp/ccproxy-wsl-smoke
-ccproxy namespace doctor --json | tee "$CCPROXY_CONFIG_DIR/namespace-doctor.json"
+set -euo pipefail; export CCPROXY_CONFIG_DIR=/var/tmp/ccproxy-wsl-smoke; ccproxy namespace doctor --json | tee "$CCPROXY_CONFIG_DIR/namespace-doctor.json"
 '@
+    $bashDoctor = $bashDoctor.Trim()
 
     $bashCurl = @'
-set -euo pipefail
-export CCPROXY_CONFIG_DIR=/tmp/ccproxy-wsl-smoke
-ccproxy run --inspect -- curl -fsS https://example.com -o /dev/null
+set -euo pipefail; export CCPROXY_CONFIG_DIR=/var/tmp/ccproxy-wsl-smoke; ccproxy run --inspect -- curl -fsS https://example.com -o /dev/null
 '@
+    $bashCurl = $bashCurl.Trim()
 
-    Invoke-Step "ccproxy-start-ready" { Invoke-Native -FilePath "wsl.exe" -Arguments @("-d", "ccproxy-smoke", "--", "bash", "-lc", $bashStart) -TimeoutSeconds 300 }
+    Invoke-Step "ccproxy-start-ready" { Invoke-WslScript -Script $bashStart -TimeoutSeconds 300 }
     Invoke-Step "ccproxy-namespace-status" { Invoke-Native -FilePath "wsl.exe" -Arguments @("-d", "ccproxy-smoke", "--", "bash", "-lc", $bashStatus) -TimeoutSeconds 180 }
     Invoke-Step "ccproxy-namespace-doctor" { Invoke-Native -FilePath "wsl.exe" -Arguments @("-d", "ccproxy-smoke", "--", "bash", "-lc", $bashDoctor) -TimeoutSeconds 300 }
     Invoke-Step "ccproxy-inspect-curl" { Invoke-Native -FilePath "wsl.exe" -Arguments @("-d", "ccproxy-smoke", "--", "bash", "-lc", $bashCurl) -TimeoutSeconds 300 }
@@ -732,23 +899,24 @@ deadline=$((SECONDS + timeout_seconds))
 attempt=0
 while (( SECONDS < deadline )); do
   attempt=$((attempt + 1))
-  if (( attempt == 1 )); then
+  if [[ "$reuse_disk" != "1" ]] && (( attempt == 1 )); then
     boot_order="d"
   else
     boot_order="c"
   fi
 
   launch_qemu "$boot_order"
+  boot_started_at="$SECONDS"
 
-  if (( attempt == 1 )); then
+  if [[ "$reuse_disk" != "1" ]] && (( attempt == 1 )); then
     for _ in $(seq 1 20); do
       [[ -S "$monitor" ]] && break
       sleep 1
     done
-    sleep 3
-    send_monitor "sendkey ret"
-    sleep 3
-    send_monitor "sendkey spc"
+    for _ in $(seq 1 30); do
+      send_monitor "sendkey spc"
+      sleep 1
+    done
   fi
 
   while kill -0 "$qemu_pid" >/dev/null 2>&1; do
@@ -764,6 +932,18 @@ while (( SECONDS < deadline )); do
     if (( SECONDS >= deadline )); then
       echo "ERROR: timed out waiting for Windows WSL smoke result" >&2
       exit 1
+    fi
+    if [[ "$reuse_disk" != "1" ]] && (( attempt == 1 )) && (( SECONDS - boot_started_at >= setup_stall_seconds )); then
+      disk_bytes="$(allocated_bytes "$disk")"
+      if (( disk_bytes < setup_stall_min_bytes )) && [[ ! -f "$share/bootstrap-stage.txt" ]]; then
+        echo "[wsl-kvm] Windows setup made no target-disk progress after ${setup_stall_seconds}s; retrying fresh install" >&2
+        kill "$qemu_pid" >/dev/null 2>&1 || true
+        wait "$qemu_pid" >/dev/null 2>&1 || true
+        qemu_pid=""
+        prepare_windows_disk 1
+        attempt=0
+        break
+      fi
     fi
     sleep 10
   done
