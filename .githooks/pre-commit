@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# ccproxy managed pre-commit hook
+set -euo pipefail
+
+repo_root="$(git rev-parse --show-toplevel)"
+cd "$repo_root"
+
+nix run .#sync-ccproxy-template
+git add src/ccproxy/templates/ccproxy.yaml
+
+if command -v pre-commit >/dev/null 2>&1; then
+  exec pre-commit run --hook-stage pre-commit
+fi
+
+if command -v uv >/dev/null 2>&1; then
+  exec uv run pre-commit run --hook-stage pre-commit
+fi
+
+echo "ccproxy: pre-commit is required; enter nix develop or install the dev dependencies." >&2
+exit 1

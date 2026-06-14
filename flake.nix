@@ -116,9 +116,7 @@
 
         # Bundled template installed at src/ccproxy/templates/ccproxy.yaml and
         # served by `ccproxy init` to seed a user's first ccproxy.yaml. Built
-        # from nix/defaults.nix as-is (no dev overrides). The dev shellHook
-        # copies it into the source tree on every shell entry so it stays in
-        # sync without a pre-commit hook or any Python rendering script.
+        # from nix/defaults.nix as-is (no dev overrides).
         templateYaml = yaml.generate "ccproxy.yaml" {
           ccproxy = defaultSettings.settings;
         };
@@ -169,6 +167,17 @@
           socat
           xorriso
         ];
+        syncCcproxyTemplate = pkgs.writeShellApplication {
+          name = "sync-ccproxy-template";
+          runtimeInputs = with pkgs; [
+            coreutils
+            git
+          ];
+          text = ''
+            repo_root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+            install -m 644 ${templateYaml} "$repo_root/src/ccproxy/templates/ccproxy.yaml"
+          '';
+        };
         wslArtifactValidator = pkgs.writeShellApplication {
           name = "ccproxy-validate-wsl-artifact";
           runtimeInputs = with pkgs; [
@@ -209,8 +218,14 @@
             export PATH="${venv}/bin:${inspectDeps}:$PATH"
             exec ${venv}/bin/ccproxy "$@"
           '';
+          sync-ccproxy-template = syncCcproxyTemplate;
           inherit wslArtifactValidator;
           inherit wslKvmSmoke;
+        };
+
+        apps.sync-ccproxy-template = {
+          type = "app";
+          program = "${syncCcproxyTemplate}/bin/sync-ccproxy-template";
         };
 
         devShells = {
@@ -221,6 +236,7 @@
               ruff
               mypy
               pyright
+              pre-commit
               jq
               git
               just
@@ -231,11 +247,18 @@
 
             shellHook = ''
               ${devConfig.shellHook}
-              # Refresh the bundled ccproxy init template from nix/defaults.nix.
-              # Nix-driven; no Python script, no pre-commit hook. Runs once per
-              # dev-shell entry so the template stays in sync with the canonical
-              # defaults file.
-              install -m 644 ${templateYaml} src/ccproxy/templates/ccproxy.yaml
+              ${syncCcproxyTemplate}/bin/sync-ccproxy-template
+              if git rev-parse --git-dir >/dev/null 2>&1; then
+                repo_root="$(git rev-parse --show-toplevel)"
+                hook_path="$(git rev-parse --git-path hooks/pre-commit)"
+                managed_hook="$repo_root/.githooks/pre-commit"
+                if [ ! -e "$hook_path" ] || grep -q "ccproxy managed pre-commit hook" "$hook_path" || grep -q "pre-commit.com" "$hook_path"; then
+                  mkdir -p "$(dirname "$hook_path")"
+                  ln -sfn "$managed_hook" "$hook_path"
+                else
+                  echo "ccproxy: existing custom pre-commit hook left untouched at $hook_path" >&2
+                fi
+              fi
               export CCPROXY_BASE_URL="http://127.0.0.1:4001"
               export LD_LIBRARY_PATH="${pkgs.lib.makeLibraryPath [
                 pkgs.stdenv.cc.cc.lib
@@ -245,7 +268,7 @@
               export UV_PYTHON="${python}"
               uv sync --extra sdk --quiet 2>/dev/null || true
               export VIRTUAL_ENV="$PWD/.venv"
-              export PATH="$PWD/.venv/bin:$PATH"
+              export PATH="$PWD/result/bin:$PWD/.venv/bin:$PATH"
             '';
           };
         };
@@ -255,6 +278,7 @@
     in
     {
       packages = lib.mapAttrs (_: v: v.packages) perSystem;
+      apps = lib.mapAttrs (_: v: v.apps) perSystem;
       devShells = lib.mapAttrs (_: v: v.devShells) perSystem;
       lib = lib.mapAttrs (_: v: v.lib) perSystem;
 
