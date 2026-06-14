@@ -8,6 +8,7 @@
         auth = {
           type = "command";
           command = "printenv CLAUDE_CODE_OAUTH_TOKEN";
+          file = "~/.opnix/secrets/claude-code-oauth-token";
         };
         host = "api.anthropic.com";
         path = "/v1/messages";
@@ -100,8 +101,16 @@
     };
     gemini_capacity = {
       enabled = true;
-      retry_status_codes = [ 429 503 500 ];
-      fallback_models = [ "gemini-3-flash-preview" "gemini-2.5-pro" "gemini-2.5-flash" ];
+      retry_status_codes = [
+        429
+        503
+        500
+      ];
+      fallback_models = [
+        "gemini-3-flash-preview"
+        "gemini-2.5-pro"
+        "gemini-2.5-flash"
+      ];
       sticky_retry_attempts = 3;
       sticky_retry_max_delay_seconds = 60;
       terminal_delay_threshold_seconds = 300;
@@ -135,11 +144,25 @@
       providers = {
         anthropic = {
           content_fields = [
-            "model" "messages" "tools" "tool_choice" "system" "thinking" "context_management"
-            "stream" "max_tokens" "temperature" "top_p" "top_k" "stop_sequences"
-            "diagnostics" "metadata"
+            "model"
+            "messages"
+            "tools"
+            "tool_choice"
+            "system"
+            "thinking"
+            "context_management"
+            "stream"
+            "max_tokens"
+            "temperature"
+            "top_p"
+            "top_k"
+            "stop_sequences"
+            "diagnostics"
+            "metadata"
           ];
-          merge_strategies = { system = "prepend_shape:2"; };
+          merge_strategies = {
+            system = "prepend_shape:2";
+          };
           shape_hooks = [
             "ccproxy.shaping.regenerate"
             {
@@ -158,56 +181,120 @@
               };
             }
           ];
-          preserve_headers = [ "authorization" "x-api-key" "x-goog-api-key" "host" ];
+          preserve_headers = [
+            "authorization"
+            "x-api-key"
+            "x-goog-api-key"
+            "host"
+          ];
           strip_headers = [
-            "authorization" "x-api-key" "x-goog-api-key"
-            "content-length" "host" "transfer-encoding" "connection"
+            "authorization"
+            "x-api-key"
+            "x-goog-api-key"
+            "content-length"
+            "host"
+            "transfer-encoding"
+            "connection"
             "accept-encoding"
           ];
-          capture = { path_pattern = "^/v1/messages"; };
+          capture = {
+            path_pattern = "^/v1/messages";
+          };
         };
         gemini = {
-          content_fields = [ "model" "project" "user_prompt_id" ];
+          content_fields = [
+            "model"
+            "project"
+            "user_prompt_id"
+          ];
           shape_hooks = [
             "ccproxy.shaping.regenerate"
             "ccproxy.shaping.gemini"
           ];
-          preserve_headers = [ "authorization" "host" ];
-          strip_headers = [
-            "authorization" "content-length" "host"
-            "transfer-encoding" "connection" "accept-encoding"
+          preserve_headers = [
+            "authorization"
+            "host"
           ];
-          capture = { path_pattern = "^/v1internal:"; };
+          strip_headers = [
+            "authorization"
+            "content-length"
+            "host"
+            "transfer-encoding"
+            "connection"
+            "accept-encoding"
+          ];
+          capture = {
+            path_pattern = "^/v1internal:";
+          };
         };
         openai_responses = {
           content_fields = [
-            "model" "input" "tools" "tool_choice" "parallel_tool_calls"
-            "reasoning" "text" "stream" "max_output_tokens" "temperature" "top_p"
-            "metadata" "client_metadata" "include" "previous_response_id" "prompt_cache_key"
-            "prompt_cache_retention" "store" "truncation" "service_tier"
-            "background" "safety_identifier" "user"
+            "model"
+            "input"
+            "tools"
+            "tool_choice"
+            "parallel_tool_calls"
+            "reasoning"
+            "text"
+            "stream"
+            "max_output_tokens"
+            "temperature"
+            "top_p"
+            "metadata"
+            "client_metadata"
+            "include"
+            "previous_response_id"
+            "prompt_cache_key"
+            "prompt_cache_retention"
+            "store"
+            "truncation"
+            "service_tier"
+            "background"
+            "safety_identifier"
+            "user"
           ];
           shape_hooks = [
             "ccproxy.shaping.codex"
           ];
-          preserve_headers = [ "authorization" "chatgpt-account-id" "x-openai-fedramp" "host" ];
-          strip_headers = [
-            "authorization" "chatgpt-account-id" "x-openai-fedramp"
-            "content-length" "content-encoding" "host" "transfer-encoding" "connection" "accept-encoding"
-            "x-client-request-id" "session-id" "thread-id"
-            "x-codex-installation-id" "x-codex-turn-state" "x-codex-turn-metadata"
-            "x-codex-parent-thread-id" "x-codex-window-id"
-            "x-openai-memgen-request" "x-openai-subagent"
-            "openai-organization" "openai-project"
+          preserve_headers = [
+            "authorization"
+            "chatgpt-account-id"
+            "x-openai-fedramp"
+            "host"
           ];
-          capture = { path_pattern = "^/backend-api/codex/responses"; };
+          strip_headers = [
+            "authorization"
+            "chatgpt-account-id"
+            "x-openai-fedramp"
+            "content-length"
+            "content-encoding"
+            "host"
+            "transfer-encoding"
+            "connection"
+            "accept-encoding"
+            "x-client-request-id"
+            "session-id"
+            "thread-id"
+            "x-codex-installation-id"
+            "x-codex-turn-state"
+            "x-codex-turn-metadata"
+            "x-codex-parent-thread-id"
+            "x-codex-window-id"
+            "x-openai-memgen-request"
+            "x-openai-subagent"
+            "openai-organization"
+            "openai-project"
+          ];
+          capture = {
+            path_pattern = "^/backend-api/codex/responses";
+          };
         };
       };
     };
     inspector = {
       port = 8083;
       cert_dir = "~/.config/ccproxy";
-      transforms = [];
+      transforms = [ ];
     };
   };
 }
