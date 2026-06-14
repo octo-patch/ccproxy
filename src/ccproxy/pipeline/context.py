@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable, Iterator, MutableMapping
+from copy import deepcopy
 from dataclasses import MISSING, dataclass, field, fields
 from dataclasses import Field as DataclassField
 from dataclasses import replace as _dataclass_replace
@@ -380,6 +381,12 @@ class Context:
     _body: dict[str, Any] = field(default_factory=dict, repr=False)
     """Parsed JSON request body, flushed back via commit()."""
 
+    _initial_body: dict[str, Any] = field(default_factory=dict, repr=False)
+    """Parsed request body as loaded before hooks run."""
+
+    _initial_content: bytes | None = field(default=None, repr=False)
+    """Original raw request content, preserved when hooks leave the body unchanged."""
+
     _request: http.Request | None = field(default=None, repr=False)
     """Bare request for shape contexts (no flow)."""
 
@@ -450,26 +457,32 @@ class Context:
     @classmethod
     def from_flow(cls, flow: HTTPFlow) -> Context:
         """Build Context from a mitmproxy HTTPFlow."""
+        content = bytes(flow.request.content or b"")
         try:
-            body = json.loads(flow.request.content or b"{}")
+            body = json.loads(content or b"{}")
         except (json.JSONDecodeError, TypeError):
             body = {}
         return cls(
             flow=flow,
             _body=body,
+            _initial_body=deepcopy(body),
+            _initial_content=content,
             _inbound_format=_select_inbound_format(flow.request),
         )
 
     @classmethod
     def from_request(cls, req: http.Request) -> Context:
         """Build Context from a bare http.Request (for shapes, no flow)."""
+        content = bytes(req.content or b"")
         try:
-            body = json.loads(req.content or b"{}")
+            body = json.loads(content or b"{}")
         except (json.JSONDecodeError, TypeError):
             body = {}
         return cls(
             flow=None,
             _body=body,
+            _initial_body=deepcopy(body),
+            _initial_content=content,
             _request=req,
             _inbound_format=_select_inbound_format(req),
         )
@@ -748,6 +761,10 @@ class Context:
         body = self._body
         if "metadata" in body and isinstance(body["metadata"], dict) and not body["metadata"]:
             del body["metadata"]
+
+        if self._initial_content is not None and body == self._initial_body:
+            return
+
         encoded = json.dumps(body).encode()
 
         if self.flow is not None:

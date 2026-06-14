@@ -220,6 +220,45 @@ class TestCommit:
         written = json.loads(flow.request.content)
         assert written["model"] == "updated"
 
+    def test_commit_preserves_untouched_empty_body(self) -> None:
+        flow = MagicMock()
+        flow.id = "test-id"
+        flow.metadata = {}
+        flow.request.content = b""
+        flow.request.headers = {"Upgrade": "websocket"}
+
+        ctx = Context.from_flow(flow)
+        ctx.metadata.auth_provider = "anthropic"
+        ctx.commit()
+
+        assert flow.request.content == b""
+
+    def test_commit_preserves_untouched_invalid_json_body(self) -> None:
+        flow = MagicMock()
+        flow.id = "test-id"
+        flow.metadata = {}
+        flow.request.content = b"not-json"
+        flow.request.headers = {}
+
+        ctx = Context.from_flow(flow)
+        ctx.metadata.auth_provider = "anthropic"
+        ctx.commit()
+
+        assert flow.request.content == b"not-json"
+
+    def test_commit_writes_mutated_empty_body(self) -> None:
+        flow = MagicMock()
+        flow.id = "test-id"
+        flow.metadata = {}
+        flow.request.content = b""
+        flow.request.headers = {}
+
+        ctx = Context.from_flow(flow)
+        ctx.extras.set("metadata.user_id", "session-1")
+        ctx.commit()
+
+        assert json.loads(flow.request.content) == {"metadata": {"user_id": "session-1"}}
+
     def test_commit_keeps_ccproxy_metadata_out_of_body(self) -> None:
         flow = _make_flow()
         ctx = Context.from_flow(flow)
