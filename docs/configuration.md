@@ -729,7 +729,7 @@ ccproxy:
 
 | Field | Type | Description |
 |---|---|---|
-| `default_jq_filters` | list | jq expressions applied before CLI `--jq` filters. Each must consume and produce a JSON array. |
+| `default_jq_filters` | list | jq flow-set selectors applied before CLI `--jq` filters. Each must consume a JSON array and produce one JSON array of flow objects. |
 
 ## Environment Variables
 

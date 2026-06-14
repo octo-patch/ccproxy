@@ -442,18 +442,36 @@ class TestRunJq:
         result = _run_jq(flows, "map(select(.x == 1))")
         assert result == [{"id": "a", "x": 1}]
 
-    def test_chained_filters_via_pipe(self) -> None:
+    def test_chained_selectors_via_pipe(self) -> None:
         flows = [{"id": "a", "x": 1}, {"id": "b", "x": 2}, {"id": "c", "x": 1}]
-        result = _run_jq(flows, "map(select(.x == 1)) | map(.id)")
-        assert result == ["a", "c"]
+        result = _run_jq(flows, "map(select(.x == 1)) | sort_by(.id)")
+        assert result == [{"id": "a", "x": 1}, {"id": "c", "x": 1}]
 
     def test_invalid_filter_raises_value_error(self) -> None:
         with pytest.raises(ValueError, match="jq filter failed"):
             _run_jq([{"id": "a"}], "invalid(((filter")
 
     def test_non_array_output_raises_value_error(self) -> None:
-        with pytest.raises(ValueError, match="JSON array"):
+        with pytest.raises(ValueError, match="one JSON array of flow objects"):
             _run_jq([{"id": "a"}], ".[0]")
+
+    def test_stream_output_raises_selector_error(self) -> None:
+        flows = [{"id": "a", "x": 1}, {"id": "b", "x": 1}]
+
+        with pytest.raises(ValueError, match="multiple JSON values"):
+            _run_jq(flows, ".[] | select(.x == 1)")
+
+    def test_array_projection_raises_selector_error(self) -> None:
+        flows = [{"id": "a", "x": 1}, {"id": "b", "x": 2}]
+
+        with pytest.raises(ValueError, match="not a flow object"):
+            _run_jq(flows, "map(.id)")
+
+    def test_object_projection_raises_selector_error(self) -> None:
+        flows = [{"id": "a", "request": {"path": "/v1/messages"}}]
+
+        with pytest.raises(ValueError, match="without a string id"):
+            _run_jq(flows, "map(.request)")
 
     def test_empty_input_returns_empty(self) -> None:
         assert _run_jq([], ".") == []

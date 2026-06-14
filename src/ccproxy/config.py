@@ -225,10 +225,12 @@ class FlowsConfig(BaseModel):
     default_jq_filters: list[str] = Field(default_factory=list)
     """JQ filter expressions applied before any CLI ``--jq`` filters.
 
-    Each filter must consume a JSON array and produce a JSON array, e.g.::
+    Each filter is a flow-set selector: it must consume a JSON array and
+    produce one JSON array of flow objects, e.g.::
 
         map(select(.request.host | endswith("anthropic.com")))
 
+    For arbitrary projections, use ``ccproxy flows list --json | jq ...``.
     Filters chain in order via jq's ``|`` operator."""
 
 

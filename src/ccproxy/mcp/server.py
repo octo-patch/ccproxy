@@ -96,7 +96,7 @@ def configure_auth(token: str, base_url: str) -> None:
 
 
 def _flows_with_optional_filter(client: MitmwebClient, jq_filter: str | None) -> list[dict[str, Any]]:
-    """Run the user's jq filter (if any) over the raw flow list."""
+    """Run the user's jq flow-set selector (if any) over the raw flow list."""
     raw = client.list_flows()
     if not jq_filter:
         return raw
@@ -107,9 +107,10 @@ def _flows_with_optional_filter(client: MitmwebClient, jq_filter: str | None) ->
 def list_flows(jq_filter: str | None = None) -> list[dict[str, Any]]:
     """List captured ccproxy HTTP flows.
 
-    Optional ``jq_filter`` must consume and return a JSON array. Use this for
-    flow inventory, status triage, and selecting candidate flow ids before
-    calling body, diff, compare, shape, or clear tools.
+    Optional ``jq_filter`` is a flow-set selector: it must consume the flow
+    array and return one JSON array of flow objects. Use this for flow
+    inventory, status triage, and selecting candidate flow ids before calling
+    body, diff, compare, shape, or clear tools.
     """
     with _make_client() as client:
         return _flows_with_optional_filter(client, jq_filter)
@@ -236,7 +237,8 @@ def clear_flows(jq_filter: str | None = None) -> int:
     """Delete captured flows and return the number deleted.
 
     When ``jq_filter`` is omitted, all flows are cleared. When supplied, the
-    filter must consume and return a JSON array of flow objects.
+    filter is a flow-set selector and must return one JSON array of flow
+    objects.
     """
     with _make_client() as client:
         if jq_filter is None:

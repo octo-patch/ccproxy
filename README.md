@@ -403,7 +403,7 @@ ccproxy status [--json]                # Show running state
 ccproxy init [--force]                 # Initialize config in ~/.config/ccproxy/
 ccproxy logs [-f] [-n LINES]           # View logs
 
-# Flow inspection (all commands accept repeatable --jq filters)
+# Flow inspection (all commands accept repeatable --jq flow-set selectors)
 ccproxy flows list [--json] [--jq FILTER]...     # List flow set
 ccproxy flows dump [--jq FILTER]...              # Multi-page HAR of flow set
 ccproxy flows diff [--jq FILTER]...              # Sliding-window diff across set
@@ -434,7 +434,8 @@ GET /flows → config default_jq_filters → CLI --jq filters → final set
 ```
 
 The `--jq` flag is repeatable.
-Each filter must consume a JSON array and produce a JSON array.
+Each filter is a flow-set selector: it must consume a JSON array and produce one JSON array of flow
+objects.
 Multiple filters chain via jq’s `|` operator:
 
 ```bash
@@ -444,11 +445,21 @@ ccproxy flows list --jq 'map(select(.request.pretty_host == "api.anthropic.com")
 # Only POST /v1/messages
 ccproxy flows list --jq 'map(select(.request.path | startswith("/v1/messages")))'
 
+# Only paths containing /api/ws
+ccproxy flows list --jq 'map(select((.request.path // "") | contains("/api/ws")))'
+
 # Chain filters: Anthropic POSTs with 200 status
 ccproxy flows list \
   --jq 'map(select(.request.pretty_host == "api.anthropic.com"))' \
   --jq 'map(select(.request.method == "POST"))' \
   --jq 'map(select(.response.status_code == 200))'
+```
+
+`--jq` is for selecting the flow objects that `list`, `dump`, `diff`, `compare`, `clear`, `repl`,
+and `shapes save` operate on. For arbitrary projections or reporting, emit JSON and pipe it to jq:
+
+```bash
+ccproxy flows list --json | jq -r '.[].request.path | select(contains("/api/ws"))'
 ```
 
 Config-level defaults apply before CLI filters, so you can set a baseline in
