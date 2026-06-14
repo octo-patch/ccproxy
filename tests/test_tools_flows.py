@@ -590,13 +590,17 @@ class TestDoList:
             "response": {"status_code": status_code},
         }
 
-    def test_list_renders_table(self) -> None:
+    def test_list_renders_plain_summary_lines(self, capsys: pytest.CaptureFixture[str]) -> None:
         console = MagicMock()
         flow_set = [self._make_mock_flow()]
 
         _do_list(console, flow_set)
 
-        console.print.assert_called_once()
+        captured = capsys.readouterr()
+        assert captured.out.strip() == (
+            "id=abc123de method=POST status=200 host=api.openai.com path=/v1/chat/completions ua=claude-code/1.0 time=-"
+        )
+        console.print.assert_not_called()
 
     def test_list_empty_shows_message(self) -> None:
         console = MagicMock()
@@ -616,13 +620,26 @@ class TestDoList:
         assert '"id"' in captured.out
         console.print.assert_not_called()
 
-    def test_list_flow_no_response(self) -> None:
+    def test_list_flow_no_response(self, capsys: pytest.CaptureFixture[str]) -> None:
         console = MagicMock()
         flow = self._make_mock_flow()
         flow["response"] = None
 
         _do_list(console, [flow])
-        console.print.assert_called_once()
+        captured = capsys.readouterr()
+        assert "status=-" in captured.out
+        console.print.assert_not_called()
+
+    def test_list_quotes_fields_with_spaces(self, capsys: pytest.CaptureFixture[str]) -> None:
+        console = MagicMock()
+        flow = self._make_mock_flow()
+        flow["request"]["headers"] = [["user-agent", "Mozilla/5.0 ccproxy test"]]
+
+        _do_list(console, [flow])
+
+        captured = capsys.readouterr()
+        assert "ua='Mozilla/5.0 ccproxy test'" in captured.out
+        console.print.assert_not_called()
 
 
 class TestDoDump:

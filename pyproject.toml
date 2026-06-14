@@ -27,7 +27,6 @@ dependencies = [
   "certifi>=2024.0.0",
   "mitmproxy>=10.0.0",
   "xepor-ccproxy>=0.7.0",
-  "humanize>=4.0.0",
   "pydantic-ai-slim[anthropic,google,openai]>=1.99.0",
   "pydantic-graph>=1.99.0",
   "glom>=24.1.0",

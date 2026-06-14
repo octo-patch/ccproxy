@@ -23,6 +23,7 @@ import code
 import contextlib
 import importlib
 import json
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -32,11 +33,9 @@ from pathlib import Path
 from typing import Annotated, Any, cast
 
 import httpx
-import humanize
 import tyro
 from pydantic import BaseModel, Field
 from rich.console import Console
-from rich.table import Table
 
 
 class MitmwebClient:
@@ -153,10 +152,10 @@ class _FlowsBase(BaseModel):
 
 
 class FlowsList(_FlowsBase):
-    """Tabular listing of the resolved flow set."""
+    """Plain listing of the resolved flow set."""
 
     json_output: Annotated[bool, tyro.conf.arg(name="json")] = False
-    """Emit raw JSON instead of a rendered table."""
+    """Emit raw JSON instead of plain summary lines."""
 
 
 class FlowsDump(_FlowsBase):
@@ -374,7 +373,7 @@ class FlowReplSession:
         return str(self.flow(ref)["id"])
 
     def show(self, *, json_output: bool = False) -> None:
-        """Render the current flow set with the same table used by ``flows list``."""
+        """Render the current flow set with the same output used by ``flows list``."""
         _do_list(Console(), self.flows, json_output=json_output)
 
     def refresh(self) -> list[dict[str, Any]]:
@@ -464,7 +463,7 @@ def _do_list(
     *,
     json_output: bool = False,
 ) -> None:
-    """Render a pre-resolved flow set as a table or JSON."""
+    """Render a pre-resolved flow set as plain summary lines or JSON."""
     if json_output:
         for f in flow_set:
             ts = f["request"].get("timestamp_start")
@@ -477,35 +476,29 @@ def _do_list(
         console.print("[dim]No flows.[/dim]")
         return
 
-    table = Table(show_header=True, header_style="bold")
-    table.add_column("ID", width=8)
-    table.add_column("Method", width=7)
-    table.add_column("Code", width=5, justify="right")
-    table.add_column("Host", max_width=35)
-    table.add_column("Path", max_width=60)
-    table.add_column("UA", max_width=30)
-    table.add_column("Time", width=12)
-
     for f in flow_set:
-        req = f["request"]
-        res = f.get("response") or {}
-        code = str(res.get("status_code", "-"))
-        code_style = "green" if code.startswith("2") else "red" if code != "-" else "dim"
-        ua = _header_value(req.get("headers", []), "user-agent")
-        ts = req.get("timestamp_start")
-        rel_time = humanize.naturaltime(_dt(ts)) if ts else "-"
+        print(_flow_summary_line(f))
 
-        table.add_row(
-            f["id"][:8],
-            req["method"],
-            f"[{code_style}]{code}[/{code_style}]",
-            req["pretty_host"],
-            req["path"][:60],
-            ua[:30] if ua else "[dim]-[/dim]",
-            f"[dim]{rel_time}[/dim]",
-        )
 
-    console.print(table)
+def _flow_summary_line(flow: dict[str, Any]) -> str:
+    req = flow.get("request") or {}
+    res = flow.get("response") or {}
+    headers = req.get("headers") or []
+    ts = req.get("timestamp_start")
+    time = _dt(ts).isoformat().replace("+00:00", "Z") if ts else "-"
+    status = res.get("status_code") if isinstance(res, dict) else None
+    user_agent = _header_value(headers, "user-agent") if isinstance(headers, list) else ""
+
+    fields = {
+        "id": str(flow.get("id", ""))[:8],
+        "method": str(req.get("method") or "-"),
+        "status": status if status is not None else "-",
+        "host": str(req.get("pretty_host") or "-"),
+        "path": str(req.get("path") or "-"),
+        "ua": user_agent or "-",
+        "time": time,
+    }
+    return " ".join(f"{key}={shlex.quote(str(value))}" for key, value in fields.items())
 
 
 def _do_dump(client: MitmwebClient, flow_set: list[dict[str, Any]]) -> None:
