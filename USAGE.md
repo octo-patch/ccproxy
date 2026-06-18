@@ -212,8 +212,9 @@ Default hooks:
 
 ### Transform
 
-Matches the request against `inspector.transforms` rules (first match wins) and
-dispatches in one of three modes.
+Matches the request against `lightllm.transforms` rules (first match wins),
+then falls back to sentinel-driven Provider routing.
+Dispatch uses one of three actions.
 See [Transform Rules](#4-transform-rules).
 
 ### Outbound hooks
@@ -268,7 +269,7 @@ x-ccproxy-hooks: +extra_hook,-verbose_mode
 
 ## 4. Transform Rules
 
-Transform rules — `TransformOverride` entries under `inspector.transforms` —
+Transform rules — `TransformOverride` entries under `lightllm.transforms` —
 are an optional override layer on top of sentinel-driven Provider routing.
 The default list is empty; most routing comes from `providers` via
 `inject_auth`'s sentinel detection. Override rules cover edge cases:
@@ -294,7 +295,7 @@ The request is observed (logged, traced) but not modified.
 Useful for WireGuard reference traffic that should flow through transparently.
 
 ```yaml
-inspector:
+lightllm:
   transforms:
     - action: passthrough
       match_host: cloudcode-pa\.googleapis\.com$
@@ -306,7 +307,7 @@ For same-format routing where the body is already correct.
 Auth resolves via `dest_provider` → `providers[name]`.
 
 ```yaml
-inspector:
+lightllm:
   transforms:
     - action: redirect
       match_path: ^/v1internal
@@ -319,7 +320,7 @@ format to another (e.g. OpenAI format to Anthropic format).
 The response is also transformed back to the client's expected format.
 
 ```yaml
-inspector:
+lightllm:
   transforms:
     - action: transform
       match_path: ^/v1/chat/completions

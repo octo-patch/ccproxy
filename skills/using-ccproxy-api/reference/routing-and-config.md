@@ -23,9 +23,9 @@ ccproxy_inbound (DAG hooks)
   │
   ▼
 ccproxy_transform (lightllm dispatch)
-  Matches request against inspector.transforms rules.
-  First match wins. Rewrites host/path/body to dest_provider format.
-  Unmatched flows pass through unchanged.
+  Matches request against lightllm.transforms rules.
+  First match wins, then sentinel-key Provider routing is used.
+  Rewrites host/path/body to dest_provider format when routing applies.
   │
   ▼
 ccproxy_outbound (DAG hooks)
@@ -58,7 +58,7 @@ ccproxy:
         command: "jq -r '.claudeAiOauth.accessToken' ~/.claude/.credentials.json"
       host: api.anthropic.com
       path: /v1/messages
-      provider: anthropic
+      type: anthropic
 
   hooks:
     inbound:
@@ -75,11 +75,14 @@ ccproxy:
 
   inspector:
     port: 8083
+
+  lightllm:
     transforms:
       - match_host: cloudcode-pa.googleapis.com
         action: passthrough
       - match_path: /v1/chat/completions
         match_model: gpt-4o
+        action: transform
         dest_provider: anthropic
         dest_model: claude-haiku-4-5-20251001
 ```
@@ -104,7 +107,7 @@ hooks:
 
 ## Transform rules
 
-The default `inspector.transforms` list is empty: sentinel-keyed flows route through `providers` automatically. Override rules cover edge cases — forcing a specific provider for a path/model combo, bypassing auth for a specific host, etc. Each rule is a `TransformOverride` with these fields:
+The default `lightllm.transforms` list is empty: sentinel-keyed flows route through `providers` automatically. Override rules cover edge cases — forcing a specific provider for a path/model combo, bypassing auth for a specific host, etc. Each rule is a `TransformOverride` with these fields:
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -124,7 +127,7 @@ Auth is resolved via the `dest_provider` lookup: when a rule names `dest_provide
 ### Examples
 
 ```yaml
-inspector:
+lightllm:
   transforms:
     # Gemini passthrough (don't transform)
     - action: passthrough
@@ -133,12 +136,14 @@ inspector:
     # Route OpenAI requests to Anthropic
     - match_path: /v1/chat/completions
       match_model: gpt-4o
+      action: transform
       dest_provider: anthropic
       dest_model: claude-haiku-4-5-20251001
 
     # Route all /v1/messages to a different Anthropic model
     - match_path: /v1/messages
       match_model: claude-sonnet
+      action: redirect
       dest_provider: anthropic
       dest_model: claude-opus-4-5-20251101
 ```
@@ -151,7 +156,7 @@ First regex match wins. Unmatched reverse proxy flows return a 501 error (OpenAI
 
 ### providers configuration
 
-A `Provider` entry binds an auth source, a single destination (host + path), and a LiteLLM format identifier under a sentinel-suffix key. The sentinel key `sk-ant-oat-ccproxy-{name}` resolves to `providers[name]` for token injection and routing.
+A `Provider` entry binds an auth source, a single destination (host + path), and an adapter-family `type` identifier under a sentinel-suffix key. The sentinel key `sk-ant-oat-ccproxy-{name}` resolves to `providers[name]` for token injection and routing.
 
 **Compact form** (bare command string auto-coerces to a `command` auth):
 ```yaml
@@ -160,7 +165,7 @@ providers:
     auth: "jq -r '.claudeAiOauth.accessToken' ~/.claude/.credentials.json"
     host: api.anthropic.com
     path: /v1/messages
-    provider: anthropic
+    type: anthropic
 ```
 
 **Explicit form**:
@@ -172,7 +177,7 @@ providers:
       command: "jq -r '.claudeAiOauth.accessToken' ~/.claude/.credentials.json"
     host: api.anthropic.com
     path: /v1/messages
-    provider: anthropic
+    type: anthropic
 
   deepseek:
     auth:
@@ -181,7 +186,7 @@ providers:
       header: x-api-key       # custom auth header — defaults to Authorization: Bearer
     host: api.deepseek.com
     path: /anthropic/v1/messages
-    provider: anthropic       # destination format for lightllm dispatch
+    type: anthropic           # destination format for lightllm dispatch
 ```
 
 Provider fields:
@@ -189,7 +194,7 @@ Provider fields:
 - `auth.header` — target header name; omit for the default `Authorization: Bearer {token}`.
 - `host` — single destination hostname.
 - `path` — destination path. Supports `{model}` and `{action}` templating substituted from glom-read body fields and URL captures.
-- `provider` — LiteLLM provider identifier (`anthropic`, `gemini`, `openai`, `deepseek`, …). Drives `lightllm.transform_to_provider` when the incoming format differs from what the destination speaks.
+- `type` — adapter-family identifier (`anthropic`, `gemini`, `openai`, `openai_responses`, `perplexity_pro`, …). Drives lightllm dispatch when the incoming format differs from what the destination speaks.
 
 ### Token refresh
 

@@ -88,7 +88,7 @@ in-house cross-provider wire layer.
 | 1.x | 2.0 |
 | --- | --- |
 | LiteLLM subprocess + `config.yaml` | Removed — in-process pipeline; `host`/`port` live in `ccproxy.yaml` |
-| `oat_sources` + `inspector.transforms` (primary routing) | `providers` map; `transforms` remains as an optional regex override layer |
+| `oat_sources` + `inspector.transforms` (primary routing) | `providers` map; `lightllm.transforms` remains as an optional regex override layer |
 | `ccproxy install` | `ccproxy init` |
 | `--config-dir`; `~/.ccproxy` | `--config`; `$XDG_CONFIG_HOME/ccproxy/` |
 | `ccproxy start --mitm` / `--detach`, `stop`, `restart` | Inspector always on; foreground daemon |

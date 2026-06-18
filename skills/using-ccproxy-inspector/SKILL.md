@@ -282,7 +282,7 @@ Problem?
 |
 +- Request not transformed?
 |  -> ccproxy flows list --json
-|  -> Check inspector.transforms match_host/match_path/match_model
+|  -> Check lightllm.transforms match_host/match_path/match_model
 |  -> Check sentinel key resolved to a Provider
 |  -> ccproxy flows compare --jq 'map(.[-1])'
 |

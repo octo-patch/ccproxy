@@ -71,16 +71,18 @@ Each project can run its own ccproxy with isolated config, port, and transforms 
       let
         pkgs = nixpkgs.legacyPackages.${system};
         proxyConfig = ccproxy.lib.${system}.mkConfig {
-          settings = defaults // {
+          settings = {
             port = 4010;  # per-project: use 4010+ to avoid collisions
-            inspector = defaults.inspector // {
+            inspector = {
               port = 8090;
               cert_dir = "./.ccproxy";
+            };
+            lightllm = {
               transforms = [
                 { match_path = "/v1/messages"; action = "redirect";
                   dest_provider = "anthropic"; dest_host = "api.anthropic.com";
                   dest_path = "/v1/messages"; }
-              ];
+              ] ++ defaults.lightllm.transforms;
             };
           };
         };
@@ -199,14 +201,14 @@ ccproxy:
         command: "jq -r '.claudeAiOauth.accessToken' ~/.claude/.credentials.json"
       host: api.anthropic.com
       path: /v1/messages
-      provider: anthropic
+      type: anthropic
     gemini:
       auth:
         type: command
         command: "jq -r '.access_token' ~/.gemini/oauth_creds.json"
       host: cloudcode-pa.googleapis.com
       path: "/v1internal:{action}"
-      provider: gemini
+      type: gemini
 
   hooks:
     inbound:
@@ -224,6 +226,8 @@ ccproxy:
   inspector:
     port: 8083
     cert_dir: ~/.config/ccproxy
+
+  lightllm:
     transforms:
       - match_path: /v1/messages
         action: redirect
@@ -428,7 +432,7 @@ curl http://localhost:4000/v1/messages \
 
 ## Model routing
 
-Model routing is configured via `inspector.transforms` in `ccproxy.yaml`. Each transform rule matches by `match_host`, `match_path`, and/or `match_model`, then rewrites to `dest_provider`/`dest_model` via the lightllm dispatch. First match wins. Unmatched reverse proxy flows get a 501 error; unmatched WireGuard flows pass through unchanged.
+Model routing is configured via `lightllm.transforms` in `ccproxy.yaml` when an explicit override is needed. Each transform rule matches by `match_host`, `match_path`, and/or `match_model`, then rewrites to `dest_provider`/`dest_model` via the lightllm dispatch. First match wins. Requests without an override normally route through sentinel-key Provider resolution. Unmatched reverse proxy flows get a 501 error; unmatched WireGuard flows pass through unchanged.
 
 See [reference/routing-and-config.md](reference/routing-and-config.md) for transform configuration patterns.
 

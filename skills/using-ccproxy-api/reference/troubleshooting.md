@@ -121,12 +121,12 @@ providers:
     auth: "..."   # Matches: sk-ant-oat-ccproxy-anthropic
     host: api.anthropic.com
     path: /v1/messages
-    provider: anthropic
+    type: anthropic
   gemini:
     auth: "..."   # Matches: sk-ant-oat-ccproxy-gemini
     host: cloudcode-pa.googleapis.com
     path: "/v1internal:{action}"
-    provider: gemini
+    type: gemini
 ```
 
 Using `sk-ant-oat-ccproxy-claude` when the providers entry is named `anthropic` raises a fatal `AuthConfigError`:
@@ -266,6 +266,6 @@ The inspector UI runs at `http://127.0.0.1:{inspector.port}/?token={web_token}`.
 
 ### Other providers
 
-- Each provider entry binds an auth source, a single destination (`host` + `path`), and a LiteLLM `provider` identifier (drives format dispatch)
-- Provider resolution is sentinel-driven: `inject_auth` parses the `sk-ant-oat-ccproxy-{name}` suffix and looks up `providers[name]`. With no sentinel it walks `config.providers` in dict insertion order and falls back to the first entry with a cached token. The transform handler then chooses `redirect` vs `transform` based on whether the incoming format matches the destination's `provider` field. (`inspector.provider_map` is unrelated — it maps hostnames to OTel `gen_ai.system` attributes for span attribution only.)
-- Cross-provider format conversion happens via `lightllm` when `inspector.transforms` rule matches (or when sentinel-resolved Provider's `provider` field differs from the incoming format)
+- Each provider entry binds an auth source, a single destination (`host` + `path`), and an adapter-family `type` identifier (drives format dispatch)
+- Provider resolution is sentinel-driven: `inject_auth` parses the `sk-ant-oat-ccproxy-{name}` suffix and looks up `providers[name]`. With no sentinel it walks `config.providers` in dict insertion order and falls back to the first entry with a cached token. The transform handler then chooses `redirect` vs `transform` based on whether the incoming format matches the destination's `type` field. (`inspector.provider_map` is unrelated — it maps hostnames to OTel `gen_ai.system` attributes for span attribution only.)
+- Cross-provider format conversion happens via `lightllm` when a `lightllm.transforms` rule matches (or when sentinel-resolved Provider's `type` field differs from the incoming format)
