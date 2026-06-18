@@ -39,7 +39,7 @@ of your LLM usage while respecting terms of service:
 
 ### Platform support
 
-| Platform | Reverse proxy (`ccproxy start`) | WireGuard namespace jail (`ccproxy run --inspect`) |
+| Platform | Reverse proxy (`ccproxy start`) | WireGuard namespace jail (`ccproxy run --capture`) |
 |----------|---|---|
 | Linux | ✅ | ✅ |
 | Windows (WSL2) | ✅ | ✅ |
@@ -47,7 +47,7 @@ of your LLM usage while respecting terms of service:
 
 WSL2 is fully supported because it *is* Linux. Native Windows is not — use WSL2.
 On macOS, the reverse proxy listener (`ccproxy start` + SDK use) works fine, but
-the namespace jail (`ccproxy run --inspect`) requires Linux kernel features
+the namespace jail (`ccproxy run --capture`) requires Linux kernel features
 (unprivileged user/net namespaces, `slirp4netns`, `iptables` NAT) that have no
 macOS equivalent.
 
@@ -55,7 +55,7 @@ macOS equivalent.
 
 The recommended Windows install is the `ccproxy.wsl` distro artifact. It is
 built on NixOS-WSL and includes ccproxy plus the Linux namespace tools required
-by `ccproxy run --inspect`.
+by `ccproxy run --capture`.
 
 ```powershell
 # Requires Store WSL 2.4.4 or newer.
@@ -134,7 +134,7 @@ pip install ai-ccproxy
 ```
 
 `ccproxy start` and SDK use (`ANTHROPIC_BASE_URL=http://localhost:4000`) work
-the same as on Linux. `ccproxy run --inspect` will fail fast with a clear error
+the same as on Linux. `ccproxy run --capture` will fail fast with a clear error
 listing the missing Linux-only tools.
 
 ### Verify
@@ -151,7 +151,7 @@ ccproxy status --proxy --inspect    # exit 3 = both down (expected, nothing runn
 # Initialize config template at ~/.config/ccproxy/ccproxy.yaml
 ccproxy init
 
-# Start the inspector server (foreground)
+# Start the proxy and inspector stack (foreground)
 ccproxy start
 ```
 
@@ -166,7 +166,7 @@ claude -p "hello"
 traffic intercepted):
 
 ```bash
-ccproxy run --inspect -- claude -p "hello"
+ccproxy run --capture -- claude -p "hello"
 ```
 
 ## Architecture
@@ -247,7 +247,7 @@ ccproxy:
       - ccproxy.hooks.shape
       - ccproxy.hooks.commitbee_compat
 
-  inspector:
+  lightllm:
     # Optional regex-matched override rules layered on top of the
     # sentinel-driven providers map. Default is empty: most routing
     # comes from `providers` via inject_auth's sentinel detection.
@@ -397,8 +397,8 @@ left unset for the default `codex` provider.
 ## CLI Reference
 
 ```bash
-ccproxy start                          # Start server (inspector mode, foreground)
-ccproxy run [--inspect] -- <command>   # Run command with proxy env vars / WireGuard namespace jail
+ccproxy start                          # Start proxy and inspector stack (foreground)
+ccproxy run [--capture] -- <command>   # Run command with proxy env vars / WireGuard namespace jail
 ccproxy status [--json]                # Show running state
 ccproxy init [--force]                 # Initialize config in ~/.config/ccproxy/
 ccproxy logs [-f] [-n LINES]           # View logs
@@ -416,11 +416,11 @@ ccproxy shapes save PROVIDER [--jq FILTER]...    # Advanced: write/update local 
 ccproxy shapes save PROVIDER --mflow             # Advanced: write request-only .mflow override
 ```
 
-`ccproxy run` (without `--inspect`) sets `ANTHROPIC_BASE_URL`,
+`ccproxy run` (without `--capture`) sets `ANTHROPIC_BASE_URL`,
 `OPENAI_BASE_URL`, and `OPENAI_API_BASE` in the subprocess environment and
 routes traffic through the reverse proxy listener.
 
-`ccproxy run --inspect` wraps the command in a rootless WireGuard network
+`ccproxy run --capture` wraps the command in a rootless WireGuard network
 namespace jail — all outbound traffic is transparently intercepted regardless of
 SDK configuration.
 
@@ -607,7 +607,7 @@ port 8083. Config and cert store at `.ccproxy/` inside the project directory.
 ### Inspector prerequisites
 
 See [Installation](#installation) for the per-distro system package list.
-`ccproxy run --inspect` checks `slirp4netns`, `wg`, `unshare`, `nsenter`, `ip`
+`ccproxy run --capture` checks `slirp4netns`, `wg`, `unshare`, `nsenter`, `ip`
 on `PATH` and prints the missing ones with package hints. The reverse proxy
 (`ccproxy start`) does not require any of these and works on macOS too.
 
@@ -634,12 +634,12 @@ entries and restart `ccproxy start` if static tokens were stale at startup.
 
 ### TLS certificate errors in `ccproxy run`
 
-`ccproxy run` (without `--inspect`) does not intercept TLS. It only sets env
+`ccproxy run` (without `--capture`) does not intercept TLS. It only sets env
 vars pointing at the reverse proxy HTTP listener.
 If the target tool performs its own TLS verification against the upstream API,
 no cert installation is needed.
 
-`ccproxy run --inspect` intercepts all traffic including TLS. The mitmproxy CA
+`ccproxy run --capture` intercepts all traffic including TLS. The mitmproxy CA
 is combined with system CAs and injected via `SSL_CERT_FILE`,
 `NODE_EXTRA_CA_CERTS`, `REQUESTS_CA_BUNDLE`, and `CURL_CA_BUNDLE` into the
 subprocess environment automatically.

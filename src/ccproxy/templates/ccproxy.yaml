@@ -35,6 +35,7 @@ ccproxy:
   inspector:
     cert_dir: ~/.config/ccproxy
     port: 8083
+  lightllm:
     transforms: []
   log_level: INFO
   mcp:

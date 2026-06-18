@@ -56,14 +56,14 @@ another provider's captured shape.
 
 ## Advanced: Capture a Profile From Your CLI
 
-Any HTTP client that can be driven through `ccproxy run --inspect` becomes a
+Any HTTP client that can be driven through `ccproxy run --capture` becomes a
 source of TLS fingerprints. The WireGuard namespace terminates TLS on the
 mitmproxy side, so `FingerprintCaptureAddon` sees the real ClientHello and
 attaches it to the flow as `ccproxy.fingerprint.client`.
 
 ```bash
 # 1. Drive your CLI through the namespaced jail.
-ccproxy run --inspect -- <your-tool> <args>
+ccproxy run --capture -- <your-tool> <args>
 
 # 2. Find the captured flow for the provider you want to shape.
 ccproxy flows list --json --jq 'map(select(.request.pretty_host == "api.anthropic.com" and (.request.path | startswith("/v1/messages"))))'
@@ -107,7 +107,7 @@ nix develop --command bash -lc 'command -v tcpdump; command -v tshark; command -
 Host captures need packet-capture privileges. On this workstation, `sudo -n`
 is enough for `tcpdump`.
 
-`ccproxy run --inspect` writes TLS key material to `.ccproxy/tls.keylog`; see
+`ccproxy run --capture` writes TLS key material to `.ccproxy/tls.keylog`; see
 [`cli.py`](../src/ccproxy/cli.py) and
 [`namespace.py`](../src/ccproxy/inspector/namespace.py). Use that keylog when
 decrypting namespace captures.
@@ -190,7 +190,7 @@ stamp=$(date -u +%Y%m%dT%H%M%SZ)
 pcap="$PWD/.ccproxy/captures/anthropic_client_${stamp}.pcap"
 log="$PWD/.ccproxy/captures/anthropic_client_${stamp}.tcpdump.log"
 
-ccproxy run --inspect -- bash -lc "
+ccproxy run --capture -- bash -lc "
   set -euo pipefail
   tcpdump -i any -s 0 -U -w '$pcap' 'tcp port 443' >'$log' 2>&1 &
   pid=\$!

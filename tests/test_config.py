@@ -105,6 +105,53 @@ ccproxy:
         finally:
             yaml_path.unlink()
 
+    def test_lightllm_transforms_from_yaml(self) -> None:
+        """Test that transform overrides load from the lightllm section."""
+        yaml_content = """
+ccproxy:
+  lightllm:
+    transforms:
+      - match_path: ^/v1/chat/completions$
+        action: transform
+        dest_provider: anthropic
+        dest_model: claude-haiku-4-5-20251001
+"""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            f.write(yaml_content)
+            yaml_path = Path(f.name)
+
+        try:
+            config = CCProxyConfig.from_yaml(yaml_path)
+
+            assert len(config.lightllm.transforms) == 1
+            transform = config.lightllm.transforms[0]
+            assert transform.match_path == "^/v1/chat/completions$"
+            assert transform.action == "transform"
+            assert transform.dest_provider == "anthropic"
+            assert transform.dest_model == "claude-haiku-4-5-20251001"
+
+        finally:
+            yaml_path.unlink()
+
+    def test_inspector_transforms_rejected(self) -> None:
+        """Test that the old inspector.transforms location fails clearly."""
+        yaml_content = """
+ccproxy:
+  inspector:
+    transforms:
+      - action: passthrough
+"""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            f.write(yaml_content)
+            yaml_path = Path(f.name)
+
+        try:
+            with pytest.raises(ValueError, match="inspector\\.transforms has moved to lightllm\\.transforms"):
+                CCProxyConfig.from_yaml(yaml_path)
+
+        finally:
+            yaml_path.unlink()
+
     def test_host_port_from_yaml(self, monkeypatch: mock.MagicMock) -> None:
         """Test that host and port are loaded from the ccproxy section of YAML."""
         monkeypatch.delenv("CCPROXY_HOST", raising=False)

@@ -72,7 +72,7 @@ Describe "ccproxy.wsl" {
             $doctor = $doctorJson | ConvertFrom-Json
             @($doctor.failures).Count | Should -Be 0
 
-            $distro.Launch("CCPROXY_CONFIG_DIR=$configDir ccproxy run --inspect -- curl -fsS https://example.com -o /dev/null")
+            $distro.Launch("CCPROXY_CONFIG_DIR=$configDir ccproxy run --capture -- curl -fsS https://example.com -o /dev/null")
         }
         finally {
             if ($daemonPid) {

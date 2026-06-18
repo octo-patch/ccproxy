@@ -46,7 +46,7 @@ class _JournalHandlerFactory(Protocol):
 
 
 class Start(BaseModel):
-    """Start the ccproxy inspector server."""
+    """Start the ccproxy proxy and inspector stack."""
 
     args: Annotated[list[str] | None, tyro.conf.Positional] = None
     """Additional arguments (reserved for future use)."""
@@ -62,7 +62,7 @@ class Init(BaseModel):
 class Run(BaseModel):
     """Run a command with ccproxy environment.
 
-    Usage: ccproxy run [--inspect] -- <command> [args...]"""
+    Usage: ccproxy run [--capture] -- <command> [args...]"""
 
     command: Annotated[list[str], tyro.conf.Positional] = Field(default_factory=list)
     """Command and arguments to execute with proxy settings."""
@@ -395,7 +395,7 @@ def _ensure_combined_ca_bundle(
 def _sweep_stale_wg_files(config_dir: Path, *, current_pid: int) -> None:
     """Delete leftover WireGuard config files from prior runs.
 
-    The current ``ccproxy run --inspect`` writes ``wireguard-cli.{pid}.conf``
+    The current ``ccproxy run --capture`` writes ``wireguard-cli.{pid}.conf``
     and unlinks it on graceful shutdown. SIGKILL, panics, and reboots leak
     the file. ``wireguard-gateway.{pid}.conf`` and bare ``wireguard.conf``
     are pure historical droppings (no current writer); always remove them.
@@ -420,14 +420,14 @@ def _sweep_stale_wg_files(config_dir: Path, *, current_pid: int) -> None:
 def run_with_proxy(
     config_dir: Path,
     command: list[str],
-    inspect: bool = False,
+    capture: bool = False,
 ) -> None:
     """Run a command with ccproxy environment variables set.
 
-    Without --inspect: sets ANTHROPIC_BASE_URL etc. to point at ccproxy's
-    reverse proxy listener so SDK clients route through the inspector.
+    Without --capture: sets ANTHROPIC_BASE_URL etc. to point at ccproxy's
+    reverse proxy listener.
 
-    With --inspect: runs the subprocess in a WireGuard namespace
+    With --capture: runs the subprocess in a WireGuard namespace
     for transparent traffic capture (all traffic routes through mitmweb).
     """
     # deferred: heavy inspector chain
@@ -444,9 +444,9 @@ def run_with_proxy(
 
     env = os.environ.copy()
 
-    # Inspect mode: route subprocess traffic through a WireGuard namespace for transparent capture.
+    # Capture mode: route subprocess traffic through a WireGuard namespace for transparent capture.
     # No base URL env vars — traffic routes through the mitmweb addon pipeline.
-    if inspect:
+    if capture:
         # deferred: heavy namespace/slirp4netns chain
         from ccproxy.inspector.namespace import (
             check_namespace_capabilities,
@@ -460,7 +460,7 @@ def run_with_proxy(
             for p in problems:
                 print(f"Error: {p}", file=sys.stderr)
             print(
-                "\nCannot create network namespace for --inspect mode. All prerequisites above must be satisfied.",
+                "\nCannot create network namespace for --capture mode. All prerequisites above must be satisfied.",
                 file=sys.stderr,
             )
             sys.exit(1)
@@ -498,7 +498,7 @@ def run_with_proxy(
             if ctx:
                 cleanup_namespace(ctx)
 
-    # Non-inspect: point SDKs directly at the proxy
+    # Non-capture: point SDKs directly at the proxy
     proxy_url = f"http://{host}:{port}"
     env["OPENAI_API_BASE"] = proxy_url
     env["OPENAI_BASE_URL"] = proxy_url
@@ -658,7 +658,7 @@ async def _run_inspect(
 def start_server(
     config_dir: Path,
 ) -> None:
-    """Start the ccproxy inspector server.
+    """Start the ccproxy proxy and inspector stack.
 
     Runs mitmweb with the three-stage addon chain (inbound → transform →
     outbound). All request routing is handled via lightllm.
@@ -1129,27 +1129,27 @@ def main(
 
     elif isinstance(cmd, Run):
         # Tyro's greedy Positional consumes all args including flags.
-        # Extract --inspect/-i and --help/-h manually from the command list.
+        # Extract --capture/-c and --help/-h manually from the command list.
         args = list(cmd.command)
         if not args or args == ["-h"] or args == ["--help"]:
-            print("usage: ccproxy run [--inspect] -- <command> [args...]")
+            print("usage: ccproxy run [--capture] -- <command> [args...]")
             print()
             print("Run a command with ccproxy environment.")
             print()
             print("options:")
-            print("  --inspect, -i       Route subprocess traffic through a WireGuard namespace")
+            print("  --capture, -c       Route subprocess traffic through a WireGuard namespace")
             print("                      for transparent capture of all TCP/UDP traffic.")
             print("                      Requires ccproxy start to be running.")
             print("  command ...         Command and arguments to execute with proxy settings")
             sys.exit(0)
 
-        # Extract --inspect / -i from args
-        inspect = False
+        # Extract --capture / -c from args
+        capture = False
         filtered: list[str] = []
         i = 0
         while i < len(args):
-            if args[i] in ("--inspect", "-i"):
-                inspect = True
+            if args[i] in ("--capture", "-c"):
+                capture = True
                 i += 1
             elif args[i] == "--":
                 filtered.extend(args[i + 1 :])
@@ -1161,7 +1161,7 @@ def main(
         if not filtered:
             print("Error: No command specified to run", file=sys.stderr)
             sys.exit(1)
-        run_with_proxy(config_dir, filtered, inspect=inspect)
+        run_with_proxy(config_dir, filtered, capture=capture)
 
     elif isinstance(cmd, Logs):
         view_logs(follow=cmd.follow, lines=cmd.lines, config_dir=config_dir)

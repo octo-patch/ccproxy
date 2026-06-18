@@ -195,7 +195,7 @@ for the full field reference.
 
 The Gemini route is driven by `providers.gemini` — the sentinel key
 `sk-ant-oat-ccproxy-gemini` resolves to that entry for auth, host, and path.
-`inspector.transforms` is empty by default; the SDK and Glass paths below
+`lightllm.transforms` is empty by default; the SDK and Glass paths below
 both ride sentinel-key resolution, not transform overrides.
 
 ```nix
@@ -212,7 +212,7 @@ providers.gemini = {
   type = "gemini";
 };
 
-inspector.transforms = [];
+lightllm.transforms = [];
 
 hooks.outbound = [
   "ccproxy.hooks.gemini_cli"            # envelope wrap, header masquerade

@@ -1,28 +1,28 @@
 # Inspector Stack Architecture
 
-Inspect mode activates a full transparent MITM stack built on mitmproxy, WireGuard, and Linux
-network namespaces. It intercepts all HTTP traffic through the ccproxy pipeline — from direct API
-clients and namespace-jailed subprocesses — without modifying clients or injecting proxy
-environment variables.
+The inspector stack is ccproxy's transparent MITM layer built on mitmproxy, WireGuard, and Linux
+network namespaces. `ccproxy start` runs the stack and binds both the reverse proxy listener and the
+WireGuard listener. `ccproxy run --capture` is the optional namespace-capture path for tools that
+cannot be pointed at the reverse proxy with normal SDK base URL configuration.
 
 ## 1. Overview
 
 Two commands interact with the inspector:
 
 ```
-ccproxy start               # Start server — always inspector mode
-ccproxy run --inspect -- <command>  # Run subprocess in WireGuard namespace jail
+ccproxy start               # Start proxy and inspector listeners
+ccproxy run --capture -- <command>  # Run subprocess in WireGuard namespace jail
 ```
 
 `ccproxy start` launches mitmweb in-process via the `WebMaster` API. mitmweb binds two listeners:
 a reverse proxy for direct HTTP clients and a WireGuard server for namespace-jailed subprocesses.
 
-`ccproxy run --inspect -- <command>` starts the inspector (if not already running), creates a
-rootless user+net namespace routed through the WireGuard listener, and executes the given command
-inside. All traffic from the confined process is captured transparently — no `HTTPS_PROXY`, no
-certificate injection, no client modifications required.
+`ccproxy run --capture -- <command>` requires that `ccproxy start` is already running. It creates a
+rootless user+net namespace routed through the WireGuard listener and executes the given command
+inside. All traffic from the confined process is captured transparently — no `HTTPS_PROXY` and no
+client base URL configuration required.
 
-Inspect mode is all-or-nothing. If prerequisites for `ccproxy run --inspect` are missing,
+Namespace capture is all-or-nothing. If prerequisites for `ccproxy run --capture` are missing,
 the command hard-fails before any namespace is created.
 
 ---
@@ -46,7 +46,7 @@ opts = Options(
 | Listener | Mode string | Purpose |
 |----------|-------------|---------|
 | Reverse proxy | `reverse:http://localhost:1@{reverse_port}` | Direct HTTP clients (SDK, curl). Placeholder backend (`localhost:1`) is overwritten per-flow by the transform handler. |
-| WireGuard CLI | `wireguard:{wg_cli_conf_path}@{wg_cli_port}` | Namespace-jailed subprocesses (`ccproxy run --inspect`). UDP port auto-assigned at startup via `_find_free_udp_port()`. |
+| WireGuard CLI | `wireguard:{wg_cli_conf_path}@{wg_cli_port}` | Namespace-jailed subprocesses (`ccproxy run --capture`). UDP port auto-assigned at startup via `_find_free_udp_port()`. |
 
 The WireGuard port is found by binding to UDP port 0 and reading the kernel-assigned port. This
 value is passed to `_build_addons()` as `wg_cli_port` so the addon chain can reference it.
@@ -119,7 +119,7 @@ ReadySignal → InspectorAddon → FingerprintCaptureAddon → MultiHARSaver →
 | `MultiHARSaver` | `MultiHARSaver` | Implements the `ccproxy.dump` mitmproxy command — builds a multi-page HAR 1.2 (`entries[2i]` = forwarded request + provider response, `entries[2i+1]` = client request + client response). |
 | `ShapeCaptureAddon` | `ShapeCaptureAddon` | Implements the `ccproxy.shape` mitmproxy command — validates a flow against the provider's `capture.path_pattern`, then writes either a provider patch queue or an explicit request-only `.mflow` override. |
 | `ccproxy_inbound` | `InspectorRouter` (pipeline) | DAG executor for `hooks.inbound` entries — auth sentinel substitution (`inject_auth`), session ID extraction (`extract_session_id`). Skipped if no inbound hooks configured. |
-| `ccproxy_transform` | `InspectorRouter` (transform) | lightllm dispatch — matches `inspector.transforms` rules and falls back to sentinel-driven `Provider` routing. Rewrites destination (always) and body (cross-format). Handles non-streaming response transform back to OpenAI shape. |
+| `ccproxy_transform` | `InspectorRouter` (transform) | lightllm dispatch — matches `lightllm.transforms` rules and falls back to sentinel-driven `Provider` routing. Rewrites destination (always) and body (cross-format). Handles non-streaming response transform back to OpenAI shape. |
 | `ccproxy_outbound` | `InspectorRouter` (pipeline) | DAG executor for `hooks.outbound` entries — `gemini_cli` (cloudcode-pa envelope wrap), `inject_mcp_notifications`, `verbose_mode` (strip `redact-thinking-*`), `shape` (replay packaged/local compliance envelope), `commitbee_compat`. Skipped if no outbound hooks configured. |
 | `TransportOverrideAddon` | `TransportOverrideAddon` | Redirects provider-bound flows through the in-process curl-cffi sidecar when the resolved `Provider` declares `fingerprint_profile` or the active shape carries a captured fingerprint. |
 | `AuthAddon` | `AuthAddon` | 401-detect → refresh → replay. Triggered by `metadata_from_flow(flow).auth_injected` set by `inject_auth`. Re-resolves the credential source via `config.resolve_auth_token(provider)` and replays the request with the fresh token. |
@@ -385,7 +385,7 @@ handle_transform (RouteType.REQUEST)
   → guard: direction == "inbound"
   → parse body as JSON
   → _resolve_transform_target(flow, body)
-      → iterate config.inspector.transforms (first match wins)
+      → iterate config.lightllm.transforms (first match wins)
       → match_host: checked against pretty_host, Host header, X-Forwarded-Host
       → match_path: prefix match against request path
       → match_model: substring match against body["model"]
@@ -432,7 +432,7 @@ propagates through the pipeline and is treated as fatal).
 
 ## 8. Namespace Jail
 
-`ccproxy run --inspect -- <command>` confines a subprocess in a rootless user+net namespace, routed
+`ccproxy run --capture -- <command>` confines a subprocess in a rootless user+net namespace, routed
 entirely through mitmweb's WireGuard listener. All traffic from the subprocess is captured
 transparently.
 
@@ -553,7 +553,7 @@ LOCAL_STATIC_PRIVATE_KEY = <base64>
 This decrypts the outer WireGuard UDP tunnel. Combined with the TLS keylog, a full packet capture
 can be completely decrypted in Wireshark.
 
-### Combined CA bundle for ccproxy run --inspect
+### Combined CA bundle for ccproxy run --capture
 
 `_ensure_combined_ca_bundle()` in `cli.py` concatenates mitmproxy's CA cert with the system CA
 bundle after mitmweb starts (ensuring the CA cert exists). The combined bundle path is set in the

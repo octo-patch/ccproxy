@@ -77,7 +77,7 @@ namespace:
 
 ```bash
 ccproxy start
-ccproxy run --inspect -- claude -p "hello"
+ccproxy run --capture -- claude -p "hello"
 ```
 
 Privacy implications:
@@ -166,7 +166,7 @@ ccproxy namespace doctor --json
 ```
 
 This command creates the same permissive namespace path used by
-`ccproxy run --inspect`, runs a small probe inside it, then tears the namespace
+`ccproxy run --capture`, runs a small probe inside it, then tears the namespace
 down.
 
 It checks:
@@ -551,7 +551,7 @@ localhost.
 
 ```bash
 ccproxy start
-ccproxy run --inspect -- claude -p "hello"
+ccproxy run --capture -- claude -p "hello"
 ccproxy flows list
 ccproxy flows compare
 ```
@@ -722,4 +722,3 @@ ccproxy namespace status --json
 
 over raw configs or packet captures. Status output intentionally avoids printing
 WireGuard private key material.
-

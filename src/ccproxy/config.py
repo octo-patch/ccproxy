@@ -42,6 +42,7 @@ __all__ = [
     "BillingConfig",
     "CCProxyConfig",
     "GeminiCapacityFallbackConfig",
+    "LightllmConfig",
     "McpBufferConfig",
     "McpConfig",
     "McpHttpConfig",
@@ -499,7 +500,7 @@ class Provider(BaseModel):
 class TransformOverride(BaseModel):
     """Optional regex-matched override layer over Provider auto-routing.
 
-    The default ``inspector.transforms`` list is empty; sentinel-keyed flows
+    The default ``lightllm.transforms`` list is empty; sentinel-keyed flows
     route through :class:`CCProxyConfig.providers` automatically. Override
     rules cover edge cases — forcing a specific provider for a path/model
     combo, bypassing auth for a specific host, etc.
@@ -561,6 +562,19 @@ class TransformOverride(BaseModel):
         return self
 
 
+class LightllmConfig(BaseModel):
+    """Configuration for lightllm cross-format routing and transforms."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    transforms: list[TransformOverride] = Field(default_factory=list)
+    """Optional regex-matched override rules layered on top of the
+    sentinel-driven Provider routing. Default is empty: most routing comes
+    from :class:`CCProxyConfig.providers` via ``inject_auth``'s sentinel
+    detection. Override rules force a specific destination for a
+    path/model/host combination."""
+
+
 class InspectorConfig(BaseModel):
     """Configuration for the inspector (traffic capture via mitmproxy)."""
 
@@ -582,15 +596,15 @@ class InspectorConfig(BaseModel):
     )
     """Hostname → OTel gen_ai.system attribute mapping for provider identification."""
 
-    transforms: list[TransformOverride] = Field(default_factory=list)
-    """Optional regex-matched override rules layered on top of the
-    sentinel-driven Provider routing. Default is empty: most routing comes
-    from :class:`CCProxyConfig.providers` via ``inject_auth``'s sentinel
-    detection. Override rules force a specific destination for a
-    path/model/host combination."""
-
     mitmproxy: MitmproxyOptions = Field(default_factory=MitmproxyOptions)
     """mitmproxy option overrides passed via --set flags."""
+
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_moved_transforms(cls, data: Any) -> Any:
+        if isinstance(data, dict) and "transforms" in data:
+            raise ValueError("inspector.transforms has moved to lightllm.transforms")
+        return data
 
     @model_validator(mode="after")
     def _sync_cert_dir_to_confdir(self) -> "InspectorConfig":
@@ -733,6 +747,8 @@ class CCProxyConfig(BaseSettings):
 
     inspector: InspectorConfig = Field(default_factory=InspectorConfig)
 
+    lightllm: LightllmConfig = Field(default_factory=LightllmConfig)
+
     otel: OtelConfig = Field(default_factory=OtelConfig)
 
     shaping: ShapingConfig = Field(default_factory=ShapingConfig)
@@ -846,6 +862,9 @@ class CCProxyConfig(BaseSettings):
                 inspector_data = ccproxy_data.get("inspector")
                 if inspector_data:
                     instance.inspector = InspectorConfig(**cast(dict[str, Any], inspector_data))
+                lightllm_data = ccproxy_data.get("lightllm")
+                if lightllm_data:
+                    instance.lightllm = LightllmConfig(**cast(dict[str, Any], lightllm_data))
                 otel_data = ccproxy_data.get("otel")
                 if otel_data:
                     instance.otel = OtelConfig(**otel_data)

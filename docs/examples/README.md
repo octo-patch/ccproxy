@@ -289,7 +289,7 @@ ccproxy status
 Examples expect ccproxy running with:
 - **Proxy port**: 4000 (default)
 - **OAuth credentials**: Configured in `~/.config/ccproxy/ccproxy.yaml` under `providers`
-- **Model routing**: Driven by sentinel-key resolution against `providers`. Use `inspector.transforms` (`TransformOverride` entries) only for edge cases — bypassing auth for a host or forcing a specific destination for a path/model combo.
+- **Model routing**: Driven by sentinel-key resolution against `providers`. Use `lightllm.transforms` (`TransformOverride` entries) only for edge cases — bypassing auth for a host or forcing a specific destination for a path/model combo.
 
 ### Example ccproxy.yaml Provider Configuration
 

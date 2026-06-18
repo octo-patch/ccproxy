@@ -89,9 +89,9 @@ Check that ccproxy is reachable:
 ccproxy status --proxy --inspect
 ```
 
-The manual capture command uses `ccproxy run --inspect`. That mode requires the
+The manual capture command uses `ccproxy run --capture`. That mode requires the
 WireGuard namespace prerequisites listed in the README. If `ccproxy run
---inspect` reports missing system tools or namespace permissions, fix those
+--capture` reports missing system tools or namespace permissions, fix those
 first; `ccproxy shapes save` cannot create a shape until ccproxy has inspected
 one real CLI request.
 
@@ -111,13 +111,13 @@ Choose the provider you are fixing.
 For Anthropic / Claude Code:
 
 ```bash
-ccproxy run --inspect -- claude --model haiku -p "Reply with exactly: manual shape ok"
+ccproxy run --capture -- claude --model haiku -p "Reply with exactly: manual shape ok"
 ```
 
 For Gemini:
 
 ```bash
-ccproxy run --inspect -- gemini -m gemini-3.1-pro-preview -p "Reply with exactly: manual shape ok"
+ccproxy run --capture -- gemini -m gemini-3.1-pro-preview -p "Reply with exactly: manual shape ok"
 ```
 
 The important part is that the command succeeds. The exact wording of the
@@ -694,7 +694,7 @@ ccproxy flows compare
 # alongside your actual message content
 
 # Advanced development override; see "Manual Shaping When a Packaged Default Is Stale" above:
-ccproxy run --inspect -- claude -p "shape refresh"
+ccproxy run --capture -- claude -p "shape refresh"
 ccproxy shapes save anthropic
 
 # Remove user customizations and return to the bundled default:

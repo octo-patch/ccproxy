@@ -11,7 +11,7 @@ from mitmproxy.proxy.mode_specs import ProxyMode
 from ccproxy.auth.sources import CommandAuthSource
 from ccproxy.config import (
     CCProxyConfig,
-    InspectorConfig,
+    LightllmConfig,
     Provider,
     TransformOverride,
     set_config_instance,
@@ -59,14 +59,14 @@ def _make_flow(
 def _make_config_with_transforms(transforms: list[dict[str, Any]]) -> None:
     """Set up a CCProxyConfig with transform override rules."""
     overrides = [TransformOverride(**t) for t in transforms]
-    inspector = InspectorConfig(transforms=overrides)
-    config = CCProxyConfig(inspector=inspector)
+    lightllm = LightllmConfig(transforms=overrides)
+    config = CCProxyConfig(lightllm=lightllm)
     set_config_instance(config)
 
 
 def _make_config_with_providers(providers: dict[str, Provider]) -> CCProxyConfig:
     """Set up a CCProxyConfig with sentinel-keyed Provider entries."""
-    config = CCProxyConfig(providers=providers, inspector=InspectorConfig())
+    config = CCProxyConfig(providers=providers)
     set_config_instance(config)
     return config
 
@@ -259,7 +259,7 @@ class TestSentinelResolvedProvider:
             dest_model="claude-3-5-sonnet-20241022",
         )
         config = CCProxyConfig(
-            inspector=InspectorConfig(transforms=[override]),
+            lightllm=LightllmConfig(transforms=[override]),
             providers={"anthropic": sentinel_provider},
         )
         set_config_instance(config)
@@ -327,7 +327,7 @@ class TestHandleTransform:
         # transform action with an override requires a registered Provider entry
         # for dest_provider so the handler can resolve the destination format.
         config = CCProxyConfig(
-            inspector=InspectorConfig(
+            lightllm=LightllmConfig(
                 transforms=[
                     TransformOverride(
                         action="transform",
@@ -370,7 +370,7 @@ class TestHandleTransform:
         mock_render: MagicMock,
     ) -> None:
         config = CCProxyConfig(
-            inspector=InspectorConfig(
+            lightllm=LightllmConfig(
                 transforms=[
                     TransformOverride(
                         action="transform",
@@ -620,7 +620,7 @@ class TestHandleRedirect:
     def test_redirect_injects_api_key(self) -> None:
         """Override-driven redirect injects Authorization from the bound Provider."""
         config = CCProxyConfig(
-            inspector=InspectorConfig(
+            lightllm=LightllmConfig(
                 transforms=[
                     TransformOverride(
                         action="redirect",
@@ -661,7 +661,7 @@ class TestGeminiTransform:
     ) -> None:
         """A streaming Gemini transform produces ``:streamGenerateContent`` in the URL."""
         config = CCProxyConfig(
-            inspector=InspectorConfig(
+            lightllm=LightllmConfig(
                 transforms=[
                     TransformOverride(
                         action="transform",
@@ -709,7 +709,7 @@ class TestGeminiTransform:
     ) -> None:
         """A non-streaming Gemini transform produces ``:generateContent``."""
         config = CCProxyConfig(
-            inspector=InspectorConfig(
+            lightllm=LightllmConfig(
                 transforms=[
                     TransformOverride(
                         action="transform",

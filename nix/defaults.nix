@@ -138,6 +138,9 @@
       refresh_timeout_seconds = 15;
       refresh_headroom_seconds = 60;
     };
+    lightllm = {
+      transforms = [ ];
+    };
     shaping = {
       enabled = true;
       shapes_dir = "~/.config/ccproxy/shapes";
@@ -294,7 +297,6 @@
     inspector = {
       port = 8083;
       cert_dir = "~/.config/ccproxy";
-      transforms = [ ];
     };
   };
 }

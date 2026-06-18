@@ -794,8 +794,8 @@ class TestSafeKill:
 # =============================================================================
 
 
-class TestCliInspectHardFailure:
-    """Verify that ccproxy run --inspect refuses to run without the namespace path."""
+class TestCliCaptureHardFailure:
+    """Verify that ccproxy run --capture refuses to run without the namespace path."""
 
     @pytest.fixture(autouse=True)
     def _isolate_config_dir(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -805,14 +805,14 @@ class TestCliInspectHardFailure:
         monkeypatch.setenv("CCPROXY_CONFIG_DIR", str(tmp_path))
 
     @patch("ccproxy.cli.run_with_proxy")
-    def test_inspect_flag_passed_through(self, mock_run: Mock, tmp_path: Path) -> None:
-        """--inspect flag is extracted from args and passed to run_with_proxy."""
+    def test_capture_flag_passed_through(self, mock_run: Mock, tmp_path: Path) -> None:
+        """--capture flag is extracted from args and passed to run_with_proxy."""
         from ccproxy.cli import Run, main
 
-        cmd = Run(command=["--inspect", "--", "echo", "hello"])
+        cmd = Run(command=["--capture", "--", "echo", "hello"])
         main(cmd, config=tmp_path)
 
-        mock_run.assert_called_once_with(tmp_path, ["echo", "hello"], inspect=True)
+        mock_run.assert_called_once_with(tmp_path, ["echo", "hello"], capture=True)
 
     @patch("ccproxy.inspector.namespace.check_namespace_capabilities")
     def test_missing_prerequisites_exits_1(
@@ -826,7 +826,7 @@ class TestCliInspectHardFailure:
         mock_check.return_value = ["slirp4netns not found. Install with: nix profile install nixpkgs#slirp4netns"]
 
         with pytest.raises(SystemExit) as exc_info:
-            run_with_proxy(tmp_path, ["echo", "hello"], inspect=True)
+            run_with_proxy(tmp_path, ["echo", "hello"], capture=True)
 
         assert exc_info.value.code == 1
         captured = capsys.readouterr()
@@ -849,7 +849,7 @@ class TestCliInspectHardFailure:
         ]
 
         with pytest.raises(SystemExit) as exc_info:
-            run_with_proxy(tmp_path, ["echo", "hello"], inspect=True)
+            run_with_proxy(tmp_path, ["echo", "hello"], capture=True)
 
         assert exc_info.value.code == 1
         captured = capsys.readouterr()
@@ -861,14 +861,14 @@ class TestCliInspectHardFailure:
     def test_missing_wg_state_file_exits_1(
         self, mock_check: Mock, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        """Prerequisites present but no WG state file → clear error about starting --inspect."""
+        """Prerequisites present but no WG state file → clear error about starting ccproxy start."""
         from ccproxy.cli import run_with_proxy
 
         (tmp_path / "ccproxy.yaml").write_text("ccproxy: {}")
         # No .inspector-wireguard-client.conf
 
         with pytest.raises(SystemExit) as exc_info:
-            run_with_proxy(tmp_path, ["echo", "hello"], inspect=True)
+            run_with_proxy(tmp_path, ["echo", "hello"], capture=True)
 
         assert exc_info.value.code == 1
         captured = capsys.readouterr()
@@ -888,7 +888,7 @@ class TestCliInspectHardFailure:
         mock_create.side_effect = RuntimeError("ip link add failed: Operation not permitted")
 
         with pytest.raises(SystemExit) as exc_info:
-            run_with_proxy(tmp_path, ["echo", "hello"], inspect=True)
+            run_with_proxy(tmp_path, ["echo", "hello"], capture=True)
 
         assert exc_info.value.code == 1
         captured = capsys.readouterr()
@@ -916,7 +916,7 @@ class TestCliInspectHardFailure:
         mock_create.return_value = ctx
 
         with pytest.raises(SystemExit) as exc_info:
-            run_with_proxy(tmp_path, ["echo", "hello"], inspect=True)
+            run_with_proxy(tmp_path, ["echo", "hello"], capture=True)
 
         assert exc_info.value.code == 0
         mock_cleanup.assert_called_once_with(ctx)
@@ -940,13 +940,13 @@ class TestCliInspectHardFailure:
         mock_create.side_effect = RuntimeError("boom")
 
         with pytest.raises(SystemExit):
-            run_with_proxy(tmp_path, ["echo", "hello"], inspect=True)
+            run_with_proxy(tmp_path, ["echo", "hello"], capture=True)
 
         # cleanup not called because ctx was None (create_namespace raised before returning)
         mock_cleanup.assert_not_called()
 
-    def test_inspect_false_does_not_import_namespace(self, tmp_path: Path) -> None:
-        """Non-inspect run doesn't touch namespace module at all."""
+    def test_capture_false_does_not_import_namespace(self, tmp_path: Path) -> None:
+        """Non-capture run doesn't touch namespace module at all."""
         from ccproxy.cli import run_with_proxy
 
         (tmp_path / "ccproxy.yaml").write_text("ccproxy: {}")
@@ -954,7 +954,7 @@ class TestCliInspectHardFailure:
         with patch("subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(returncode=0)
             with pytest.raises(SystemExit) as exc_info:
-                run_with_proxy(tmp_path, ["echo", "hello"], inspect=False)
+                run_with_proxy(tmp_path, ["echo", "hello"], capture=False)
             assert exc_info.value.code == 0
 
 

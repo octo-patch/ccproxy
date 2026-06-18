@@ -65,9 +65,11 @@ ccproxy:
       - gemini-2.5-pro
       - gemini-2.5-flash
 
+  lightllm:
+    transforms: []           # Transform override rules (see Transform Rules)
+
   inspector:
     port: 8083               # mitmweb UI port
-    transforms: []           # lightllm transform rules (see Transform Rules)
     provider_map:            # Hostname → OTel gen_ai.system tag
       api.anthropic.com: anthropic
       api.openai.com: openai
@@ -91,7 +93,8 @@ ccproxy:
 | `providers` | map | `{}` | Provider entries keyed by sentinel suffix (auth + destination + format) |
 | `hooks` | object | — | Two-stage hook pipeline (inbound/outbound) |
 | `gemini_capacity` | object | — | Sticky-retry + fallback chain for Gemini RESOURCE_EXHAUSTED (see below) |
-| `inspector` | object | — | mitmweb and transform settings |
+| `lightllm` | object | — | Cross-format routing and transform overrides |
+| `inspector` | object | — | mitmweb listener, UI, and capture settings |
 | `otel` | object | — | OpenTelemetry export settings |
 | `shaping` | object | — | Request shaping configuration (see [shaping.md](shaping.md)) |
 | `flows` | object | — | Flow CLI defaults (see below) |
@@ -493,13 +496,13 @@ ccproxy:
 
 ## Transform Overrides
 
-The default `inspector.transforms` list is empty: routing comes from sentinel-key resolution against the `providers` map. When a sentinel key arrives, ccproxy resolves the matching `Provider`, sets `ctx.metadata.auth_provider`, and either redirects (incoming format matches the provider `type`) or cross-transforms via lightllm (formats differ). Most users never need a `TransformOverride`.
+The default `lightllm.transforms` list is empty: routing comes from sentinel-key resolution against the `providers` map. When a sentinel key arrives, ccproxy resolves the matching `Provider`, sets `ctx.metadata.auth_provider`, and either redirects (incoming format matches the provider `type`) or cross-transforms via lightllm (formats differ). Most users never need a `TransformOverride`.
 
-`inspector.transforms` is an ordered list of `TransformOverride` entries layered on top of Provider auto-routing. The first regex match wins. Use overrides for edge cases — bypassing auth for a specific host, forcing a particular destination for a path/model combo, etc.
+`lightllm.transforms` is an ordered list of `TransformOverride` entries layered on top of Provider auto-routing. The first regex match wins. Use overrides for edge cases — bypassing auth for a specific host, forcing a particular destination for a path/model combo, etc.
 
 ```yaml
 ccproxy:
-  inspector:
+  lightllm:
     transforms:
       # Bypass interception for a host: forward unchanged to its original destination.
       - action: passthrough
@@ -544,7 +547,6 @@ ccproxy:
   inspector:
     port: 8083
     cert_dir: ~/.config/ccproxy
-    transforms: []
     provider_map:
       api.anthropic.com: anthropic
       api.openai.com: openai
@@ -567,7 +569,6 @@ ccproxy:
 |---|---|---|---|
 | `port` | int | `8083` | mitmweb UI listen port |
 | `cert_dir` | path | — | mitmproxy CA certificate store directory. Populates `mitmproxy.confdir`. |
-| `transforms` | list | `[]` | Transform override rules (see above) |
 | `provider_map` | map | — | Hostname → `gen_ai.system` value for OTel span attributes |
 
 ### mitmproxy Options

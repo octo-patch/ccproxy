@@ -2,7 +2,7 @@
 
 Routing precedence on every inbound request:
 
-    1. ``inspector.transforms`` — first regex-matched override wins.
+    1. ``lightllm.transforms`` — first regex-matched override wins.
     2. ccproxy metadata ``auth_provider`` — set by ``inject_auth`` when a
        sentinel key resolved. Looks up :class:`CCProxyConfig.providers`.
     3. None — :class:`mitmproxy.proxy.mode_specs.ReverseMode` flows return
@@ -124,7 +124,7 @@ def _resolve_transform_target(
     config = get_config()
     request_model = str(glom(body or {}, "model", default=""))
 
-    for rule in config.inspector.transforms:
+    for rule in config.lightllm.transforms:
         if rule.match_host_re and not _any_search(rule.match_host_re, _flow_hosts(flow)):
             continue
         if not rule.match_path_re.search(flow.request.path):

@@ -203,8 +203,10 @@ ccproxy:
         assert env["OPENAI_API_BASE"] == "http://10.0.0.1:9999"
 
     @patch("subprocess.run")
-    def test_run_with_inspect_running(self, mock_run: Mock, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Test run with inspect - client still connects to main port (transparent proxy)."""
+    def test_run_without_capture_sets_base_urls(
+        self, mock_run: Mock, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Test default run points SDK base URLs at the reverse proxy."""
         config_file = tmp_path / "ccproxy.yaml"
         config_file.write_text("""
 ccproxy:
@@ -232,10 +234,10 @@ ccproxy:
         assert env["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:4000"
 
     @patch("subprocess.run")
-    def test_run_with_inspect_not_running(
+    def test_run_without_capture_does_not_require_inspector(
         self, mock_run: Mock, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Test run without inspect routes directly to LiteLLM."""
+        """Test default run routes through the reverse proxy env vars."""
         config_file = tmp_path / "ccproxy.yaml"
         config_file.write_text("""
 ccproxy:
@@ -260,7 +262,7 @@ ccproxy:
         env = call_args[1]["env"]
         assert env["OPENAI_API_BASE"] == "http://127.0.0.1:4000"
         assert env["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:4000"
-        # HTTP_PROXY should not be set when inspect is not requested
+        # HTTP_PROXY should not be set when capture mode is not requested.
         assert "HTTPS_PROXY" not in env or env.get("HTTPS_PROXY") == os.environ.get("HTTPS_PROXY")
         assert "HTTP_PROXY" not in env or env.get("HTTP_PROXY") == os.environ.get("HTTP_PROXY")
 
@@ -698,7 +700,7 @@ class TestMainFunction:
         cmd = Run(command=["echo", "hello", "world"])
         main(cmd, config=tmp_path)
 
-        mock_run.assert_called_once_with(tmp_path, ["echo", "hello", "world"], inspect=False)
+        mock_run.assert_called_once_with(tmp_path, ["echo", "hello", "world"], capture=False)
 
     def test_main_run_no_args(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch

@@ -50,8 +50,8 @@ YAML changes — code-only changes there require `systemctl --user restart ccpro
 ### CLI
 
 ```bash
-ccproxy start                          # Start server (inspector mode, foreground)
-ccproxy run [--inspect] -- <cmd>       # Run command with proxy env vars / WireGuard jail
+ccproxy start                          # Start proxy and inspector stack (foreground)
+ccproxy run [--capture] -- <cmd>       # Run command with proxy env vars / WireGuard jail
 ccproxy status [--proxy] [--inspect] [--mcp] [--mermaid]  # Health check (bitmask exit codes: 1=proxy, 2=inspect, 4=mcp); --mermaid emits hook DAGs as stateDiagram-v2
 ccproxy init [--force]                 # Initialize ~/.config/ccproxy/ccproxy.yaml
 ccproxy logs [-f] [-n LINES]           # Tail $CCPROXY_CONFIG_DIR/ccproxy.log
@@ -66,7 +66,7 @@ ccproxy namespace {status,doctor,wireguard-config}  # WireGuard namespace transp
 ### Smoke Test
 
 ```bash
-ccproxy run --inspect -- claude --model haiku -p "what's 2+2"
+ccproxy run --capture -- claude --model haiku -p "what's 2+2"
 ```
 
 End-to-end check through the WireGuard namespace: TLS interception, hook pipeline, transform
@@ -195,7 +195,7 @@ cascades into capacity fallback.
   default `codex` provider, `codex_oauth`, and same-format `openai_responses` redirect with shape
   replay.
   `scripts/package_mflows.py` is a dev artifact, not a public CLI command. It captures real CLI
-  traffic through `ccproxy run --inspect`, then prepares public `.mflow` files by reusing the same
+  traffic through `ccproxy run --capture`, then prepares public `.mflow` files by reusing the same
   apply-time shaping machinery against canonical SDK requests.
   **IMPERATIVE**: Packaged default `.mflow` files must remain minimal request-only artifacts:
   no response, websocket, error, metadata, `ccproxy.record`, client request snapshot, provider
@@ -293,7 +293,7 @@ hooks:
     - ccproxy.hooks.verbose_mode
 ```
 
-**Transform matching** — `inspector.transforms` is a list of `TransformOverride` rules layered on
+**Transform matching** — `lightllm.transforms` is a list of `TransformOverride` rules layered on
 top of sentinel-driven Provider routing. Default is empty. Regex match fields: `match_host`
 (checked against `pretty_host` + Host + X-Forwarded-Host), `match_path`, `match_model`. First match
 wins. Actions: `redirect` (default), `transform`, `passthrough`. Auth resolves via `dest_provider`
@@ -372,7 +372,7 @@ browser-shape headers (stamped by `pplx_stamp_headers`). 22 models in
 > paragraph or from reading the source alone — the doc captures spec references
 > (`~/dev/docs/man/pplx/*.md`), failure modes, and rationale that aren’t in the code comments.
 
-Routing precedence per request: (1) `inspector.transforms` regex match wins first; (2) sentinel
+Routing precedence per request: (1) `lightllm.transforms` regex match wins first; (2) sentinel
 resolution via `ctx.metadata.auth_provider` / `metadata_from_flow(flow).auth_provider` set by
 `inject_auth` resolves to a `providers[name]` lookup; (3) ReverseMode flows fall through to a 501
 OpenAI-shape error, WireGuard flows pass through unchanged.
@@ -405,7 +405,7 @@ Vendored fact lists live separately in `src/ccproxy/specs/claude_code_constants.
   mitmproxy + curl-cffi sidecar legs). WireGuard tunnel keys go to `{config_dir}/wg.keylog`.
 - **SSL CA bundle**: `_ensure_combined_ca_bundle()` combines mitmproxy CA with system CAs, injecting
   via `SSL_CERT_FILE` / `NODE_EXTRA_CA_CERTS` / `REQUESTS_CA_BUNDLE` / `CURL_CA_BUNDLE` for
-  `ccproxy run --inspect`.
+  `ccproxy run --capture`.
 - **Logging**: `FileHandler(cfg.resolved_log_file, mode="w")` truncated on each daemon start.
   Journal identifier from config-dir basename (`~/.config/ccproxy/` → `ccproxy`;
   `~/dev/projects/foo/.ccproxy/` → `ccproxy-foo`). `ccproxy logs` tails the log file.
