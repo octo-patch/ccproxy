@@ -81,9 +81,11 @@ ccproxy:
   providers:
     anthropic:
       auth:
-        command: printenv CLAUDE_CODE_OAUTH_TOKEN
-        file: ~/.opnix/secrets/claude-code-oauth-token
-        type: command
+        access_path: claudeAiOauth.accessToken
+        expiry_path: claudeAiOauth.expiresAt
+        file_path: ~/.claude/.credentials.json
+        refresh_path: claudeAiOauth.refreshToken
+        type: anthropic_oauth
       host: api.anthropic.com
       path: /v1/messages
       type: anthropic

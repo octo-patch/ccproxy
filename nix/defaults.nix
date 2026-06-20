@@ -6,9 +6,11 @@
     providers = {
       anthropic = {
         auth = {
-          type = "command";
-          command = "printenv CLAUDE_CODE_OAUTH_TOKEN";
-          file = "~/.opnix/secrets/claude-code-oauth-token";
+          type = "anthropic_oauth";
+          file_path = "~/.claude/.credentials.json";
+          access_path = "claudeAiOauth.accessToken";
+          refresh_path = "claudeAiOauth.refreshToken";
+          expiry_path = "claudeAiOauth.expiresAt";
         };
         host = "api.anthropic.com";
         path = "/v1/messages";
