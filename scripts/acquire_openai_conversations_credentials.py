@@ -40,6 +40,11 @@ DEFAULT_BROWSER = "firefox"
 DEFAULT_IMPERSONATE = "chrome136"
 DEFAULT_PERSONA = "chatgpt-paid"
 USER_AGENT = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36"
+OBSOLETE_SENTINEL_FIELDS = (
+    "chat_req_token",
+    "proof_token",
+    "chat_req_token_expires_at_ms",
+)
 
 
 def config_dir() -> Path:
@@ -118,7 +123,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--preserve-sentinel",
         action="store_true",
-        help="Preserve existing Sentinel fields even if access_token changes.",
+        help="Preserve existing current Sentinel fields even if access_token changes.",
     )
     parser.add_argument(
         "--persona",
@@ -297,15 +302,21 @@ def build_state(args: argparse.Namespace, access_token: str) -> tuple[dict[str, 
     state["access_token"] = access_token
     state["device_id"] = str(state.get("device_id") or uuid.uuid4())
     state["persona"] = str(state.get("persona") or args.persona)
+    for field in OBSOLETE_SENTINEL_FIELDS:
+        state.pop(field, None)
 
     if keep_sentinel:
-        state.setdefault("chat_req_token", "")
-        state.setdefault("proof_token", "")
-        state.setdefault("chat_req_token_expires_at_ms", 0)
+        state.setdefault("sentinel_token", "")
+        state.setdefault("sentinel_p_token", "")
+        state.setdefault("sentinel_expires_at_ms", 0)
+        state.setdefault("sentinel_flow", "conversation")
+        state.setdefault("sentinel_so_token", "")
     else:
-        state["chat_req_token"] = ""
-        state["proof_token"] = ""
-        state["chat_req_token_expires_at_ms"] = 0
+        state["sentinel_token"] = ""
+        state["sentinel_p_token"] = ""
+        state["sentinel_expires_at_ms"] = 0
+        state["sentinel_flow"] = "conversation"
+        state["sentinel_so_token"] = ""
 
     return state, token_changed
 
@@ -348,7 +359,7 @@ def main(argv: list[str] | None = None) -> int:
         expiry = datetime.fromtimestamp(expiry_ms / 1000, tz=UTC).isoformat()
         print(f"access_token expiry: {expiry}")
     if token_changed and not args.preserve_sentinel:
-        print("sentinel fields reset because the access_token changed")
+        print("current Sentinel fields reset because the access_token changed")
     return 0
 
 
