@@ -3,7 +3,7 @@
 # requires-python = ">=3.13"
 # dependencies = ["curl-cffi>=0.15.0"]
 # ///
-"""Acquire ChatGPT Web credential state for the chatgpt_web provider.
+"""Acquire OpenAI Conversations credential state for the openai_conversations provider.
 
 The script uses gateau as the browser-cookie source, then performs the
 ChatGPT session request with curl-cffi browser impersonation. Plain curl can
@@ -63,8 +63,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "-o",
         "--output",
         type=Path,
-        default=config_dir() / "chatgpt-web-credentials.json",
-        help="Credential JSON path. Default: $CCPROXY_CONFIG_DIR/chatgpt-web-credentials.json.",
+        default=config_dir() / "openai-conversations-credentials.json",
+        help="Credential JSON path. Default: $CCPROXY_CONFIG_DIR/openai-conversations-credentials.json.",
     )
     parser.add_argument(
         "-r",
@@ -342,7 +342,7 @@ def main(argv: list[str] | None = None) -> int:
         atomic_write_json(args.output.expanduser(), state)
 
     action = "validated" if args.dry_run else "wrote"
-    print(f"{action} ChatGPT Web credential state: {args.output.expanduser()}")
+    print(f"{action} OpenAI Conversations credential state: {args.output.expanduser()}")
     print(f"access_token bytes: {len(access_token)}")
     if expiry_ms := decode_expiry_ms(access_token):
         expiry = datetime.fromtimestamp(expiry_ms / 1000, tz=UTC).isoformat()
