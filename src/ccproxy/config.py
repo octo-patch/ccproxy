@@ -716,6 +716,9 @@ class CCProxyConfig(BaseSettings):
     forward path. Set to a positive float to opt into a total request
     budget applied uniformly across connect/read/write/pool phases."""
 
+    provider_max_connections: int = Field(default=256, gt=0)
+    """Maximum active curl handles per cached upstream transport client."""
+
     verify_readiness_on_startup: bool = True
     """Probe a well-known external host at startup and refuse to start if
     it is unreachable. Catches broken routes, DNS, CA bundles, or namespace

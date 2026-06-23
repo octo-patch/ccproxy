@@ -3,6 +3,7 @@
     host = "127.0.0.1";
     port = 4000;
     log_level = "INFO";
+    provider_max_connections = 256;
     providers = {
       anthropic = {
         auth = {

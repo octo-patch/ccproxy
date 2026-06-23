@@ -265,6 +265,15 @@ class TestRewritePath:
 
         assert flow.request.headers["host"] == f"127.0.0.1:{_SIDECAR_PORT}"
 
+    async def test_connection_close_header_set_for_sidecar_hop(self) -> None:
+        _set_provider("anthropic", fingerprint_profile="chrome131")
+        flow = _make_flow(auth_provider="anthropic")
+
+        addon = TransportOverrideAddon(sidecar_port=_SIDECAR_PORT)
+        await addon.request(flow)
+
+        assert flow.request.headers["connection"] == "close"
+
     async def test_transport_override_flag_set_in_metadata(self) -> None:
         _set_provider("anthropic", fingerprint_profile="chrome131")
         flow = _make_flow(auth_provider="anthropic")
@@ -305,6 +314,7 @@ class TestRewritePath:
         assert flow.request.port == _SIDECAR_PORT
         assert flow.request.scheme == "http"
         assert flow.request.headers["host"] == f"127.0.0.1:{_SIDECAR_PORT}"
+        assert flow.request.headers["connection"] == "close"
         assert flow.metadata["ccproxy.transport_override"] is True
         assert flow.metadata["ccproxy.fingerprint_profile"] == profile
 

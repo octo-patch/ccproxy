@@ -14,8 +14,9 @@ given a resolved :class:`~ccproxy.config.Provider`:
 
 When engaged, the addon stashes the real target in ``X-CCProxy-Target-Url``
 and the profile in ``X-CCProxy-Impersonate``, then rewrites destination to
-``127.0.0.1:<sidecar>``. The sidecar makes the actual upstream call via
-``httpx-curl-cffi`` and streams the response back.
+``127.0.0.1:<sidecar>``. The loopback hop is marked ``Connection: close`` so
+mitmproxy never reuses stale sidecar keep-alive sockets; the sidecar's
+``httpx-curl-cffi`` client still owns upstream connection reuse.
 """
 
 from __future__ import annotations
@@ -74,6 +75,7 @@ class TransportOverrideAddon:
         flow.request.port = self._sidecar_port
         flow.request.scheme = "http"
         flow.request.headers["host"] = f"127.0.0.1:{self._sidecar_port}"
+        flow.request.headers["connection"] = "close"
 
         metadata.transport_override = True
         metadata.fingerprint_profile = profile

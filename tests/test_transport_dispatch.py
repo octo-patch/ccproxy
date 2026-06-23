@@ -10,10 +10,12 @@ import asyncio
 from collections.abc import Generator
 from dataclasses import dataclass
 from types import SimpleNamespace
+from typing import Protocol, cast
 
 import httpx
 import pytest
 
+from ccproxy.inspector.fingerprint import CapturedFingerprint
 from ccproxy.transport import (
     IDLE_TIMEOUT_SECONDS,
     MAX_SESSIONS,
@@ -30,12 +32,49 @@ from ccproxy.transport.dispatch import _Cache
 # ---------------------------------------------------------------------------
 
 
+class _CurlSession(Protocol):
+    max_clients: int
+
+
+class _CurlTransport(Protocol):
+    _session: _CurlSession
+
+
 @pytest.fixture(autouse=True)
 def clean_cache() -> Generator[None]:
     """Reset the singleton and close all clients around every test."""
     reset_cache()
     yield
     reset_cache()
+
+
+def _curl_max_clients(client: httpx.AsyncClient) -> int:
+    transport = cast(_CurlTransport, client._transport)
+    return transport._session.max_clients
+
+
+def _make_captured_fingerprint() -> CapturedFingerprint:
+    return CapturedFingerprint(
+        schema_version=1,
+        source="test",
+        captured_at="2026-01-01T00:00:00+00:00",
+        sni="api.anthropic.com",
+        alpn_protocols=("h2", "http/1.1"),
+        legacy_version=771,
+        supported_versions=("13", "12"),
+        cipher_suites=("4865", "4866"),
+        extensions=("0", "10", "11", "13", "16", "43"),
+        supported_groups=("29", "23"),
+        ec_point_formats=("0",),
+        signature_algorithms=("0804", "0403"),
+        signature_algorithm_names=("rsa_pss_rsae_sha256", "ecdsa_secp256r1_sha256"),
+        ja3="ja3-test",
+        ja3_full="771,4865-4866,0-10-11-13-16-43,29-23,0",
+        ja4="ja4-test",
+        ja4_r="ja4r-test",
+        http_version="v2",
+        provider="anthropic",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -133,7 +172,7 @@ class TestProviderTimeout:
     async def test_default_provider_timeout_uses_curl_disabled_timeout(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(
             "ccproxy.transport.dispatch.get_config",
-            lambda: SimpleNamespace(provider_timeout=None),
+            lambda: SimpleNamespace(provider_timeout=None, provider_max_connections=256),
         )
 
         client = await get_client(host="example.com", profile="chrome131")
@@ -146,7 +185,7 @@ class TestProviderTimeout:
     async def test_configured_provider_timeout_applies_to_client(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(
             "ccproxy.transport.dispatch.get_config",
-            lambda: SimpleNamespace(provider_timeout=120.0),
+            lambda: SimpleNamespace(provider_timeout=120.0, provider_max_connections=256),
         )
 
         client = await get_client(host="example.com", profile="chrome131")
@@ -155,6 +194,41 @@ class TestProviderTimeout:
         assert client.timeout.read == 120.0
         assert client.timeout.write == 120.0
         assert client.timeout.pool == 120.0
+
+
+# ---------------------------------------------------------------------------
+# Provider max-connections policy
+# ---------------------------------------------------------------------------
+
+
+class TestProviderMaxConnections:
+    async def test_configured_max_connections_applies_to_impersonate_transport(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "ccproxy.transport.dispatch.get_config",
+            lambda: SimpleNamespace(provider_timeout=None, provider_max_connections=256),
+        )
+
+        client = await get_client(host="example.com", profile="chrome131")
+
+        assert _curl_max_clients(client) == 256
+
+    async def test_configured_max_connections_applies_to_captured_fingerprint_transport(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "ccproxy.transport.dispatch.get_config",
+            lambda: SimpleNamespace(provider_timeout=None, provider_max_connections=256),
+        )
+
+        client = await get_client(
+            host="example.com",
+            profile="anthropic",
+            fingerprint=_make_captured_fingerprint(),
+        )
+
+        assert _curl_max_clients(client) == 256
 
 
 # ---------------------------------------------------------------------------

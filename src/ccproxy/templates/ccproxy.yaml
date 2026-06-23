@@ -78,6 +78,7 @@ ccproxy:
       max_files: 30
       subscribe_timeout_seconds: 120
       upload_timeout_seconds: 60
+  provider_max_connections: 256
   providers:
     anthropic:
       auth:

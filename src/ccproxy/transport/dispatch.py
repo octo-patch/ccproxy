@@ -108,13 +108,18 @@ class _Cache:
                 self._entries.move_to_end(key)
                 return entry.client
 
+            max_connections = _transport_max_connections()
             if fingerprint is None:
                 transport = AsyncCurlTransport(
                     impersonate=impersonate,
+                    max_connections=max_connections,
                     curl_options={CurlOpt.HTTP_CONTENT_DECODING: 0},
                 )
             else:
-                transport = AsyncCurlTransport(**fingerprint.transport_kwargs())
+                transport = AsyncCurlTransport(
+                    max_connections=max_connections,
+                    **fingerprint.transport_kwargs(),
+                )
             client = httpx.AsyncClient(transport=transport, timeout=_transport_timeout())
             self._entries[key] = _Entry(client=client, last_used=now)
             await self._evict_lru()
@@ -154,6 +159,11 @@ def _transport_timeout() -> float:
     # httpx-curl-cffi converts HTTPX timeouts to curl timeout options; 0
     # maps to libcurl's disabled timeout behavior.
     return 0.0
+
+
+def _transport_max_connections() -> int:
+    """Return the active curl handle limit for each cached transport client."""
+    return get_config().provider_max_connections
 
 
 def _get_cache() -> _Cache:

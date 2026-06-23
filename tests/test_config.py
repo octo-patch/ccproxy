@@ -55,6 +55,7 @@ class TestCCProxyConfig:
         assert config.log_level == "INFO"
         assert config.host == "127.0.0.1"
         assert config.port == 4000
+        assert config.provider_max_connections == 256
         assert config.ccproxy_config_path == Path("./ccproxy.yaml")
 
     def test_from_yaml_no_project_section(self) -> None:
