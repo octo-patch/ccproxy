@@ -1,4 +1,5 @@
 from typing import Any
+
 from opentelemetry.sdk.resources import Resource
 
 class TracerProvider:
