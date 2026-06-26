@@ -87,8 +87,8 @@ ccproxy start
 
 `InspectorAddon` owns OTel span lifecycle, FlowRecord creation, direction detection, and
 pre-pipeline request snapshot.
-`responseheaders()` sets `flow.response.stream` (either `True` for passthrough or an
-`SSEPipeline` for cross-provider transform).
+`responseheaders()` sets `flow.response.stream` (either `True` for passthrough or an `SSEPipeline`
+for cross-provider transform).
 `AuthAddon` runs after the pipeline and detects 401s on flows where `inject_auth` injected a token,
 refreshes, and replays.
 `GeminiAddon` follows it and handles cloudcode-pa response unwrapping plus capacity (429/503)
@@ -117,18 +117,37 @@ cascades into capacity fallback.
 
 ### Key Subsystems (`src/ccproxy/`)
 
-- **`lightllm/`** — IR ↔ wire translation. `adapters/` does request-side wire ↔ IR (`UIAdapter`
-  subclasses: Anthropic, OpenAIChat bidirectional; Google, Perplexity outbound-only). `graph/`
-  does response-side SSE streaming via `pydantic_graph` FSMs, plus
-  `transform_buffered_response_sync` for non-streaming. **Canonical reference: `docs/lightllm.md`.**
+When working with `pydantic_graph`, reading all documentation before beginning is critical, and must
+be read in their entirely when using the library:
+
+- `./.kitstore/lib/pydantic-ai/docs/graph.md`
+
+- `./.kitstore/lib/pydantic-ai/docs/graph/builder/index.md`
+
+- `./.kitstore/lib/pydantic-ai/docs/graph/builder/steps.md`
+
+- `./.kitstore/lib/pydantic-ai/docs/graph/builder/joins.md`
+
+- `./.kitstore/lib/pydantic-ai/docs/graph/builder/decisions.md`
+
+- `./.kitstore/lib/pydantic-ai/docs/graph/builder/parallel.md`
+
+- `./.kitstore/lib/pydantic-ai/docs/examples/question-graph.md`
+
+- **`lightllm/`** — IR ↔ wire translation.
+  `adapters/` does request-side wire ↔ IR (`UIAdapter` subclasses: Anthropic, OpenAIChat
+  bidirectional; Google, Perplexity outbound-only).
+  `graph/` does response-side SSE streaming via `pydantic_graph` FSMs, plus
+  `transform_buffered_response_sync` for non-streaming.
+  **Canonical reference: `docs/lightllm.md`.**
 
 - **`pipeline/`** — DAG-based hook execution engine.
-  - `context.py` — `Context` wraps `HTTPFlow` (or bare `http.Request` for shapes). Typed content
-    (`messages`, `system`, `tools`) is lazy-parsed into Pydantic AI objects; body mutations
-    deferred until `commit()`; header mutations immediate.
-  - `wire.py` — Bidirectional wire ↔ Pydantic AI conversion. Handles `CachePoint` round-trip;
-    supports both Anthropic (`{type, text}`, `input_schema`) and OpenAI
-    (`{function: {name, parameters}}`) tool formats.
+  - `context.py` — `Context` wraps `HTTPFlow` (or bare `http.Request` for shapes).
+    Typed content (`messages`, `system`, `tools`) is lazy-parsed into Pydantic AI objects; body
+    mutations deferred until `commit()`; header mutations immediate.
+  - `wire.py` — Bidirectional wire ↔ Pydantic AI conversion.
+    Handles `CachePoint` round-trip; supports both Anthropic (`{type, text}`, `input_schema`) and
+    OpenAI (`{function: {name, parameters}}`) tool formats.
   - `hook.py` / `dag.py` / `executor.py` — `@hook(reads=..., writes=...)` declares glom-dot-path
     dependencies; `HookDAG` does Kahn topo-sort on root fields; executor isolates errors except
     `AuthConfigError`. Sibling function `{name}_guard` auto-binds as the hook’s guard.
@@ -136,19 +155,20 @@ cascades into capacity fallback.
     rendering; `x-ccproxy-hooks: +hook,-hook` per-request override header.
 
 - **`inspector/`** — mitmproxy addon layer.
-  - `addon.py` — `InspectorAddon`: OTel + flow records + direction detection + pre-pipeline
-    snapshot + provider response capture. Owns `responseheaders()` (xepor doesn’t implement it).
+  - `addon.py` — `InspectorAddon`: OTel + flow records + direction detection + pre-pipeline snapshot
+    \+ provider response capture.
+    Owns `responseheaders()` (xepor doesn’t implement it).
   - `auth_addon.py` / `gemini_addon.py` — 401-detect→refresh→replay and capacity
-    fallback+envelope-unwrap respectively. `GeminiAddon` installs `EnvelopeUnwrapStream` in
-    `responseheaders` for streaming flows.
+    fallback+envelope-unwrap respectively.
+    `GeminiAddon` installs `EnvelopeUnwrapStream` in `responseheaders` for streaming flows.
   - `process.py` — In-process mitmweb via `WebMaster`. Two listeners (reverse + WireGuard);
     WireGuard UDP port found by binding to 0.
-  - `pipeline.py` / `router.py` — Bridges hook registry with mitmproxy addons; `InspectorRouter`
-    is a vendored xepor `InterceptedAPI` with mitmproxy 12.x compatibility fixes.
+  - `pipeline.py` / `router.py` — Bridges hook registry with mitmproxy addons; `InspectorRouter` is
+    a vendored xepor `InterceptedAPI` with mitmproxy 12.x compatibility fixes.
   - `routes/{transform,models,health}.py` — Three transform modes (`transform`/`redirect`/
     `passthrough`); synthetic `/v1/models` registered before transform routes.
-  - `namespace.py` — Rootless user+net namespace via `unshare` + `slirp4netns` + WireGuard. TAP
-    `10.0.2.100/24`, gateway `10.0.2.2`, DNS `10.0.2.3`.
+  - `namespace.py` — Rootless user+net namespace via `unshare` + `slirp4netns` + WireGuard.
+    TAP `10.0.2.100/24`, gateway `10.0.2.2`, DNS `10.0.2.3`.
   - `contentview.py`, `shape_capturer.py`, `multi_har_saver.py` — Custom mitmproxy contentviews +
     `ccproxy.shape` / `ccproxy.dump` commands.
 
@@ -173,42 +193,39 @@ cascades into capacity fallback.
 - **`shaping/`** — Request shaping framework.
 
   **IMPERATIVE**: Shape replay is load-bearing for Anthropic identity.
-  The previous `inject_claude_code_identity` hook has been removed; shape replay is now the
-  only source of the Claude Code identity headers (user-agent, anthropic-beta, x-stainless-*, etc.)
+  The previous `inject_claude_code_identity` hook has been removed; shape replay is now the only
+  source of the Claude Code identity headers (user-agent, anthropic-beta, x-stainless-*, etc.)
   and the billing-header block.
   If a shape is missing or stale for the `anthropic` provider, requests will fail with 401/400 from
   Anthropic with no fallback.
   Normal users should consume the packaged defaults; do not direct users to capture their own shapes
   as a setup step. Refresh packaged defaults through `scripts/package_mflows.py` when provider SDK
-  behavior changes.
-  If a packaged default is stale and no fixed ccproxy release exists yet, point users to the manual
-  shaping guide in `docs/shaping.md` as the temporary rescue path.
+  behavior changes. If a packaged default is stale and no fixed ccproxy release exists yet, point
+  users to the manual shaping guide in `docs/shaping.md` as the temporary rescue path.
 
-  A *shape* is a known-good `mitmproxy.http.HTTPFlow` persisted as a
-  `{provider}.mflow`. At runtime, the working copy is configured via `http.Request.from_state()`,
-  configured headers are stripped, `content_fields` from the provider’s profile are injected from
-  the incoming request per `merge_strategies`, shape inner-DAG hooks run, then `apply_shape()`
-  stamps headers + query params + body onto the outbound flow.
+  A *shape* is a known-good `mitmproxy.http.HTTPFlow` persisted as a `{provider}.mflow`. At runtime,
+  the working copy is configured via `http.Request.from_state()`, configured headers are stripped,
+  `content_fields` from the provider’s profile are injected from the incoming request per
+  `merge_strategies`, shape inner-DAG hooks run, then `apply_shape()` stamps headers + query params
+  \+ body onto the outbound flow.
   Packaged defaults live in `src/ccproxy/templates/shapes/` and are public distribution artifacts.
-  As of this repo state, `anthropic.mflow`, `gemini.mflow`, and
-  `openai_responses.mflow` are packaged defaults. Codex/OpenAI Responses is supported through the
-  default `codex` provider, `codex_oauth`, and same-format `openai_responses` redirect with shape
-  replay.
-  `scripts/package_mflows.py` is a dev artifact, not a public CLI command. It captures real CLI
-  traffic through `ccproxy run --capture`, then prepares public `.mflow` files by reusing the same
-  apply-time shaping machinery against canonical SDK requests.
-  **IMPERATIVE**: Packaged default `.mflow` files must remain minimal request-only artifacts:
-  no response, websocket, error, metadata, `ccproxy.record`, client request snapshot, provider
-  response snapshot, auth token, cookie, or captured TLS fingerprint metadata. Implicit fingerprint
-  replay from packaged defaults broke Gemini via the sidecar; browser/captured fingerprint use must
-  remain an explicit Provider config choice.
+  As of this repo state, `anthropic.mflow`, `gemini.mflow`, and `openai_responses.mflow` are
+  packaged defaults. Codex/OpenAI Responses is supported through the default `codex` provider,
+  `codex_oauth`, and same-format `openai_responses` redirect with shape replay.
+  `scripts/package_mflows.py` is a dev artifact, not a public CLI command.
+  It captures real CLI traffic through `ccproxy run --capture`, then prepares public `.mflow` files
+  by reusing the same apply-time shaping machinery against canonical SDK requests.
+  **IMPERATIVE**: Packaged default `.mflow` files must remain minimal request-only artifacts: no
+  response, websocket, error, metadata, `ccproxy.record`, client request snapshot, provider response
+  snapshot, auth token, cookie, or captured TLS fingerprint metadata.
+  Implicit fingerprint replay from packaged defaults broke Gemini via the sidecar; browser/captured
+  fingerprint use must remain an explicit Provider config choice.
   Validate packaged defaults with `uv run ccproxy shapes audit` and `just e2e-packaged-mflows`.
   - `caching/` — Composable glom-based cache control hooks for the shape inner DAG: `strip` (deletes
     via `glom.delete`) and `insert` (sets via `glom.assign`). Used to normalize Anthropic’s
     4-breakpoint `cache_control` limit after `prepend_shape:N` merges.
   - `regenerate.py` — Shape inner-DAG hooks: `regenerate_user_prompt_id`, `regenerate_session_id`,
-    `regenerate_request_ids`, `regenerate_billing_header` (re-signs
-    `x-anthropic-billing-header`).
+    `regenerate_request_ids`, `regenerate_billing_header` (re-signs `x-anthropic-billing-header`).
   - `gemini.py` — Gemini-specific shape hook.
 
 - **`flows/store.py`** — TTL store (3600s, lazy cleanup) keyed by `x-ccproxy-flow-id` for
@@ -218,23 +235,24 @@ cascades into capacity fallback.
   `flow.metadata` is only their mitmproxy backing store.
 
 - **`transport/`** — Cached `httpx.AsyncClient` instances backed by `httpx-curl-cffi`’s
-  `AsyncCurlTransport` for browser TLS+HTTP/2 fingerprint impersonation. `get_client(*, host,
-  profile)` in `dispatch.py` is the entry point; profile names validate against curl-cffi’s
-  `BrowserTypeLiteral`. `sidecar.py` runs an in-process Starlette+uvicorn server that
+  `AsyncCurlTransport` for browser TLS+HTTP/2 fingerprint impersonation.
+  `get_client(*, host, profile)` in `dispatch.py` is the entry point; profile names validate against
+  curl-cffi’s `BrowserTypeLiteral`. `sidecar.py` runs an in-process Starlette+uvicorn server that
   `TransportOverrideAddon` redirects flows through via the two-header contract
-  (`X-CCProxy-Target-Url` + `X-CCProxy-Impersonate`).
-  `SSLKEYLOGFILE` + `MITMPROXY_SSLKEYLOGFILE` both route into `{config_dir}/tls.keylog` so
-  Wireshark decrypts every leg from one file. Auth + Gemini retry paths call `get_client(...)`
-  directly, bypassing the sidecar.
+  (`X-CCProxy-Target-Url` + `X-CCProxy-Impersonate`). `SSLKEYLOGFILE` + `MITMPROXY_SSLKEYLOGFILE`
+  both route into `{config_dir}/tls.keylog` so Wireshark decrypts every leg from one file.
+  Auth + Gemini retry paths call `get_client(...)` directly, bypassing the sidecar.
 
-- **`auth/sources.py`** — `AuthFields` is the base. `CommandAuthSource` (`type: command`) and
-  `FileAuthSource` (`type: file`) are static value loaders. `AuthSource(AuthFields)` is the
-  refresh-capable base (60s expiry headroom, atomic write-back via tmp+fsync+rename+chmod0o600,
-  glom-configurable `access_path`/`refresh_path`/`expiry_path`). `AnthropicAuthSource` and
-  `GoogleAuthSource` extend it with provider-specific form refresh bodies. `CodexAuthSource`
-  (`type: codex_oauth`) refreshes Codex ChatGPT JWTs from `~/.codex/auth.json` and exposes
-  companion account-routing headers. `parse_auth_source` accepts bare strings, explicit `type:`
-  discriminators, or `command`/`file` key inference.
+- **`auth/sources.py`** — `AuthFields` is the base.
+  `CommandAuthSource` (`type: command`) and `FileAuthSource` (`type: file`) are static value
+  loaders. `AuthSource(AuthFields)` is the refresh-capable base (60s expiry headroom, atomic
+  write-back via tmp+fsync+rename+chmod0o600, glom-configurable
+  `access_path`/`refresh_path`/`expiry_path`). `AnthropicAuthSource` and `GoogleAuthSource` extend
+  it with provider-specific form refresh bodies.
+  `CodexAuthSource` (`type: codex_oauth`) refreshes Codex ChatGPT JWTs from `~/.codex/auth.json` and
+  exposes companion account-routing headers.
+  `parse_auth_source` accepts bare strings, explicit `type:` discriminators, or `command`/`file` key
+  inference.
 
 - **`specs/`** — Vendored constants, Pydantic schemas, model catalog.
   - `claude_code_constants.py` — `BASE_BETAS`, `LONG_CONTEXT_BETAS` (vendored fact lists).
@@ -251,12 +269,11 @@ cascades into capacity fallback.
     inspection, shape capture, conversation grouping, model catalog, Perplexity quota (60s TTL
     cache), and Perplexity Pro thread library curation (every mutation tool is slug-first).
     The `_MCP_INSTRUCTIONS` block reserves MCP tools for library curation + quota; normal Perplexity
-    queries should hit `/v1/chat/completions`. Resources: `proxy://requests`, `proxy://status`.
-    Auth via `configure_auth(token, base_url)` before `streamable_http_app()`.
-    Uvicorn lifecycle is in `inspector/process.py:run_inspector()` — `log_config=None` +
-    `lifespan="on"` are both mandatory.
-  - `buffer.py` — `NotificationBuffer` singleton (default 65536 events/task, 600s TTL, lazy
-    expiry on ingest). Ingestion lives on the proxy listener: `inspector/routes/mcp.py` registers
+    queries should hit `/v1/chat/completions`. Resources: `proxy://requests`, `proxy://status`. Auth
+    via `configure_auth(token, base_url)` before `streamable_http_app()`. Uvicorn lifecycle is in
+    `inspector/process.py:run_inspector()` — `log_config=None` + `lifespan="on"` are both mandatory.
+  - `buffer.py` — `NotificationBuffer` singleton (default 65536 events/task, 600s TTL, lazy expiry
+    on ingest). Ingestion lives on the proxy listener: `inspector/routes/mcp.py` registers
     `POST /mcp/notify` (fire-and-forget, 200-always, no auth) plus a `/mcp` rewrite that forwards
     proxy-listener flows to the in-process FastMCP server — MCP clients can use either
     `http://127.0.0.1:<mcp.http.port>/mcp` or `/mcp` on the proxy port.
@@ -271,17 +288,17 @@ cascades into capacity fallback.
 ### Configuration
 
 **Discovery**: `$CCPROXY_CONFIG_DIR` (default: `$XDG_CONFIG_HOME/ccproxy/`) is the single knob.
-`ccproxy.yaml` is read from it. The dev shell sets `CCPROXY_CONFIG_DIR=$PWD/.ccproxy` for a
-project-local config.
+`ccproxy.yaml` is read from it.
+The dev shell sets `CCPROXY_CONFIG_DIR=$PWD/.ccproxy` for a project-local config.
 
 **Provenance**: `nix/defaults.nix` is the single source of truth.
-`src/ccproxy/templates/ccproxy.yaml` is generated by `flake.nix` via
-`pkgs.formats.yaml.generate` (`templateYaml`) and copied into the repo by the dev shell
-`shellHook` on shell entry. **Do not edit the template directly**; edit `nix/defaults.nix` and
-re-enter the dev shell (`nix develop` or `direnv reload`) to regenerate. `flake.nix` exports
-`defaultSettings`, `lib.mkConfig`, and `homeModules.ccproxy`.
-The repo also has a local pre-commit hook (`sync-ccproxy-template`) that runs the same refresh and
-stages `src/ccproxy/templates/ccproxy.yaml`.
+`src/ccproxy/templates/ccproxy.yaml` is generated by `flake.nix` via `pkgs.formats.yaml.generate`
+(`templateYaml`) and copied into the repo by the dev shell `shellHook` on shell entry.
+**Do not edit the template directly**; edit `nix/defaults.nix` and re-enter the dev shell
+(`nix develop` or `direnv reload`) to regenerate.
+`flake.nix` exports `defaultSettings`, `lib.mkConfig`, and `homeModules.ccproxy`. The repo also has
+a local pre-commit hook (`sync-ccproxy-template`) that runs the same refresh and stages
+`src/ccproxy/templates/ccproxy.yaml`.
 
 **Hook config format** — each entry is either a dotted module path or a `{hook, params}` dict:
 
@@ -293,16 +310,18 @@ hooks:
     - ccproxy.hooks.verbose_mode
 ```
 
-**Transform matching** — `lightllm.transforms` is a list of `TransformOverride` rules layered on
-top of sentinel-driven Provider routing. Default is empty. Regex match fields: `match_host`
-(checked against `pretty_host` + Host + X-Forwarded-Host), `match_path`, `match_model`. First match
-wins. Actions: `redirect` (default), `transform`, `passthrough`. Auth resolves via `dest_provider`
-→ `config.providers[name]`; `dest_host`/`dest_path` are raw overrides. Vertex AI:
-`dest_vertex_project`, `dest_vertex_location`.
+**Transform matching** — `lightllm.transforms` is a list of `TransformOverride` rules layered on top
+of sentinel-driven Provider routing.
+Default is empty. Regex match fields: `match_host` (checked against `pretty_host` + Host +
+X-Forwarded-Host), `match_path`, `match_model`. First match wins.
+Actions: `redirect` (default), `transform`, `passthrough`. Auth resolves via `dest_provider` →
+`config.providers[name]`; `dest_host`/`dest_path` are raw overrides.
+Vertex AI: `dest_vertex_project`, `dest_vertex_location`.
 
-**Shaping config** — per-provider profiles. `content_fields` lists keys injected from the incoming
-request; everything else persists from the shape. `merge_strategies` overrides the default
-`replace`: `prepend_shape`, `append_shape`, `drop` (`:N` slices the shape’s array first).
+**Shaping config** — per-provider profiles.
+`content_fields` lists keys injected from the incoming request; everything else persists from the
+shape. `merge_strategies` overrides the default `replace`: `prepend_shape`, `append_shape`, `drop`
+(`:N` slices the shape’s array first).
 `preserve_headers`, `strip_headers`, `capture.path_pattern` are self-explanatory.
 
 ### Singleton Patterns
@@ -321,19 +340,18 @@ keys — using raw provider keys bypasses the `inject_auth` hook and the shaping
 If a destination isn’t routable through a sentinel key, add a `providers` entry for it.
 
 `providers` is a `dict[str, Provider]`. Each `Provider` carries `auth` (an `AnyAuthSource`
-discriminated union — `command` / `file` / `anthropic_oauth` / `google_oauth` / `codex_oauth`;
-bare YAML strings auto-coerce to `command`), `host` (single destination hostname), `path` (with `{model}` / `{action}`
-templating), `type` (an adapter-family name routed by
+discriminated union — `command` / `file` / `anthropic_oauth` / `google_oauth` / `codex_oauth`; bare
+YAML strings auto-coerce to `command`), `host` (single destination hostname), `path` (with `{model}`
+/ `{action}` templating), `type` (an adapter-family name routed by
 `lightllm/graph/__init__.py:dispatch_dump_sync` — `anthropic` / `openai` / `google` / `gemini` /
 `vertex_ai` / `vertex_ai_beta` / `perplexity_pro`; Anthropic-compatible forks like `deepseek` and
 `zai` use `type: anthropic`), and an optional `fingerprint_profile` (curl-cffi impersonate name,
 e.g. `"chrome131"`, `"firefox144"`). `command` and `file` are static value loaders with no expiry
-awareness; `anthropic_oauth`, `google_oauth`, and `codex_oauth` own the in-process refresh
-lifecycle (60s headroom, atomic write-back to `file_path`). The optional `auth.header` field
-overrides the target auth header (default `authorization` with `Bearer`; set to `x-api-key` for raw
-injection).
-On 401, `AuthAddon` re-resolves the credential source; if the token changed, the request
-is replayed.
+awareness; `anthropic_oauth`, `google_oauth`, and `codex_oauth` own the in-process refresh lifecycle
+(60s headroom, atomic write-back to `file_path`). The optional `auth.header` field overrides the
+target auth header (default `authorization` with `Bearer`; set to `x-api-key` for raw injection).
+On 401, `AuthAddon` re-resolves the credential source; if the token changed, the request is
+replayed.
 
 When `fingerprint_profile` is set, `TransportOverrideAddon` rewrites `flow.request` to the
 in-process sidecar transport which forwards via `httpx-curl-cffi` — the upstream sees a real browser
@@ -382,11 +400,13 @@ otherwise cross-format `transform` via lightllm.
 ### Anthropic Billing Header
 
 The `regenerate_billing_header` shape inner-DAG hook re-signs the shape’s
-`x-anthropic-billing-header` against the incoming first user message. The salt is a single static
-reverse-engineered constant and is **never committed to this repo** — users supply it via
-`shaping.providers.anthropic.billing.salt` in `ccproxy.yaml` or the `CCPROXY_BILLING_SALT` env var.
-When unset, the hook no-ops with a warning. Two-phase signing (typed `_body` + serialized wire
-layer with `xxhash64`): see the docstring in `src/ccproxy/shaping/regenerate.py`.
+`x-anthropic-billing-header` against the incoming first user message.
+The salt is a single static reverse-engineered constant and is **never committed to this repo** —
+users supply it via `shaping.providers.anthropic.billing.salt` in `ccproxy.yaml` or the
+`CCPROXY_BILLING_SALT` env var.
+When unset, the hook no-ops with a warning.
+Two-phase signing (typed `_body` + serialized wire layer with `xxhash64`): see the docstring in
+`src/ccproxy/shaping/regenerate.py`.
 
 ### Key Constants (`src/ccproxy/constants.py`)
 
@@ -400,9 +420,10 @@ Vendored fact lists live separately in `src/ccproxy/specs/claude_code_constants.
 ## Key Implementation Notes
 
 - **TLS + WireGuard keylogs**: `MITMPROXY_SSLKEYLOGFILE` MUST be set before any mitmproxy import
-  (evaluated at module import). Set in `_run_inspect()` (`cli.py`) before `run_inspector()`. Both
-  `MITMPROXY_SSLKEYLOGFILE` and `SSLKEYLOGFILE` point at `{config_dir}/tls.keylog` (covers
-  mitmproxy + curl-cffi sidecar legs). WireGuard tunnel keys go to `{config_dir}/wg.keylog`.
+  (evaluated at module import).
+  Set in `_run_inspect()` (`cli.py`) before `run_inspector()`. Both `MITMPROXY_SSLKEYLOGFILE` and
+  `SSLKEYLOGFILE` point at `{config_dir}/tls.keylog` (covers mitmproxy + curl-cffi sidecar legs).
+  WireGuard tunnel keys go to `{config_dir}/wg.keylog`.
 - **SSL CA bundle**: `_ensure_combined_ca_bundle()` combines mitmproxy CA with system CAs, injecting
   via `SSL_CERT_FILE` / `NODE_EXTRA_CA_CERTS` / `REQUESTS_CA_BUNDLE` / `CURL_CA_BUNDLE` for
   `ccproxy run --capture`.
@@ -412,7 +433,7 @@ Vendored fact lists live separately in `src/ccproxy/specs/claude_code_constants.
 - **Hook error isolation**: Errors in one hook don’t block others.
   `AuthConfigError` is the exception — it propagates through the pipeline (fatal).
 - **Metadata access**: `ctx.metadata` is the ccproxy-owned flow metadata facade backed by
-  mitmproxy's `flow.metadata`. It never mutates request-body `metadata`. Hooks needing body-level
+  mitmproxy’s `flow.metadata`. It never mutates request-body `metadata`. Hooks needing body-level
   metadata should use `ctx.extras.get("metadata.foo")`; hooks needing ccproxy flow state should use
   `ctx.metadata.foo` or nested dot access such as `ctx.metadata.pplx.resolved_via`.
 - **Three-layer access model** for hooks:
@@ -433,8 +454,9 @@ Vendored fact lists live separately in `src/ccproxy/specs/claude_code_constants.
   A port remap rule maps the default ccproxy port (4000) to the running instance’s port when they
   differ.
 - **Gemini caching + auth header**: Provider-side `cachedContents` caching is currently unsupported
-  via the OAuth path (gemini-cli OAuth scopes don’t cover it). Gemini OAuth tokens (`ya29.*`) use
-  `Authorization: Bearer`; API keys (`AIza*`) use `?key=` in the URL.
+  via the OAuth path (gemini-cli OAuth scopes don’t cover it).
+  Gemini OAuth tokens (`ya29.*`) use `Authorization: Bearer`; API keys (`AIza*`) use `?key=` in the
+  URL.
 
 ## Triage Principle
 
@@ -448,8 +470,9 @@ refresher should rotate the token automatically; if that fails, inspect `~/.gemi
 
 ## Dev Instance vs Production Instance
 
-Two ccproxy instances can run concurrently. They differ only in `CCPROXY_CONFIG_DIR` and the YAML
-beneath it; `nix/defaults.nix` is the shared floor.
+Two ccproxy instances can run concurrently.
+They differ only in `CCPROXY_CONFIG_DIR` and the YAML beneath it; `nix/defaults.nix` is the shared
+floor.
 
 ### Dev (this repo)
 
@@ -463,9 +486,10 @@ experimental edits: replace the symlink with a real file (`direnv reload` will o
 
 Distributed as `homeModules.ccproxy = import ./nix/module.nix` (re-exported from `flake.nix`).
 Consumers import it as a Home Manager module and pass `programs.ccproxy.settings = { ... }` which
-deep-merges over `nix/defaults.nix`. Lists (`hooks`, `transforms`, `shape_hooks`) replace
-wholesale; only attrsets deep-merge. `providers` merges per-provider shallowly because `auth` is a
-discriminated union — partial overrides would mix exclusive auth keys.
+deep-merges over `nix/defaults.nix`. Lists (`hooks`, `transforms`, `shape_hooks`) replace wholesale;
+only attrsets deep-merge.
+`providers` merges per-provider shallowly because `auth` is a discriminated union — partial
+overrides would mix exclusive auth keys.
 
 After editing `nix/defaults.nix`, re-enter the dev shell (`nix develop` or `direnv reload`) to
-refresh `src/ccproxy/templates/ccproxy.yaml` from `flake.nix`'s `templateYaml`.
+refresh `src/ccproxy/templates/ccproxy.yaml` from `flake.nix`’s `templateYaml`.
