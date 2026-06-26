@@ -1,6 +1,14 @@
 {
   use = [
     {
+      node = "@repo:aurora";
+      mount = "aurora";
+    }
+    {
+      node = "@repo:pro-cli";
+      mount = "pro-cli";
+    }
+    {
       node = "@repo:mitmproxy";
       mount = "inspector/mitmproxy";
     }
@@ -23,10 +31,6 @@
     {
       node = "@repo:glom";
       mount = "lib/glom";
-    }
-    {
-      node = "@repo:litellm";
-      mount = "lib/litellm";
     }
     {
       node = "@repo:pydantic-ai";
