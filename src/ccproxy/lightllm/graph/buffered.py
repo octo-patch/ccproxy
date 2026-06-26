@@ -978,6 +978,9 @@ def transform_buffered_response_sync(
         synthetic_sse = _synthesize_google_sse(body) if isinstance(body, dict) else b""
     elif provider_type == "perplexity_pro":
         synthetic_sse = raw_bytes
+    elif provider_type == "openai_conversations":
+        # The upstream body IS already concatenated SSE-v1 — feed directly.
+        synthetic_sse = raw_bytes
     else:
         raise UnsupportedUpstreamError(f"no buffered transform for provider_type={provider_type!r}")
 

@@ -176,6 +176,7 @@ module = [
   "ccproxy.lightllm.graph.anthropic_render",
   "ccproxy.lightllm.graph.buffered",
   "ccproxy.lightllm.graph.google_intake",
+  "ccproxy.lightllm.graph.openai_conversations_intake",
   "ccproxy.lightllm.graph.openai_intake",
   "ccproxy.lightllm.graph.openai_render",
   "ccproxy.lightllm.graph.openai_responses_intake",

@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING
 from ccproxy.lightllm.graph.anthropic_intake import AnthropicResponseIntakeFSM
 from ccproxy.lightllm.graph.anthropic_render import AnthropicResponseRenderFSM
 from ccproxy.lightllm.graph.google_intake import GoogleResponseIntakeFSM
+from ccproxy.lightllm.graph.openai_conversations_intake import OpenAIConversationsIntakeFSM
 from ccproxy.lightllm.graph.openai_intake import OpenAIResponseIntakeFSM
 from ccproxy.lightllm.graph.openai_render import OpenAIResponseRenderFSM
 from ccproxy.lightllm.graph.openai_responses_intake import OpenAIResponsesIntakeFSM
@@ -31,6 +32,7 @@ if TYPE_CHECKING:
 __all__ = [
     "AnyAsyncIntakeFSM",
     "AnyAsyncRenderFSM",
+    "OpenAIConversationsIntakeFSM",
     "UnsupportedListenerError",
     "UnsupportedUpstreamError",
     "dispatch_dump",
@@ -53,6 +55,7 @@ AnyAsyncIntakeFSM = (
     | OpenAIResponsesIntakeFSM
     | GoogleResponseIntakeFSM
     | PerplexityResponseIntakeFSM
+    | OpenAIConversationsIntakeFSM
 )
 AnyAsyncRenderFSM = AnthropicResponseRenderFSM | OpenAIResponseRenderFSM | OpenAIResponsesRenderFSM
 
@@ -99,6 +102,8 @@ def dispatch_intake(
         return GoogleResponseIntakeFSM(model=model, request_params=request_params)
     if provider_type == "perplexity_pro":
         return PerplexityResponseIntakeFSM(model=model, request_params=request_params)
+    if provider_type == "openai_conversations":
+        return OpenAIConversationsIntakeFSM(model=model, request_params=request_params)
     raise UnsupportedUpstreamError(f"no response intake for provider_type={provider_type!r}")
 
 
