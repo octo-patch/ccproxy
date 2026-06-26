@@ -156,8 +156,15 @@ async def _handle(request: Request) -> Response:
             stream=True,
         )
     except Exception as e:
-        logger.warning("sidecar: transport error for %s: %s", target_url, e)
-        return Response(f"transport error: {e}", status_code=502)
+        # httpx-curl-cffi translates curl errors via assert exc.code, which
+        # raises AssertionError("Curl error code undefined") when the underlying
+        # ImpersonateError carries code=0. Unwrap the cause chain to recover
+        # the real message (e.g. "Cipher 0xa3 is not found").
+        real: BaseException = e
+        if isinstance(e, AssertionError) and isinstance(e.__context__, Exception):
+            real = e.__context__
+        logger.warning("sidecar: transport error for %s: %s", target_url, real)
+        return Response(f"transport error: {real}", status_code=502)
 
     decoder = _response_decoder(upstream.headers)
     response_header_drop = _RELAY_RESPONSE_EXCLUDED_HEADERS if decoder is not None else _RELAY_EXCLUDED_HEADERS

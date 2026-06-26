@@ -15,7 +15,7 @@ CCPROXY_BASE = os.environ.get("CCPROXY_E2E_URL", "http://127.0.0.1:4001")
 SHAPES_DIR = Path(__file__).resolve().parents[2] / "src" / "ccproxy" / "templates" / "shapes"
 
 ANTHROPIC_MODEL = os.environ.get("CCPROXY_E2E_ANTHROPIC_MODEL", "claude-haiku-4-5-20251001")
-GEMINI_MODEL = os.environ.get("CCPROXY_E2E_GEMINI_MODEL", "gemini-3.1-pro-preview")
+GEMINI_MODEL = os.environ.get("CCPROXY_E2E_GEMINI_MODEL", "gemini-2.5-flash")
 CODEX_MODEL = os.environ.get("CCPROXY_E2E_CODEX_MODEL", "gpt-5.5")
 
 

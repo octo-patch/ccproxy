@@ -1,16 +1,16 @@
 """Rewrite ``flow.request`` to the in-process sidecar for impersonated outbound.
 
-Selection is keyed on the ccproxy metadata facade. Engagement precedence,
-given a resolved :class:`~ccproxy.config.Provider`:
+Sidecar engagement is keyed exclusively on ``Provider.fingerprint_profile``
+being set in config. When set, the named profile (a curl-cffi browser name
+such as ``"chrome131"`` or a captured-fingerprint handle) drives TLS+HTTP/2
+impersonation through the in-process curl-cffi transport.
 
-1. ``Provider.fingerprint_profile`` set in config — always wins. Used for
-   browser-name overrides (``chrome131``, ``firefox144``) or to force a
-   different provider's shape.
-2. Unset, but ``ShapeStore.pick_fingerprint(provider.type)`` returns a
-   :class:`~ccproxy.inspector.fingerprint.CapturedFingerprint` — the
-   fingerprint is an inherent property of the captured shape, so sidecar
-   engages implicitly with ``provider.type`` as the impersonate key.
-3. Neither — mitmproxy's native transport is used unchanged.
+When ``fingerprint_profile`` is unset, mitmproxy's native transport is used
+unchanged — regardless of whether a shape file happens to carry a captured
+fingerprint in its metadata. Implicit sidecar engagement from shape-embedded
+fingerprints is intentionally absent: captured fingerprints must be opted
+into explicitly via Provider config to avoid cipher-compatibility failures
+on providers that don't require browser-level TLS impersonation.
 
 When engaged, the addon stashes the real target in ``X-CCProxy-Target-Url``
 and the profile in ``X-CCProxy-Impersonate``, then rewrites destination to
@@ -51,11 +51,7 @@ class TransportOverrideAddon:
 
         profile = provider.fingerprint_profile
         if profile is None:
-            from ccproxy.shaping.store import get_store
-
-            if get_store().pick_fingerprint(provider.type) is None:
-                return
-            profile = provider.type
+            return
 
         target_url = flow.request.pretty_url
 
