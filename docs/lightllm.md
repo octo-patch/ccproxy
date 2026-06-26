@@ -323,10 +323,12 @@ class AnthropicResponseIntakeFSM:
         return result
 ```
 
-The render side (`anthropic_render.py`, `openai_render.py`) is symmetric:
-state owns an `events_queue: deque[ModelResponseStreamEvent]` and an
-`out_bytes: bytearray`; handler steps emit SSE wire bytes per IR event;
-the terminal step returns `bytes(state.out_bytes)`.
+The render side (`anthropic_render.py`, `openai_render.py`,
+`openai_responses_render.py`) is symmetric: state owns an
+`events_queue: deque[ModelResponseStreamEvent]` and an `out: bytearray`; the
+outer router dispatches each IR event kind, with the `part` / `delta`
+type-switches handled by inner no-loop subgraphs; the terminal step returns
+`bytes(state.out)`.
 
 ### Why this shape
 
@@ -340,13 +342,23 @@ the terminal step returns `bytes(state.out_bytes)`.
 
 ### Subgraph composition
 
-The Anthropic and OpenAI intake FSMs are single-level — one router, a typed
-decision, a per-event-kind handler step. The Google and Perplexity intakes
-have a second axis of dispatch *within* each event (Google: walk
-`chunk.candidates[0].content.parts`; Perplexity: walk `event.blocks[]`).
-Inlining that walk inside a single handler produces 40-line (Google) and
-142-line (Perplexity) imperative ladders that are awkward to reason about
-and to mermaid.
+Every intake and render FSM graph-ifies its inner per-event dispatch through a
+named subgraph; no imperative `isinstance` ladder remains inside a handler
+step. The **form** follows the wire shape:
+
+- **List traversal → looping subgraph.** When an event/chunk carries a *list*
+  to iterate (Google `chunk.candidates[0].content.parts`, Perplexity
+  `event["blocks"]`, OpenAI chunk `delta.tool_calls`), the subgraph drains a
+  `state.<x>_queue` deque with a `pop_next_*` router + loop-back — the
+  sequential, ordered analogue of `.map()`, which must NOT be used here because
+  parallel forks would race the shared `parts_manager` and reorder SSE output.
+- **Single-object type-switch → no-loop subgraph.** When an event carries one
+  object to type-switch on (Anthropic `event.content_block` / `event.delta`,
+  OpenAI-Responses `item`, the render-side IR `part` / `delta`), the subgraph is
+  a flat `open_* → g.decision() → handler` with no loop. The decision matches
+  the concrete SDK/IR classes directly (no wrapper dataclasses when the variants
+  are distinct classes) and ends with a `g.match(TypeExpression[object])`
+  catch-all that logs unhandled variants instead of silently dropping them.
 
 To collapse those ladders back into the declarative graph idiom, the
 graph layer ships a temporary monkey-patch at
@@ -368,8 +380,8 @@ graph sees and mutates the same state instance as the parent, which is how
 cross-block invariants (e.g. Perplexity's `state.answer_seen` prefix
 accumulation) survive the decomposition.
 
-Both call sites import the patch module at top-level to install the
-method before they use it:
+Every intake/render module that composes a subgraph imports the patch module
+at top-level to install the method before they use it:
 
 ```python
 import ccproxy.lightllm.graph._subgraph_patch  # noqa: F401  — installs add_subgraph
@@ -381,17 +393,19 @@ Mermaid renders the composed step as a single labelled node:
 subgraph_pplx_event_dispatch: dispatch_event
 ```
 
-The inner graph is exposed at module scope (`_event_dispatch_graph` in
-perplexity_intake, `_chunk_dispatch_graph` in google_intake) so it can be
-rendered standalone for the visualization sanity check (see the
-Visualization section). The patch deliberately does NOT integrate with
-mermaid's `subgraph` cluster syntax — that needs upstream cooperation.
+Each inner subgraph is exposed at module scope (e.g.
+`_block_start_graph` / `_block_delta_graph` in anthropic_intake,
+`_chunk_dispatch_graph` in google_intake, `_event_dispatch_graph` in
+perplexity_intake) so it can be rendered standalone for the visualization
+sanity check (see the Visualization section). The patch deliberately does NOT
+integrate with mermaid's `subgraph` cluster syntax — that needs upstream
+cooperation.
 
 Removal trigger: delete `_subgraph_patch.py` and remove its
 `# noqa: F401` import the day `pydantic_graph.GraphBuilder` exposes a
 native `add_subgraph` (or equivalent). The call sites should work
 unchanged unless upstream picks a different method name, in which case
-one rename pass at the two import sites suffices.
+one rename pass at the import sites suffices.
 
 ### What each file does
 

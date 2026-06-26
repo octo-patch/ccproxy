@@ -35,6 +35,7 @@ from anthropic.types.beta import (
     BetaCodeExecutionToolResultBlock,
     BetaCompactionBlock,
     BetaCompactionContentBlockDelta,
+    BetaContentBlock,
     BetaInputJSONDelta,
     BetaMCPToolResultBlock,
     BetaMCPToolUseBlock,
@@ -75,10 +76,11 @@ from pydantic_ai.models.anthropic import (
     _map_web_fetch_tool_result_block,
     _map_web_search_tool_result_block,
 )
-from pydantic_graph import GraphBuilder, StepContext
+from pydantic_graph import GraphBuilder, StepContext, TypeExpression
+
+import ccproxy.lightllm.graph._subgraph_patch  # noqa: F401  -- installs GraphBuilder.add_subgraph
 
 if TYPE_CHECKING:
-    from anthropic.types.beta import BetaContentBlock
     from pydantic_ai.models import ModelRequestParameters
 
 logger = logging.getLogger(__name__)
@@ -109,6 +111,8 @@ class _AnthropicIntakeState:
     parts_manager: ModelResponsePartsManager
     provider_name: str
     current_block: BetaContentBlock | None = None
+    current_index: int | None = None
+    """SSE ``index`` of the block currently being dispatched; set by the inner-subgraph open step."""
     builtin_tool_calls: dict[str, NativeToolCallPart] = field(default_factory=dict)
     events_queue: deque[BetaRawMessageStreamEvent] = field(default_factory=deque)
     out_events: list[ModelResponseStreamEvent] = field(default_factory=list)
@@ -139,6 +143,7 @@ type _RoutedEvent = (
 
 
 _g: GraphBuilder[_AnthropicIntakeState, None, None, list[ModelResponseStreamEvent]] = GraphBuilder(
+    name="anthropic_intake",
     state_type=_AnthropicIntakeState,
     output_type=list[ModelResponseStreamEvent],
 )
@@ -165,168 +170,364 @@ async def frame_next_event(
     return _FeedDone()
 
 
-@_g.step
-async def handle_content_block_start(
+# ── Inner subgraph: content_block_start dispatch ────────────────────────────
+#
+# Each ``content_block_start`` event carries one ``content_block`` (a single
+# object, not a list), so this subgraph is a flat type-switch with no loop:
+# ``open_block`` stashes the block + its SSE index on state and hands the block
+# to a decision that routes on the concrete block class.
+
+_bsg: GraphBuilder[_AnthropicIntakeState, None, BetaRawContentBlockStartEvent, None] = GraphBuilder(
+    name="anthropic_block_start_dispatch",
+    state_type=_AnthropicIntakeState,
+    input_type=BetaRawContentBlockStartEvent,
+)
+
+
+@_bsg.step
+async def open_block(
     ctx: StepContext[_AnthropicIntakeState, None, BetaRawContentBlockStartEvent],
-) -> None:
-    """Handle ``content_block_start`` — open a new content block of the matched variant."""
-    event = ctx.inputs
+) -> BetaContentBlock:
+    """Open a new content block: stash it + its SSE index on state, hand the block to the decision."""
+    block = ctx.inputs.content_block
+    ctx.state.current_block = block
+    ctx.state.current_index = ctx.inputs.index
+    return block
+
+
+@_bsg.step
+async def handle_text_block(ctx: StepContext[_AnthropicIntakeState, None, BetaTextBlock]) -> None:
+    """``text`` block — emit a text delta for the initial body (skipped when empty)."""
     state = ctx.state
-    current_block: BetaContentBlock = event.content_block
-    state.current_block = current_block
-    provider_name = state.provider_name
-    pm = state.parts_manager
-
-    if isinstance(current_block, BetaTextBlock) and current_block.text:
-        state.out_events.extend(pm.handle_text_delta(vendor_part_id=event.index, content=current_block.text))
-        return
-    if isinstance(current_block, BetaThinkingBlock):
+    if ctx.inputs.text:
         state.out_events.extend(
-            pm.handle_thinking_delta(
-                vendor_part_id=event.index,
-                content=current_block.thinking,
-                signature=current_block.signature,
-                provider_name=provider_name,
-            )
+            state.parts_manager.handle_text_delta(vendor_part_id=state.current_index, content=ctx.inputs.text)
         )
-        return
-    if isinstance(current_block, BetaRedactedThinkingBlock):
-        state.out_events.extend(
-            pm.handle_thinking_delta(
-                vendor_part_id=event.index,
-                id="redacted_thinking",
-                signature=current_block.data,
-                provider_name=provider_name,
-            )
-        )
-        return
-    if isinstance(current_block, BetaToolUseBlock):
-        maybe_event = pm.handle_tool_call_delta(
-            vendor_part_id=event.index,
-            tool_name=current_block.name,
-            args=current_block.input or None,
-            tool_call_id=current_block.id,
-        )
-        if maybe_event is not None:
-            state.out_events.append(maybe_event)
-        return
-    if isinstance(current_block, BetaServerToolUseBlock):
-        call_part = _map_server_tool_use_block(current_block, provider_name)
-        state.builtin_tool_calls[call_part.tool_call_id] = call_part
-        state.out_events.append(pm.handle_part(vendor_part_id=event.index, part=call_part))
-        return
-    if isinstance(current_block, BetaWebSearchToolResultBlock):
-        state.out_events.append(
-            pm.handle_part(
-                vendor_part_id=event.index,
-                part=_map_web_search_tool_result_block(current_block, provider_name),
-            )
-        )
-        return
-    if isinstance(current_block, BetaCodeExecutionToolResultBlock):
-        state.out_events.append(
-            pm.handle_part(
-                vendor_part_id=event.index,
-                part=_map_code_execution_tool_result_block(current_block, provider_name),
-            )
-        )
-        return
-    if isinstance(current_block, BetaWebFetchToolResultBlock):
-        state.out_events.append(
-            pm.handle_part(
-                vendor_part_id=event.index,
-                part=_map_web_fetch_tool_result_block(current_block, provider_name),
-            )
-        )
-        return
-    if isinstance(current_block, BetaMCPToolUseBlock):
-        call_part = _map_mcp_server_use_block(current_block, provider_name)
-        state.builtin_tool_calls[call_part.tool_call_id] = call_part
-
-        args_json = call_part.args_as_json_str()
-        # Drop the final ``{}}`` so we can add tool args deltas
-        args_json_delta = args_json[:-3]
-        assert args_json_delta.endswith('"tool_args":'), f'Expected {args_json_delta!r} to end in `"tool_args":`'
-
-        state.out_events.append(pm.handle_part(vendor_part_id=event.index, part=replace(call_part, args=None)))
-        maybe_event = pm.handle_tool_call_delta(
-            vendor_part_id=event.index,
-            args=args_json_delta,
-        )
-        if maybe_event is not None:
-            state.out_events.append(maybe_event)
-        return
-    if isinstance(current_block, BetaMCPToolResultBlock):
-        mcp_call_part = state.builtin_tool_calls.get(current_block.tool_use_id)
-        state.out_events.append(
-            pm.handle_part(
-                vendor_part_id=event.index,
-                part=_map_mcp_server_result_block(current_block, mcp_call_part, provider_name),
-            )
-        )
-        return
-    if isinstance(current_block, BetaCompactionBlock):
-        state.out_events.append(
-            pm.handle_part(
-                vendor_part_id=event.index,
-                part=CompactionPart(content=current_block.content, provider_name=provider_name),
-            )
-        )
-        return
 
 
-@_g.step
-async def handle_content_block_delta(
+@_bsg.step
+async def handle_thinking_block(ctx: StepContext[_AnthropicIntakeState, None, BetaThinkingBlock]) -> None:
+    """``thinking`` block — emit a thinking delta with the initial content + signature."""
+    state = ctx.state
+    block = ctx.inputs
+    state.out_events.extend(
+        state.parts_manager.handle_thinking_delta(
+            vendor_part_id=state.current_index,
+            content=block.thinking,
+            signature=block.signature,
+            provider_name=state.provider_name,
+        )
+    )
+
+
+@_bsg.step
+async def handle_redacted_thinking_block(
+    ctx: StepContext[_AnthropicIntakeState, None, BetaRedactedThinkingBlock],
+) -> None:
+    """``redacted_thinking`` block — emit a redacted thinking part."""
+    state = ctx.state
+    state.out_events.extend(
+        state.parts_manager.handle_thinking_delta(
+            vendor_part_id=state.current_index,
+            id="redacted_thinking",
+            signature=ctx.inputs.data,
+            provider_name=state.provider_name,
+        )
+    )
+
+
+@_bsg.step
+async def handle_tool_use_block(ctx: StepContext[_AnthropicIntakeState, None, BetaToolUseBlock]) -> None:
+    """``tool_use`` block — open a tool-call part; args arrive via later input_json deltas."""
+    state = ctx.state
+    block = ctx.inputs
+    maybe_event = state.parts_manager.handle_tool_call_delta(
+        vendor_part_id=state.current_index,
+        tool_name=block.name,
+        args=block.input or None,
+        tool_call_id=block.id,
+    )
+    if maybe_event is not None:
+        state.out_events.append(maybe_event)
+
+
+@_bsg.step
+async def handle_server_tool_use_block(
+    ctx: StepContext[_AnthropicIntakeState, None, BetaServerToolUseBlock],
+) -> None:
+    """``server_tool_use`` block — record the builtin call and emit it with deferred args."""
+    state = ctx.state
+    call_part = _map_server_tool_use_block(ctx.inputs, state.provider_name)
+    state.builtin_tool_calls[call_part.tool_call_id] = call_part
+    state.out_events.append(state.parts_manager.handle_part(vendor_part_id=state.current_index, part=call_part))
+
+
+@_bsg.step
+async def handle_web_search_tool_result_block(
+    ctx: StepContext[_AnthropicIntakeState, None, BetaWebSearchToolResultBlock],
+) -> None:
+    """``web_search_tool_result`` block — emit the mapped result part."""
+    state = ctx.state
+    state.out_events.append(
+        state.parts_manager.handle_part(
+            vendor_part_id=state.current_index,
+            part=_map_web_search_tool_result_block(ctx.inputs, state.provider_name),
+        )
+    )
+
+
+@_bsg.step
+async def handle_code_execution_tool_result_block(
+    ctx: StepContext[_AnthropicIntakeState, None, BetaCodeExecutionToolResultBlock],
+) -> None:
+    """``code_execution_tool_result`` block — emit the mapped result part."""
+    state = ctx.state
+    state.out_events.append(
+        state.parts_manager.handle_part(
+            vendor_part_id=state.current_index,
+            part=_map_code_execution_tool_result_block(ctx.inputs, state.provider_name),
+        )
+    )
+
+
+@_bsg.step
+async def handle_web_fetch_tool_result_block(
+    ctx: StepContext[_AnthropicIntakeState, None, BetaWebFetchToolResultBlock],
+) -> None:
+    """``web_fetch_tool_result`` block — emit the mapped result part."""
+    state = ctx.state
+    state.out_events.append(
+        state.parts_manager.handle_part(
+            vendor_part_id=state.current_index,
+            part=_map_web_fetch_tool_result_block(ctx.inputs, state.provider_name),
+        )
+    )
+
+
+@_bsg.step
+async def handle_mcp_tool_use_block(ctx: StepContext[_AnthropicIntakeState, None, BetaMCPToolUseBlock]) -> None:
+    """``mcp_tool_use`` block — emit the call with deferred args + an opening args delta."""
+    state = ctx.state
+    call_part = _map_mcp_server_use_block(ctx.inputs, state.provider_name)
+    state.builtin_tool_calls[call_part.tool_call_id] = call_part
+
+    args_json = call_part.args_as_json_str()
+    # Drop the final ``{}}`` so we can add tool args deltas
+    args_json_delta = args_json[:-3]
+    assert args_json_delta.endswith('"tool_args":'), f'Expected {args_json_delta!r} to end in `"tool_args":`'
+
+    state.out_events.append(
+        state.parts_manager.handle_part(vendor_part_id=state.current_index, part=replace(call_part, args=None))
+    )
+    maybe_event = state.parts_manager.handle_tool_call_delta(
+        vendor_part_id=state.current_index,
+        args=args_json_delta,
+    )
+    if maybe_event is not None:
+        state.out_events.append(maybe_event)
+
+
+@_bsg.step
+async def handle_mcp_tool_result_block(
+    ctx: StepContext[_AnthropicIntakeState, None, BetaMCPToolResultBlock],
+) -> None:
+    """``mcp_tool_result`` block — emit the mapped result, correlated to the prior call."""
+    state = ctx.state
+    mcp_call_part = state.builtin_tool_calls.get(ctx.inputs.tool_use_id)
+    state.out_events.append(
+        state.parts_manager.handle_part(
+            vendor_part_id=state.current_index,
+            part=_map_mcp_server_result_block(ctx.inputs, mcp_call_part, state.provider_name),
+        )
+    )
+
+
+@_bsg.step
+async def handle_compaction_block(ctx: StepContext[_AnthropicIntakeState, None, BetaCompactionBlock]) -> None:
+    """``compaction`` block — emit a CompactionPart with the initial content."""
+    state = ctx.state
+    state.out_events.append(
+        state.parts_manager.handle_part(
+            vendor_part_id=state.current_index,
+            part=CompactionPart(content=ctx.inputs.content, provider_name=state.provider_name),
+        )
+    )
+
+
+@_bsg.step
+async def handle_unknown_block(ctx: StepContext[_AnthropicIntakeState, None, object]) -> None:
+    """Catch-all for content_block variants with no IR handler — log instead of silently dropping."""
+    logger.debug("anthropic intake: unhandled content_block type %s; skipping", type(ctx.inputs).__name__)
+
+
+_bsg.add(
+    _bsg.edge_from(_bsg.start_node).to(open_block),
+    _bsg.edge_from(open_block).to(
+        _bsg.decision()
+        .branch(_bsg.match(BetaTextBlock).to(handle_text_block))
+        .branch(_bsg.match(BetaThinkingBlock).to(handle_thinking_block))
+        .branch(_bsg.match(BetaRedactedThinkingBlock).to(handle_redacted_thinking_block))
+        .branch(_bsg.match(BetaToolUseBlock).to(handle_tool_use_block))
+        .branch(_bsg.match(BetaServerToolUseBlock).to(handle_server_tool_use_block))
+        .branch(_bsg.match(BetaWebSearchToolResultBlock).to(handle_web_search_tool_result_block))
+        .branch(_bsg.match(BetaCodeExecutionToolResultBlock).to(handle_code_execution_tool_result_block))
+        .branch(_bsg.match(BetaWebFetchToolResultBlock).to(handle_web_fetch_tool_result_block))
+        .branch(_bsg.match(BetaMCPToolUseBlock).to(handle_mcp_tool_use_block))
+        .branch(_bsg.match(BetaMCPToolResultBlock).to(handle_mcp_tool_result_block))
+        .branch(_bsg.match(BetaCompactionBlock).to(handle_compaction_block))
+        .branch(_bsg.match(TypeExpression[object]).to(handle_unknown_block))
+    ),
+    _bsg.edge_from(
+        handle_text_block,
+        handle_thinking_block,
+        handle_redacted_thinking_block,
+        handle_tool_use_block,
+        handle_server_tool_use_block,
+        handle_web_search_tool_result_block,
+        handle_code_execution_tool_result_block,
+        handle_web_fetch_tool_result_block,
+        handle_mcp_tool_use_block,
+        handle_mcp_tool_result_block,
+        handle_compaction_block,
+        handle_unknown_block,
+    ).to(_bsg.end_node),
+)
+
+_block_start_graph = _bsg.build()
+_dispatch_block_start = _g.add_subgraph(_block_start_graph, label="block_start")  # ty: ignore[unresolved-attribute]
+
+
+# ── Inner subgraph: content_block_delta dispatch ────────────────────────────
+#
+# Symmetric to the block-start subgraph: ``open_delta`` stashes the SSE index
+# and hands ``event.delta`` (a single object) to a decision that routes on the
+# concrete delta class. No loop.
+
+type _BlockDelta = (
+    BetaTextDelta
+    | BetaThinkingDelta
+    | BetaSignatureDelta
+    | BetaInputJSONDelta
+    | BetaCompactionContentBlockDelta
+    | BetaCitationsDelta
+)
+
+_bdg: GraphBuilder[_AnthropicIntakeState, None, BetaRawContentBlockDeltaEvent, None] = GraphBuilder(
+    name="anthropic_block_delta_dispatch",
+    state_type=_AnthropicIntakeState,
+    input_type=BetaRawContentBlockDeltaEvent,
+)
+
+
+@_bdg.step
+async def open_delta(
     ctx: StepContext[_AnthropicIntakeState, None, BetaRawContentBlockDeltaEvent],
-) -> None:
-    """Handle ``content_block_delta`` — incremental update to the open block."""
-    event = ctx.inputs
-    state = ctx.state
-    provider_name = state.provider_name
-    pm = state.parts_manager
-    delta = event.delta
+) -> _BlockDelta:
+    """Stash the SSE index and hand the delta to the decision."""
+    ctx.state.current_index = ctx.inputs.index
+    return ctx.inputs.delta
 
-    if isinstance(delta, BetaTextDelta):
-        state.out_events.extend(pm.handle_text_delta(vendor_part_id=event.index, content=delta.text))
-        return
-    if isinstance(delta, BetaThinkingDelta):
-        state.out_events.extend(
-            pm.handle_thinking_delta(
-                vendor_part_id=event.index,
-                content=delta.thinking,
-                provider_name=provider_name,
+
+@_bdg.step
+async def handle_text_delta(ctx: StepContext[_AnthropicIntakeState, None, BetaTextDelta]) -> None:
+    """``text_delta`` — append incremental text to the open part."""
+    state = ctx.state
+    state.out_events.extend(
+        state.parts_manager.handle_text_delta(vendor_part_id=state.current_index, content=ctx.inputs.text)
+    )
+
+
+@_bdg.step
+async def handle_thinking_delta(ctx: StepContext[_AnthropicIntakeState, None, BetaThinkingDelta]) -> None:
+    """``thinking_delta`` — append incremental thinking content."""
+    state = ctx.state
+    state.out_events.extend(
+        state.parts_manager.handle_thinking_delta(
+            vendor_part_id=state.current_index,
+            content=ctx.inputs.thinking,
+            provider_name=state.provider_name,
+        )
+    )
+
+
+@_bdg.step
+async def handle_signature_delta(ctx: StepContext[_AnthropicIntakeState, None, BetaSignatureDelta]) -> None:
+    """``signature_delta`` — attach the thinking signature."""
+    state = ctx.state
+    state.out_events.extend(
+        state.parts_manager.handle_thinking_delta(
+            vendor_part_id=state.current_index,
+            signature=ctx.inputs.signature,
+            provider_name=state.provider_name,
+        )
+    )
+
+
+@_bdg.step
+async def handle_input_json_delta(ctx: StepContext[_AnthropicIntakeState, None, BetaInputJSONDelta]) -> None:
+    """``input_json_delta`` — append partial tool-call args JSON."""
+    state = ctx.state
+    maybe_event = state.parts_manager.handle_tool_call_delta(
+        vendor_part_id=state.current_index,
+        args=ctx.inputs.partial_json,
+    )
+    if maybe_event is not None:
+        state.out_events.append(maybe_event)
+
+
+@_bdg.step
+async def handle_compaction_delta(
+    ctx: StepContext[_AnthropicIntakeState, None, BetaCompactionContentBlockDelta],
+) -> None:
+    """``compaction`` delta — emit a CompactionPart for any new content."""
+    state = ctx.state
+    if ctx.inputs.content:
+        state.out_events.append(
+            state.parts_manager.handle_part(
+                vendor_part_id=state.current_index,
+                part=CompactionPart(content=ctx.inputs.content, provider_name=state.provider_name),
             )
         )
-        return
-    if isinstance(delta, BetaSignatureDelta):
-        state.out_events.extend(
-            pm.handle_thinking_delta(
-                vendor_part_id=event.index,
-                signature=delta.signature,
-                provider_name=provider_name,
-            )
-        )
-        return
-    if isinstance(delta, BetaInputJSONDelta):
-        maybe_event = pm.handle_tool_call_delta(
-            vendor_part_id=event.index,
-            args=delta.partial_json,
-        )
-        if maybe_event is not None:
-            state.out_events.append(maybe_event)
-        return
-    if isinstance(delta, BetaCompactionContentBlockDelta):
-        if delta.content:
-            state.out_events.append(
-                pm.handle_part(
-                    vendor_part_id=event.index,
-                    part=CompactionPart(content=delta.content, provider_name=provider_name),
-                )
-            )
-        return
-    if isinstance(delta, BetaCitationsDelta):
-        # TODO(upstream pydantic-ai): citations not yet wired through to IR events.
-        return
+
+
+@_bdg.step
+async def handle_citations_delta(ctx: StepContext[_AnthropicIntakeState, None, BetaCitationsDelta]) -> None:
+    """``citations_delta`` — no-op."""
+    # TODO(upstream pydantic-ai): citations not yet wired through to IR events.
+    del ctx  # protocol-required parameter; intentionally unused
+
+
+@_bdg.step
+async def handle_unknown_delta(ctx: StepContext[_AnthropicIntakeState, None, object]) -> None:
+    """Catch-all for delta variants with no IR handler — log instead of silently dropping."""
+    logger.debug("anthropic intake: unhandled content_block delta %s; skipping", type(ctx.inputs).__name__)
+
+
+_bdg.add(
+    _bdg.edge_from(_bdg.start_node).to(open_delta),
+    _bdg.edge_from(open_delta).to(
+        _bdg.decision()
+        .branch(_bdg.match(BetaTextDelta).to(handle_text_delta))
+        .branch(_bdg.match(BetaThinkingDelta).to(handle_thinking_delta))
+        .branch(_bdg.match(BetaSignatureDelta).to(handle_signature_delta))
+        .branch(_bdg.match(BetaInputJSONDelta).to(handle_input_json_delta))
+        .branch(_bdg.match(BetaCompactionContentBlockDelta).to(handle_compaction_delta))
+        .branch(_bdg.match(BetaCitationsDelta).to(handle_citations_delta))
+        .branch(_bdg.match(TypeExpression[object]).to(handle_unknown_delta))
+    ),
+    _bdg.edge_from(
+        handle_text_delta,
+        handle_thinking_delta,
+        handle_signature_delta,
+        handle_input_json_delta,
+        handle_compaction_delta,
+        handle_citations_delta,
+        handle_unknown_delta,
+    ).to(_bdg.end_node),
+)
+
+_block_delta_graph = _bdg.build()
+_dispatch_block_delta = _g.add_subgraph(_block_delta_graph, label="block_delta")  # ty: ignore[unresolved-attribute]
 
 
 @_g.step
@@ -370,13 +571,13 @@ _g.add(
         _g.decision()
         .branch(_g.match(_FeedDone).to(emit_done))
         .branch(_g.match(_IgnoredEvent).to(skip_ignored_event))
-        .branch(_g.match(BetaRawContentBlockStartEvent).to(handle_content_block_start))
-        .branch(_g.match(BetaRawContentBlockDeltaEvent).to(handle_content_block_delta))
+        .branch(_g.match(BetaRawContentBlockStartEvent).to(_dispatch_block_start))
+        .branch(_g.match(BetaRawContentBlockDeltaEvent).to(_dispatch_block_delta))
         .branch(_g.match(BetaRawContentBlockStopEvent).to(handle_content_block_stop))
     ),
     _g.edge_from(
-        handle_content_block_start,
-        handle_content_block_delta,
+        _dispatch_block_start,
+        _dispatch_block_delta,
         handle_content_block_stop,
         skip_ignored_event,
     ).to(frame_next_event),

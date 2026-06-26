@@ -12,7 +12,9 @@ from openai.types import responses
 from pydantic import TypeAdapter, ValidationError
 from pydantic_ai._parts_manager import ModelResponsePartsManager
 from pydantic_ai.messages import ModelResponseStreamEvent
-from pydantic_graph import GraphBuilder, StepContext
+from pydantic_graph import GraphBuilder, StepContext, TypeExpression
+
+import ccproxy.lightllm.graph._subgraph_patch  # noqa: F401  — installs GraphBuilder.add_subgraph
 
 if TYPE_CHECKING:
     from pydantic_ai.messages import FinishReason
@@ -129,6 +131,52 @@ type _QueueEvent = (
 type _RoutedEvent = _QueueEvent | _FeedDone
 
 
+# ── Item-added discriminant envelopes ───────────────────────────────────────
+#
+# ``ResponseToolSearchCall`` is one class with an ``execution: Literal["server", "client"]``
+# field, so it can't be split by class-level matching alone. These frozen envelopes let the
+# subgraph decision route on them as distinct Python types.
+
+
+@dataclass(frozen=True)
+class _ClientToolSearchAdded:
+    """``output_item.added`` for a client-execution tool-search call."""
+
+    item: responses.ResponseToolSearchCall
+
+
+@dataclass(frozen=True)
+class _ItemAddedNoOp:
+    """``output_item.added`` for items that produce no IR output (server tool-search, unknown)."""
+
+    item_type: str
+
+
+type _ItemAddedDiscriminand = (
+    responses.ResponseFunctionToolCall | responses.ResponseOutputMessage | _ClientToolSearchAdded | _ItemAddedNoOp
+)
+
+
+# ── Item-done discriminant envelopes ────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class _ClientToolSearchDone:
+    """``output_item.done`` for a client-execution tool-search call."""
+
+    item: responses.ResponseToolSearchCall
+
+
+@dataclass(frozen=True)
+class _ItemDoneNoOp:
+    """``output_item.done`` for items that produce no IR output (server tool-search, unknown)."""
+
+    item_type: str
+
+
+type _ItemDoneDiscriminand = responses.ResponseReasoningItem | _ClientToolSearchDone | _ItemDoneNoOp
+
+
 @dataclass
 class _OpenAIResponsesIntakeState:
     parts_manager: ModelResponsePartsManager
@@ -144,6 +192,7 @@ class _OpenAIResponsesIntakeState:
 
 
 _g: GraphBuilder[_OpenAIResponsesIntakeState, None, None, list[ModelResponseStreamEvent]] = GraphBuilder(
+    name="openai_responses_intake",
     state_type=_OpenAIResponsesIntakeState,
     output_type=list[ModelResponseStreamEvent],
 )
@@ -208,77 +257,199 @@ async def handle_response_envelope(
     _record_response_metadata(ctx.state, ctx.inputs.event)
 
 
-@_g.step
-async def handle_output_item_added(
+# ── Inner subgraph: output_item_added dispatch ──────────────────────────────
+#
+# ``open_item_added`` classifies the item into a discriminant type and hands it
+# to a decision. Direct class matches for ``ResponseFunctionToolCall`` and
+# ``ResponseOutputMessage``; frozen envelopes split ``ResponseToolSearchCall``
+# by ``execution`` value since it is one class with a literal field.
+
+_oiag: GraphBuilder[_OpenAIResponsesIntakeState, None, _OutputItemAddedEvent, None] = GraphBuilder(
+    name="openai_responses_item_added_dispatch",
+    state_type=_OpenAIResponsesIntakeState,
+    input_type=_OutputItemAddedEvent,
+)
+
+
+@_oiag.step
+async def open_item_added(
     ctx: StepContext[_OpenAIResponsesIntakeState, None, _OutputItemAddedEvent],
-) -> None:
-    state = ctx.state
+) -> _ItemAddedDiscriminand:
+    """Classify the added item into a discriminant the decision can route on."""
     item = ctx.inputs.event.item
-
     if isinstance(item, responses.ResponseFunctionToolCall):
-        provider_details: dict[str, object] | None = None
-        if item.namespace:
-            provider_details = {"namespace": item.namespace}
-        state.out_events.append(
-            state.parts_manager.handle_tool_call_part(
-                vendor_part_id=item.id,
-                tool_name=item.name,
-                args=item.arguments,
-                tool_call_id=item.call_id,
-                id=item.id,
-                provider_name="openai",
-                provider_details=provider_details,
-            )
-        )
-        return
-
+        return item
     if isinstance(item, responses.ResponseOutputMessage):
-        phase = getattr(item, "phase", None)
-        if phase is not None:
-            state.phase_by_item[item.id] = phase
-        return
-
+        return item
     if isinstance(item, responses.ResponseToolSearchCall) and item.execution == "client":
-        state.out_events.append(
-            state.parts_manager.handle_tool_call_part(
-                vendor_part_id=item.id,
-                tool_name=getattr(item, "name", "tool_search"),
-                args=None,
-                tool_call_id=item.call_id or item.id,
-                id=item.id,
-                provider_name="openai",
-            )
-        )
+        return _ClientToolSearchAdded(item=item)
+    return _ItemAddedNoOp(item_type=type(item).__name__)
 
 
-@_g.step
-async def handle_output_item_done(
-    ctx: StepContext[_OpenAIResponsesIntakeState, None, _OutputItemDoneEvent],
+@_oiag.step
+async def handle_added_function_tool_call(
+    ctx: StepContext[_OpenAIResponsesIntakeState, None, responses.ResponseFunctionToolCall],
 ) -> None:
+    """``function_tool_call`` item added — open a tool-call part; args arrive via later deltas."""
     state = ctx.state
-    item = ctx.inputs.event.item
-
-    if isinstance(item, responses.ResponseReasoningItem):
-        if item.encrypted_content:
-            state.out_events.extend(
-                state.parts_manager.handle_thinking_delta(
-                    vendor_part_id=item.id,
-                    id=item.id,
-                    signature=item.encrypted_content,
-                    provider_name="openai",
-                )
-            )
-        return
-
-    if isinstance(item, responses.ResponseToolSearchCall) and item.execution == "client":
-        maybe_event = state.parts_manager.handle_tool_call_delta(
+    item = ctx.inputs
+    provider_details: dict[str, object] | None = None
+    if item.namespace:
+        provider_details = {"namespace": item.namespace}
+    state.out_events.append(
+        state.parts_manager.handle_tool_call_part(
             vendor_part_id=item.id,
-            args={},
+            tool_name=item.name,
+            args=item.arguments,
+            tool_call_id=item.call_id,
+            id=item.id,
+            provider_name="openai",
+            provider_details=provider_details,
+        )
+    )
+
+
+@_oiag.step
+async def handle_added_output_message(
+    ctx: StepContext[_OpenAIResponsesIntakeState, None, responses.ResponseOutputMessage],
+) -> None:
+    """``output_message`` item added — record the phase for later text-done events."""
+    item = ctx.inputs
+    phase = getattr(item, "phase", None)
+    if phase is not None:
+        ctx.state.phase_by_item[item.id] = phase
+
+
+@_oiag.step
+async def handle_added_client_tool_search(
+    ctx: StepContext[_OpenAIResponsesIntakeState, None, _ClientToolSearchAdded],
+) -> None:
+    """``tool_search_call`` with client execution added — open a tool-call part."""
+    state = ctx.state
+    item = ctx.inputs.item
+    state.out_events.append(
+        state.parts_manager.handle_tool_call_part(
+            vendor_part_id=item.id,
+            tool_name=getattr(item, "name", "tool_search"),
+            args=None,
             tool_call_id=item.call_id or item.id,
+            id=item.id,
             provider_name="openai",
         )
-        if maybe_event is not None:
-            state.out_events.append(maybe_event)
+    )
+
+
+@_oiag.step
+async def handle_unknown_item_added(ctx: StepContext[_OpenAIResponsesIntakeState, None, object]) -> None:
+    """Catch-all for item-added variants with no IR handler — log instead of silently dropping."""
+    logger.debug("openai responses intake: unhandled output_item.added type %s; skipping", type(ctx.inputs).__name__)
+
+
+_oiag.add(
+    _oiag.edge_from(_oiag.start_node).to(open_item_added),
+    _oiag.edge_from(open_item_added).to(
+        _oiag.decision()
+        .branch(_oiag.match(responses.ResponseFunctionToolCall).to(handle_added_function_tool_call))
+        .branch(_oiag.match(responses.ResponseOutputMessage).to(handle_added_output_message))
+        .branch(_oiag.match(_ClientToolSearchAdded).to(handle_added_client_tool_search))
+        .branch(_oiag.match(TypeExpression[object]).to(handle_unknown_item_added))
+    ),
+    _oiag.edge_from(
+        handle_added_function_tool_call,
+        handle_added_output_message,
+        handle_added_client_tool_search,
+        handle_unknown_item_added,
+    ).to(_oiag.end_node),
+)
+
+_item_added_graph = _oiag.build()
+_dispatch_item_added = _g.add_subgraph(_item_added_graph, label="item_added")  # ty: ignore[unresolved-attribute]
+
+
+# ── Inner subgraph: output_item_done dispatch ───────────────────────────────
+#
+# Symmetric to the item-added subgraph. ``open_item_done`` classifies the item;
+# direct class match for ``ResponseReasoningItem``, envelope for client-execution
+# tool-search calls.
+
+_oidg: GraphBuilder[_OpenAIResponsesIntakeState, None, _OutputItemDoneEvent, None] = GraphBuilder(
+    name="openai_responses_item_done_dispatch",
+    state_type=_OpenAIResponsesIntakeState,
+    input_type=_OutputItemDoneEvent,
+)
+
+
+@_oidg.step
+async def open_item_done(
+    ctx: StepContext[_OpenAIResponsesIntakeState, None, _OutputItemDoneEvent],
+) -> _ItemDoneDiscriminand:
+    """Classify the done item into a discriminant the decision can route on."""
+    item = ctx.inputs.event.item
+    if isinstance(item, responses.ResponseReasoningItem):
+        return item
+    if isinstance(item, responses.ResponseToolSearchCall) and item.execution == "client":
+        return _ClientToolSearchDone(item=item)
+    return _ItemDoneNoOp(item_type=type(item).__name__)
+
+
+@_oidg.step
+async def handle_done_reasoning(
+    ctx: StepContext[_OpenAIResponsesIntakeState, None, responses.ResponseReasoningItem],
+) -> None:
+    """``reasoning`` item done — emit the encrypted thinking part if present."""
+    state = ctx.state
+    item = ctx.inputs
+    if item.encrypted_content:
+        state.out_events.extend(
+            state.parts_manager.handle_thinking_delta(
+                vendor_part_id=item.id,
+                id=item.id,
+                signature=item.encrypted_content,
+                provider_name="openai",
+            )
+        )
+
+
+@_oidg.step
+async def handle_done_client_tool_search(
+    ctx: StepContext[_OpenAIResponsesIntakeState, None, _ClientToolSearchDone],
+) -> None:
+    """``tool_search_call`` with client execution done — finalize the tool-call args."""
+    state = ctx.state
+    item = ctx.inputs.item
+    maybe_event = state.parts_manager.handle_tool_call_delta(
+        vendor_part_id=item.id,
+        args={},
+        tool_call_id=item.call_id or item.id,
+        provider_name="openai",
+    )
+    if maybe_event is not None:
+        state.out_events.append(maybe_event)
+
+
+@_oidg.step
+async def handle_unknown_item_done(ctx: StepContext[_OpenAIResponsesIntakeState, None, object]) -> None:
+    """Catch-all for item-done variants with no IR handler — log instead of silently dropping."""
+    logger.debug("openai responses intake: unhandled output_item.done type %s; skipping", type(ctx.inputs).__name__)
+
+
+_oidg.add(
+    _oidg.edge_from(_oidg.start_node).to(open_item_done),
+    _oidg.edge_from(open_item_done).to(
+        _oidg.decision()
+        .branch(_oidg.match(responses.ResponseReasoningItem).to(handle_done_reasoning))
+        .branch(_oidg.match(_ClientToolSearchDone).to(handle_done_client_tool_search))
+        .branch(_oidg.match(TypeExpression[object]).to(handle_unknown_item_done))
+    ),
+    _oidg.edge_from(
+        handle_done_reasoning,
+        handle_done_client_tool_search,
+        handle_unknown_item_done,
+    ).to(_oidg.end_node),
+)
+
+_item_done_graph = _oidg.build()
+_dispatch_item_done = _g.add_subgraph(_item_done_graph, label="item_done")  # ty: ignore[unresolved-attribute]
 
 
 @_g.step
@@ -431,8 +602,8 @@ _g.add(
         _g.decision()
         .branch(_g.match(_FeedDone).to(emit_done))
         .branch(_g.match(_ResponseEnvelopeEvent).to(handle_response_envelope))
-        .branch(_g.match(_OutputItemAddedEvent).to(handle_output_item_added))
-        .branch(_g.match(_OutputItemDoneEvent).to(handle_output_item_done))
+        .branch(_g.match(_OutputItemAddedEvent).to(_dispatch_item_added))
+        .branch(_g.match(_OutputItemDoneEvent).to(_dispatch_item_done))
         .branch(_g.match(_TextDeltaEvent).to(handle_text_delta))
         .branch(_g.match(_TextDoneEvent).to(handle_text_done))
         .branch(_g.match(_FunctionArgumentsDeltaEvent).to(handle_function_arguments_delta))
@@ -446,8 +617,8 @@ _g.add(
     ),
     _g.edge_from(
         handle_response_envelope,
-        handle_output_item_added,
-        handle_output_item_done,
+        _dispatch_item_added,
+        _dispatch_item_done,
         handle_text_delta,
         handle_text_done,
         handle_function_arguments_delta,

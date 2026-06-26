@@ -215,6 +215,7 @@ async def classify_part(
         return _InlineDataPart(part=part)
     if part.function_response is not None:
         return _FunctionResponsePart(part=part)
+    logger.debug("google intake: unrecognized Part with no known field; skipping")
     return _UnknownPart()
 
 

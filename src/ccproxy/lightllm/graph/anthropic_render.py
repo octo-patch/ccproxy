@@ -50,7 +50,9 @@ from pydantic_ai.messages import (
     ToolCallPart,
     ToolCallPartDelta,
 )
-from pydantic_graph import GraphBuilder, StepContext
+from pydantic_graph import GraphBuilder, StepContext, TypeExpression
+
+import ccproxy.lightllm.graph._subgraph_patch  # noqa: F401  -- installs GraphBuilder.add_subgraph
 
 logger = logging.getLogger(__name__)
 
@@ -181,33 +183,6 @@ def _emit_initial_content_deltas(idx: int, part: ModelResponsePart) -> bytes:
     return bytes(out)
 
 
-def _emit_content_block_delta(idx: int, delta: ModelResponsePartDelta) -> bytes:
-    wire_delta: dict[str, object]
-    if isinstance(delta, TextPartDelta):
-        wire_delta = {"type": "text_delta", "text": delta.content_delta}
-    elif isinstance(delta, ThinkingPartDelta):
-        if delta.signature_delta is not None:
-            wire_delta = {"type": "signature_delta", "signature": delta.signature_delta}
-        elif delta.content_delta is not None:
-            wire_delta = {"type": "thinking_delta", "thinking": delta.content_delta}
-        else:
-            logger.debug("anthropic render: empty ThinkingPartDelta; dropping")
-            return b""
-    elif isinstance(delta, ToolCallPartDelta):
-        partial_json = _tool_args_to_json_string(delta.args_delta)
-        if partial_json is None:
-            logger.debug("anthropic render: ToolCallPartDelta with no args_delta; dropping")
-            return b""
-        wire_delta = {"type": "input_json_delta", "partial_json": partial_json}
-    else:
-        logger.debug("anthropic render: unknown delta type %s; dropping", type(delta).__name__)
-        return b""
-    return _emit(
-        "content_block_delta",
-        {"type": "content_block_delta", "index": idx, "delta": wire_delta},
-    )
-
-
 def _emit_content_block_stop(idx: int) -> bytes:
     return _emit("content_block_stop", {"type": "content_block_stop", "index": idx})
 
@@ -240,13 +215,16 @@ class _AnthropicRenderState:
     handler steps; the terminal step returns ``bytes(out)`` and resets the buffer
     so the same state can drive the next render call. ``message_id``, ``model``,
     ``started``, and ``open_block_index`` persist across render calls so the
-    stream-level lifecycle stays consistent.
+    stream-level lifecycle stays consistent. ``current_ir_index`` is a transient
+    scratch field written by the inner-subgraph open steps.
     """
 
     message_id: str
     model: str
     started: bool = False
     open_block_index: int | None = None
+    current_ir_index: int = 0
+    """Transient: the IR part/delta index, stashed by the inner-subgraph open step."""
     pending_events: deque[ModelResponseStreamEvent] = field(default_factory=deque)
     out: bytearray = field(default_factory=bytearray)
 
@@ -255,10 +233,15 @@ class _RenderDone:
     """Marker returned by the router when the events queue is exhausted."""
 
 
+class _NoDelta:
+    """Marker returned by ``open_delta`` when there is no open block to target."""
+
+
 # ── Graph ──────────────────────────────────────────────────────────────────
 
 
 _g: GraphBuilder[_AnthropicRenderState, None, None, bytes] = GraphBuilder(
+    name="anthropic_render",
     state_type=_AnthropicRenderState,
     output_type=bytes,
 )
@@ -274,43 +257,204 @@ async def take_next_event(
     return ctx.state.pending_events.popleft()
 
 
-@_g.step
-async def handle_part_start(
+# ── Inner subgraph: part_start dispatch ───────────────────────────────────
+#
+# ``handle_part_start`` previously used an isinstance ladder on ``event.part``.
+# This subgraph replaces that: ``open_part`` stashes ``event.index`` on state
+# (needed by all leaf handlers), ensures ``message_start`` is emitted, closes
+# any prior open block, then returns ``event.part`` to the decision fan-out.
+
+_psg: GraphBuilder[_AnthropicRenderState, None, PartStartEvent, None] = GraphBuilder(
+    name="anthropic_render_part_start",
+    state_type=_AnthropicRenderState,
+    input_type=PartStartEvent,
+)
+
+
+@_psg.step
+async def open_part(
     ctx: StepContext[_AnthropicRenderState, None, PartStartEvent],
-) -> None:
-    """Open a new content block, closing any prior open block first."""
+) -> ModelResponsePart:
+    """Stash the IR index, emit ``message_start`` if needed, close any prior block, return the part."""
     event = ctx.inputs
     state = ctx.state
+    state.current_ir_index = event.index
     if not state.started:
         state.out += _emit_message_start(state.message_id, state.model)
         state.started = True
     if state.open_block_index is not None:
         # New part start without an explicit PartEndEvent — close the previous
-        # block before opening the new one. PartStartEvent.index is the IR
-        # part index; we mirror it as the Anthropic block index.
+        # block before opening the new one.
         state.out += _emit_content_block_stop(state.open_block_index)
     state.out += _emit_content_block_start(event.index, event.part)
     state.open_block_index = event.index
-    # If the start event already carries content (e.g. the intake collapsed an
-    # empty content_block_start + the first delta into a single PartStartEvent
-    # with a non-empty TextPart), emit that content as an initial delta so the
-    # downstream client sees the same accumulated text.
-    state.out += _emit_initial_content_deltas(event.index, event.part)
+    return event.part
 
 
-@_g.step
-async def handle_part_delta(
-    ctx: StepContext[_AnthropicRenderState, None, PartDeltaEvent],
-) -> None:
-    """Emit a ``content_block_delta`` for the open block."""
-    event = ctx.inputs
+@_psg.step
+async def handle_text_part_start(ctx: StepContext[_AnthropicRenderState, None, TextPart]) -> None:
+    """``TextPart`` — emit initial content delta if the part arrived pre-populated."""
     state = ctx.state
+    state.out += _emit_initial_content_deltas(state.current_ir_index, ctx.inputs)
+
+
+@_psg.step
+async def handle_thinking_part_start(ctx: StepContext[_AnthropicRenderState, None, ThinkingPart]) -> None:
+    """``ThinkingPart`` — emit initial thinking/signature deltas if pre-populated."""
+    state = ctx.state
+    state.out += _emit_initial_content_deltas(state.current_ir_index, ctx.inputs)
+
+
+@_psg.step
+async def handle_tool_call_part_start(ctx: StepContext[_AnthropicRenderState, None, ToolCallPart]) -> None:
+    """``ToolCallPart`` — emit initial args delta if pre-populated."""
+    state = ctx.state
+    state.out += _emit_initial_content_deltas(state.current_ir_index, ctx.inputs)
+
+
+@_psg.step
+async def handle_native_tool_call_part_start(
+    ctx: StepContext[_AnthropicRenderState, None, NativeToolCallPart],
+) -> None:
+    """``NativeToolCallPart`` — emit initial args delta if pre-populated."""
+    state = ctx.state
+    state.out += _emit_initial_content_deltas(state.current_ir_index, ctx.inputs)
+
+
+@_psg.step
+async def handle_unknown_part_start(ctx: StepContext[_AnthropicRenderState, None, object]) -> None:
+    """Catch-all for part types with no handler — log instead of silently dropping."""
+    logger.debug("anthropic render: unhandled part type %s in part_start; skipping", type(ctx.inputs).__name__)
+
+
+_psg.add(
+    _psg.edge_from(_psg.start_node).to(open_part),
+    _psg.edge_from(open_part).to(
+        _psg.decision()
+        .branch(_psg.match(TextPart).to(handle_text_part_start))
+        .branch(_psg.match(ThinkingPart).to(handle_thinking_part_start))
+        .branch(_psg.match(ToolCallPart).to(handle_tool_call_part_start))
+        .branch(_psg.match(NativeToolCallPart).to(handle_native_tool_call_part_start))
+        .branch(_psg.match(TypeExpression[object]).to(handle_unknown_part_start))
+    ),
+    _psg.edge_from(
+        handle_text_part_start,
+        handle_thinking_part_start,
+        handle_tool_call_part_start,
+        handle_native_tool_call_part_start,
+        handle_unknown_part_start,
+    ).to(_psg.end_node),
+)
+
+_part_start_graph = _psg.build()
+_dispatch_part_start = _g.add_subgraph(_part_start_graph, label="part_start")  # ty: ignore[unresolved-attribute]
+
+
+# ── Inner subgraph: part_delta dispatch ───────────────────────────────────
+#
+# ``handle_part_delta`` previously used an isinstance ladder on ``event.delta``.
+# This subgraph replaces that: ``open_delta`` stashes ``event.index`` on state
+# (needed by the leaf handlers to address the open block), validates the open
+# block is present, then returns ``event.delta`` to the decision fan-out.
+
+_pdg: GraphBuilder[_AnthropicRenderState, None, PartDeltaEvent, None] = GraphBuilder(
+    name="anthropic_render_part_delta",
+    state_type=_AnthropicRenderState,
+    input_type=PartDeltaEvent,
+)
+
+
+@_pdg.step
+async def open_delta(
+    ctx: StepContext[_AnthropicRenderState, None, PartDeltaEvent],
+) -> ModelResponsePartDelta | _NoDelta:
+    """Stash the IR index; return the delta for dispatch, or :class:`_NoDelta` if no open block."""
+    state = ctx.state
+    state.current_ir_index = ctx.inputs.index
     if state.open_block_index is None:
-        # Defensive: a delta without an open block can't be expressed in
-        # Anthropic's wire format.
         logger.debug("anthropic render: PartDeltaEvent with no open block; dropping")
+        return _NoDelta()
+    return ctx.inputs.delta
+
+
+@_pdg.step
+async def handle_text_part_delta(ctx: StepContext[_AnthropicRenderState, None, TextPartDelta]) -> None:
+    """``text_delta`` — emit a ``content_block_delta`` with ``text_delta`` payload."""
+    state = ctx.state
+    wire_delta: dict[str, object] = {"type": "text_delta", "text": ctx.inputs.content_delta}
+    state.out += _emit(
+        "content_block_delta",
+        {"type": "content_block_delta", "index": state.current_ir_index, "delta": wire_delta},
+    )
+
+
+@_pdg.step
+async def handle_thinking_part_delta(ctx: StepContext[_AnthropicRenderState, None, ThinkingPartDelta]) -> None:
+    """``thinking_delta`` / ``signature_delta`` — emit the appropriate ``content_block_delta``."""
+    state = ctx.state
+    delta = ctx.inputs
+    wire_delta: dict[str, object]
+    if delta.signature_delta is not None:
+        wire_delta = {"type": "signature_delta", "signature": delta.signature_delta}
+    elif delta.content_delta is not None:
+        wire_delta = {"type": "thinking_delta", "thinking": delta.content_delta}
+    else:
+        logger.debug("anthropic render: empty ThinkingPartDelta; dropping")
         return
-    state.out += _emit_content_block_delta(event.index, event.delta)
+    state.out += _emit(
+        "content_block_delta",
+        {"type": "content_block_delta", "index": state.current_ir_index, "delta": wire_delta},
+    )
+
+
+@_pdg.step
+async def handle_tool_call_part_delta(ctx: StepContext[_AnthropicRenderState, None, ToolCallPartDelta]) -> None:
+    """``input_json_delta`` — emit partial tool-call JSON args."""
+    state = ctx.state
+    partial_json = _tool_args_to_json_string(ctx.inputs.args_delta)
+    if partial_json is None:
+        logger.debug("anthropic render: ToolCallPartDelta with no args_delta; dropping")
+        return
+    wire_delta: dict[str, object] = {"type": "input_json_delta", "partial_json": partial_json}
+    state.out += _emit(
+        "content_block_delta",
+        {"type": "content_block_delta", "index": state.current_ir_index, "delta": wire_delta},
+    )
+
+
+@_pdg.step
+async def handle_no_open_block(ctx: StepContext[_AnthropicRenderState, None, _NoDelta]) -> None:
+    """No-op terminal for the guard path when there is no open block."""
+    del ctx  # protocol-required parameter; intentionally unused
+
+
+@_pdg.step
+async def handle_unknown_part_delta(ctx: StepContext[_AnthropicRenderState, None, object]) -> None:
+    """Catch-all for delta types with no handler — log instead of silently dropping."""
+    logger.debug("anthropic render: unknown delta type %s; dropping", type(ctx.inputs).__name__)
+
+
+_pdg.add(
+    _pdg.edge_from(_pdg.start_node).to(open_delta),
+    _pdg.edge_from(open_delta).to(
+        _pdg.decision()
+        .branch(_pdg.match(_NoDelta).to(handle_no_open_block))
+        .branch(_pdg.match(TextPartDelta).to(handle_text_part_delta))
+        .branch(_pdg.match(ThinkingPartDelta).to(handle_thinking_part_delta))
+        .branch(_pdg.match(ToolCallPartDelta).to(handle_tool_call_part_delta))
+        .branch(_pdg.match(TypeExpression[object]).to(handle_unknown_part_delta))
+    ),
+    _pdg.edge_from(
+        handle_no_open_block,
+        handle_text_part_delta,
+        handle_thinking_part_delta,
+        handle_tool_call_part_delta,
+        handle_unknown_part_delta,
+    ).to(_pdg.end_node),
+)
+
+_part_delta_graph = _pdg.build()
+_dispatch_part_delta = _g.add_subgraph(_part_delta_graph, label="part_delta")  # ty: ignore[unresolved-attribute]
 
 
 @_g.step
@@ -349,14 +493,14 @@ _g.add(
     _g.edge_from(take_next_event).to(
         _g.decision()
         .branch(_g.match(_RenderDone).to(emit_done))
-        .branch(_g.match(PartStartEvent).to(handle_part_start))
-        .branch(_g.match(PartDeltaEvent).to(handle_part_delta))
+        .branch(_g.match(PartStartEvent).to(_dispatch_part_start))
+        .branch(_g.match(PartDeltaEvent).to(_dispatch_part_delta))
         .branch(_g.match(PartEndEvent).to(handle_part_end))
         .branch(_g.match(FinalResultEvent).to(handle_final_result))
     ),
     _g.edge_from(
-        handle_part_start,
-        handle_part_delta,
+        _dispatch_part_start,
+        _dispatch_part_delta,
         handle_part_end,
         handle_final_result,
     ).to(take_next_event),

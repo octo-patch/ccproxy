@@ -42,6 +42,8 @@ from typing import Literal
 
 from pydantic_ai.messages import (
     FinalResultEvent,
+    ModelResponsePart,
+    ModelResponsePartDelta,
     ModelResponseStreamEvent,
     PartDeltaEvent,
     PartEndEvent,
@@ -52,7 +54,9 @@ from pydantic_ai.messages import (
     ToolCallPart,
     ToolCallPartDelta,
 )
-from pydantic_graph import GraphBuilder, StepContext
+from pydantic_graph import GraphBuilder, StepContext, TypeExpression
+
+import ccproxy.lightllm.graph._subgraph_patch  # noqa: F401  -- installs GraphBuilder.add_subgraph
 
 logger = logging.getLogger(__name__)
 
@@ -118,6 +122,8 @@ class _OpenAIRenderState:
     The remaining fields (``chunk_id``, ``created``, ``model``, ``role_emitted``,
     ``part_to_tool_call_index``, ``next_tool_call_index``, ``finish_reason``)
     persist across render calls so the stream-level lifecycle stays consistent.
+    ``current_ir_index`` and ``current_part``/``current_delta`` are transient
+    scratch fields written by the inner-subgraph open steps.
     """
 
     chunk_id: str
@@ -127,6 +133,8 @@ class _OpenAIRenderState:
     part_to_tool_call_index: dict[int, int] = field(default_factory=dict)
     next_tool_call_index: int = 0
     finish_reason: _FinishReason = "stop"
+    current_ir_index: int = 0
+    """Transient: the IR event index, stashed by the inner-subgraph open step."""
     pending_events: deque[ModelResponseStreamEvent] = field(default_factory=deque)
     out: bytearray = field(default_factory=bytearray)
 
@@ -155,6 +163,7 @@ def _ensure_role(state: _OpenAIRenderState) -> None:
 
 
 _g: GraphBuilder[_OpenAIRenderState, None, None, bytes] = GraphBuilder(
+    name="openai_render",
     state_type=_OpenAIRenderState,
     output_type=bytes,
 )
@@ -170,120 +179,212 @@ async def take_next_event(
     return ctx.state.pending_events.popleft()
 
 
-@_g.step
-async def handle_part_start(
+# ── Inner subgraph: part_start dispatch ───────────────────────────────────
+#
+# ``handle_part_start`` previously used an isinstance ladder on ``event.part``.
+# This subgraph replaces that: ``open_part_start`` stashes the event index and
+# emits the role chunk, then returns ``event.part`` to the decision fan-out.
+
+_psg: GraphBuilder[_OpenAIRenderState, None, PartStartEvent, None] = GraphBuilder(
+    name="openai_render_part_start",
+    state_type=_OpenAIRenderState,
+    input_type=PartStartEvent,
+)
+
+
+@_psg.step
+async def open_part_start(
     ctx: StepContext[_OpenAIRenderState, None, PartStartEvent],
-) -> None:
-    """Open a new content surface (text or tool_call)."""
-    event = ctx.inputs
+) -> ModelResponsePart:
+    """Stash the IR index, ensure the role chunk is emitted, return the part for dispatch."""
+    state = ctx.state
+    state.current_ir_index = ctx.inputs.index
+    _ensure_role(state)
+    return ctx.inputs.part
+
+
+@_psg.step
+async def handle_text_part_start(ctx: StepContext[_OpenAIRenderState, None, TextPart]) -> None:
+    """``TextPart`` — emit an initial content chunk if the part arrived pre-populated."""
+    state = ctx.state
+    part = ctx.inputs
+    if part.content:
+        state.out += _emit_chunk(
+            chunk_id=state.chunk_id,
+            created=state.created,
+            model=state.model,
+            delta={"content": part.content},
+        )
+
+
+@_psg.step
+async def handle_tool_call_part_start(ctx: StepContext[_OpenAIRenderState, None, ToolCallPart]) -> None:
+    """``ToolCallPart`` — open a new tool_call slot and emit the envelope chunk."""
+    state = ctx.state
+    part = ctx.inputs
+    tc_index = state.next_tool_call_index
+    state.next_tool_call_index += 1
+    state.part_to_tool_call_index[state.current_ir_index] = tc_index
+    state.out += _emit_chunk(
+        chunk_id=state.chunk_id,
+        created=state.created,
+        model=state.model,
+        delta={
+            "tool_calls": [
+                {
+                    "index": tc_index,
+                    "id": part.tool_call_id,
+                    "type": "function",
+                    "function": {
+                        "name": part.tool_name,
+                        "arguments": _args_to_str(part.args),
+                    },
+                }
+            ]
+        },
+    )
+    state.finish_reason = "tool_calls"
+
+
+@_psg.step
+async def handle_unknown_part_start(ctx: StepContext[_OpenAIRenderState, None, object]) -> None:
+    """ThinkingPart, CompactionPart, FilePart, NativeToolCall* etc. — no Chat Completion wire surface."""
+    # The role chunk was already emitted by open_part_start; nothing more to do.
+    del ctx  # protocol-required parameter; intentionally unused
+
+
+_psg.add(
+    _psg.edge_from(_psg.start_node).to(open_part_start),
+    _psg.edge_from(open_part_start).to(
+        _psg.decision()
+        .branch(_psg.match(TextPart).to(handle_text_part_start))
+        .branch(_psg.match(ToolCallPart).to(handle_tool_call_part_start))
+        .branch(_psg.match(TypeExpression[object]).to(handle_unknown_part_start))
+    ),
+    _psg.edge_from(
+        handle_text_part_start,
+        handle_tool_call_part_start,
+        handle_unknown_part_start,
+    ).to(_psg.end_node),
+)
+
+_part_start_graph = _psg.build()
+_dispatch_part_start = _g.add_subgraph(_part_start_graph, label="part_start")  # ty: ignore[unresolved-attribute]
+
+
+# ── Inner subgraph: part_delta dispatch ───────────────────────────────────
+#
+# ``handle_part_delta`` previously used an isinstance ladder on ``event.delta``.
+# This subgraph replaces that: ``open_part_delta`` stashes the event index then
+# returns ``event.delta`` to the decision fan-out.
+
+_pdg: GraphBuilder[_OpenAIRenderState, None, PartDeltaEvent, None] = GraphBuilder(
+    name="openai_render_part_delta",
+    state_type=_OpenAIRenderState,
+    input_type=PartDeltaEvent,
+)
+
+
+@_pdg.step
+async def open_part_delta(
+    ctx: StepContext[_OpenAIRenderState, None, PartDeltaEvent],
+) -> ModelResponsePartDelta:
+    """Stash the IR index and return the delta for dispatch."""
+    ctx.state.current_ir_index = ctx.inputs.index
+    return ctx.inputs.delta
+
+
+@_pdg.step
+async def handle_text_part_delta(ctx: StepContext[_OpenAIRenderState, None, TextPartDelta]) -> None:
+    """``TextPartDelta`` — emit a content chunk."""
     state = ctx.state
     _ensure_role(state)
+    state.out += _emit_chunk(
+        chunk_id=state.chunk_id,
+        created=state.created,
+        model=state.model,
+        delta={"content": ctx.inputs.content_delta},
+    )
 
-    part = event.part
-    if isinstance(part, TextPart):
-        if part.content:
-            state.out += _emit_chunk(
-                chunk_id=state.chunk_id,
-                created=state.created,
-                model=state.model,
-                delta={"content": part.content},
-            )
-        return
-    if isinstance(part, ToolCallPart):
+
+@_pdg.step
+async def handle_tool_call_part_delta(ctx: StepContext[_OpenAIRenderState, None, ToolCallPartDelta]) -> None:
+    """``ToolCallPartDelta`` — emit args delta chunk; allocate a tool_call slot on first sighting."""
+    state = ctx.state
+    delta = ctx.inputs
+    _ensure_role(state)
+    tc_index = state.part_to_tool_call_index.get(state.current_ir_index)
+    if tc_index is None:
+        # First sighting of this IR part via a delta — allocate an
+        # OpenAI tool-call slot and emit the envelope (id + name + type).
         tc_index = state.next_tool_call_index
         state.next_tool_call_index += 1
-        state.part_to_tool_call_index[event.index] = tc_index
-        state.out += _emit_chunk(
-            chunk_id=state.chunk_id,
-            created=state.created,
-            model=state.model,
-            delta={
-                "tool_calls": [
-                    {
-                        "index": tc_index,
-                        "id": part.tool_call_id,
-                        "type": "function",
-                        "function": {
-                            "name": part.tool_name,
-                            "arguments": _args_to_str(part.args),
-                        },
-                    }
-                ]
-            },
-        )
+        state.part_to_tool_call_index[state.current_ir_index] = tc_index
+        envelope: dict[str, object] = {"index": tc_index, "type": "function"}
+        if delta.tool_call_id is not None:
+            envelope["id"] = delta.tool_call_id
+        fn: dict[str, object] = {}
+        if delta.tool_name_delta is not None:
+            fn["name"] = delta.tool_name_delta
+        fn["arguments"] = _args_to_str(delta.args_delta)
+        envelope["function"] = fn
         state.finish_reason = "tool_calls"
-        return
-    # ThinkingPart, CompactionPart, FilePart, NativeToolCall* etc. have no
-    # OpenAI Chat Completion wire surface — the role chunk above is the only
-    # output. They fall through to a no-op.
-
-
-@_g.step
-async def handle_part_delta(
-    ctx: StepContext[_OpenAIRenderState, None, PartDeltaEvent],
-) -> None:
-    """Emit a delta chunk for the open content surface."""
-    event = ctx.inputs
-    state = ctx.state
-    delta = event.delta
-
-    if isinstance(delta, TextPartDelta):
-        _ensure_role(state)
         state.out += _emit_chunk(
             chunk_id=state.chunk_id,
             created=state.created,
             model=state.model,
-            delta={"content": delta.content_delta},
+            delta={"tool_calls": [envelope]},
         )
         return
 
-    if isinstance(delta, ToolCallPartDelta):
-        _ensure_role(state)
-        tc_index = state.part_to_tool_call_index.get(event.index)
-        if tc_index is None:
-            # First sighting of this IR part via a delta — allocate an
-            # OpenAI tool-call slot and emit the envelope (id + name + type).
-            tc_index = state.next_tool_call_index
-            state.next_tool_call_index += 1
-            state.part_to_tool_call_index[event.index] = tc_index
-            envelope: dict[str, object] = {"index": tc_index, "type": "function"}
-            if delta.tool_call_id is not None:
-                envelope["id"] = delta.tool_call_id
-            fn: dict[str, object] = {}
-            if delta.tool_name_delta is not None:
-                fn["name"] = delta.tool_name_delta
-            fn["arguments"] = _args_to_str(delta.args_delta)
-            envelope["function"] = fn
-            state.finish_reason = "tool_calls"
-            state.out += _emit_chunk(
-                chunk_id=state.chunk_id,
-                created=state.created,
-                model=state.model,
-                delta={"tool_calls": [envelope]},
-            )
-            return
+    state.finish_reason = "tool_calls"
+    args_str = _args_to_str(delta.args_delta)
+    state.out += _emit_chunk(
+        chunk_id=state.chunk_id,
+        created=state.created,
+        model=state.model,
+        delta={
+            "tool_calls": [
+                {
+                    "index": tc_index,
+                    "function": {"arguments": args_str},
+                }
+            ]
+        },
+    )
 
-        state.finish_reason = "tool_calls"
-        args_str = _args_to_str(delta.args_delta)
-        state.out += _emit_chunk(
-            chunk_id=state.chunk_id,
-            created=state.created,
-            model=state.model,
-            delta={
-                "tool_calls": [
-                    {
-                        "index": tc_index,
-                        "function": {"arguments": args_str},
-                    }
-                ]
-            },
-        )
-        return
 
-    if isinstance(delta, ThinkingPartDelta):
-        # OpenAI Chat Completion SSE has no on-wire surface for thinking
-        # content (the ``reasoning`` field is OpenAI Responses only).
-        return
+@_pdg.step
+async def handle_thinking_part_delta(ctx: StepContext[_OpenAIRenderState, None, ThinkingPartDelta]) -> None:
+    """``ThinkingPartDelta`` — OpenAI Chat Completion has no on-wire surface for thinking content."""
+    del ctx  # protocol-required parameter; intentionally unused
+
+
+@_pdg.step
+async def handle_unknown_part_delta(ctx: StepContext[_OpenAIRenderState, None, object]) -> None:
+    """Catch-all for delta types with no Chat Completion handler — log instead of silently dropping."""
+    logger.debug("openai render: unhandled delta type %s; dropping", type(ctx.inputs).__name__)
+
+
+_pdg.add(
+    _pdg.edge_from(_pdg.start_node).to(open_part_delta),
+    _pdg.edge_from(open_part_delta).to(
+        _pdg.decision()
+        .branch(_pdg.match(TextPartDelta).to(handle_text_part_delta))
+        .branch(_pdg.match(ToolCallPartDelta).to(handle_tool_call_part_delta))
+        .branch(_pdg.match(ThinkingPartDelta).to(handle_thinking_part_delta))
+        .branch(_pdg.match(TypeExpression[object]).to(handle_unknown_part_delta))
+    ),
+    _pdg.edge_from(
+        handle_text_part_delta,
+        handle_tool_call_part_delta,
+        handle_thinking_part_delta,
+        handle_unknown_part_delta,
+    ).to(_pdg.end_node),
+)
+
+_part_delta_graph = _pdg.build()
+_dispatch_part_delta = _g.add_subgraph(_part_delta_graph, label="part_delta")  # ty: ignore[unresolved-attribute]
 
 
 @_g.step
@@ -317,14 +418,14 @@ _g.add(
     _g.edge_from(take_next_event).to(
         _g.decision()
         .branch(_g.match(_RenderDone).to(emit_done))
-        .branch(_g.match(PartStartEvent).to(handle_part_start))
-        .branch(_g.match(PartDeltaEvent).to(handle_part_delta))
+        .branch(_g.match(PartStartEvent).to(_dispatch_part_start))
+        .branch(_g.match(PartDeltaEvent).to(_dispatch_part_delta))
         .branch(_g.match(PartEndEvent).to(handle_part_end))
         .branch(_g.match(FinalResultEvent).to(handle_final_result))
     ),
     _g.edge_from(
-        handle_part_start,
-        handle_part_delta,
+        _dispatch_part_start,
+        _dispatch_part_delta,
         handle_part_end,
         handle_final_result,
     ).to(take_next_event),

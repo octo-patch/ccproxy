@@ -508,10 +508,16 @@ async def flush_event_deltas(
             )
         )
 
-    # Reset per-event scratch. ``blocks_queue`` is already drained by
-    # construction (``pop_next_block`` only returns ``_EventDone`` when
-    # empty). Defensive assert guards future refactors.
-    assert not state.blocks_queue, "blocks_queue must be empty at flush"
+    # Reset per-event scratch. ``blocks_queue`` is drained by construction
+    # (``pop_next_block`` only returns ``_EventDone`` when empty); guard against
+    # a future refactor leaking blocks into the next event (asserts are disabled
+    # under ``python -O``, so use an explicit clear rather than ``assert``).
+    if state.blocks_queue:
+        logger.error(
+            "pplx intake: blocks_queue not empty at flush (%d left); clearing",
+            len(state.blocks_queue),
+        )
+        state.blocks_queue.clear()
     state.pending_reasoning_delta = ""
     state.pending_answer_delta = ""
     state.has_plan_block = False

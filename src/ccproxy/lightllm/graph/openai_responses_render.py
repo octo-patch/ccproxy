@@ -39,6 +39,8 @@ from dataclasses import dataclass, field
 
 from pydantic_ai.messages import (
     FinalResultEvent,
+    ModelResponsePart,
+    ModelResponsePartDelta,
     ModelResponseStreamEvent,
     PartDeltaEvent,
     PartEndEvent,
@@ -50,7 +52,9 @@ from pydantic_ai.messages import (
     ToolCallPart,
     ToolCallPartDelta,
 )
-from pydantic_graph import GraphBuilder, StepContext
+from pydantic_graph import GraphBuilder, StepContext, TypeExpression
+
+import ccproxy.lightllm.graph._subgraph_patch  # noqa: F401  -- installs GraphBuilder.add_subgraph
 
 logger = logging.getLogger(__name__)
 
@@ -131,7 +135,9 @@ class _OpenAIResponsesRenderState:
     stays consistent. ``pending_events`` holds the single
     :class:`ModelResponseStreamEvent` pushed by :meth:`render` before
     each graph run; the FSM router pops from it. ``out`` accumulates
-    SSE bytes emitted by handler steps.
+    SSE bytes emitted by handler steps. ``current_ir_index`` and
+    ``current_delta`` are transient scratch fields written by the
+    inner-subgraph open steps.
     """
 
     response_id: str
@@ -161,6 +167,9 @@ class _OpenAIResponsesRenderState:
     finish_status: str = "completed"
     """``"completed"`` / ``"incomplete"`` / ``"failed"`` — stamped in postlude."""
 
+    current_ir_index: int = 0
+    """Transient: the IR event index, stashed by the inner-subgraph open step."""
+
     pending_events: deque[ModelResponseStreamEvent] = field(default_factory=deque)
     """Single-event queue popped by the FSM router."""
 
@@ -170,6 +179,10 @@ class _OpenAIResponsesRenderState:
 
 class _RenderDone:
     """Marker returned by the router when the events queue is exhausted."""
+
+
+class _NoDelta:
+    """Marker returned by ``open_responses_delta`` when the delta type is unroutable."""
 
 
 # ── Prelude helper ─────────────────────────────────────────────────────────
@@ -365,11 +378,17 @@ def _open_reasoning_item(
 def _close_item(
     state: _OpenAIResponsesRenderState,
     item: _OpenItemState,
+    out: bytearray,
 ) -> None:
-    """Emit the per-type ``.done`` events plus ``output_item.done`` for an open item."""
+    """Emit the per-type ``.done`` events plus ``output_item.done`` for an open item.
+
+    Writes into ``out`` rather than ``state.out`` so callers can direct
+    output to an arbitrary buffer (e.g. the local accumulator in ``close()``
+    rather than the shared FSM byte accumulator).
+    """
     if item.item_type == "message":
         if item.content_part_opened:
-            state.out += _emit_event(
+            out += _emit_event(
                 "response.output_text.done",
                 {
                     "type": "response.output_text.done",
@@ -381,7 +400,7 @@ def _close_item(
                     "sequence_number": _bump_seq(state),
                 },
             )
-            state.out += _emit_event(
+            out += _emit_event(
                 "response.content_part.done",
                 {
                     "type": "response.content_part.done",
@@ -397,7 +416,7 @@ def _close_item(
                     "sequence_number": _bump_seq(state),
                 },
             )
-        state.out += _emit_event(
+        out += _emit_event(
             "response.output_item.done",
             {
                 "type": "response.output_item.done",
@@ -420,7 +439,7 @@ def _close_item(
             },
         )
     elif item.item_type == "function_call":
-        state.out += _emit_event(
+        out += _emit_event(
             "response.function_call_arguments.done",
             {
                 "type": "response.function_call_arguments.done",
@@ -431,7 +450,7 @@ def _close_item(
                 "sequence_number": _bump_seq(state),
             },
         )
-        state.out += _emit_event(
+        out += _emit_event(
             "response.output_item.done",
             {
                 "type": "response.output_item.done",
@@ -448,7 +467,7 @@ def _close_item(
             },
         )
     elif item.item_type == "reasoning":
-        state.out += _emit_event(
+        out += _emit_event(
             "response.reasoning_text.done",
             {
                 "type": "response.reasoning_text.done",
@@ -459,7 +478,7 @@ def _close_item(
                 "sequence_number": _bump_seq(state),
             },
         )
-        state.out += _emit_event(
+        out += _emit_event(
             "response.output_item.done",
             {
                 "type": "response.output_item.done",
@@ -485,6 +504,7 @@ def _close_item(
 
 
 _g: GraphBuilder[_OpenAIResponsesRenderState, None, None, bytes] = GraphBuilder(
+    name="openai_responses_render",
     state_type=_OpenAIResponsesRenderState,
     output_type=bytes,
 )
@@ -500,86 +520,164 @@ async def take_next_event(
     return ctx.state.pending_events.popleft()
 
 
-@_g.step
-async def handle_part_start(
+# ── Inner subgraph: part_start dispatch ───────────────────────────────────
+#
+# ``handle_part_start`` previously used an isinstance ladder on ``event.part``.
+# This subgraph replaces that: ``open_responses_part`` stashes the event index,
+# emits the prelude if needed, then returns ``event.part`` to the decision fan-out.
+
+_psg: GraphBuilder[_OpenAIResponsesRenderState, None, PartStartEvent, None] = GraphBuilder(
+    name="openai_responses_render_part_start",
+    state_type=_OpenAIResponsesRenderState,
+    input_type=PartStartEvent,
+)
+
+
+@_psg.step
+async def open_responses_part(
     ctx: StepContext[_OpenAIResponsesRenderState, None, PartStartEvent],
-) -> None:
-    """Open a new output item for the incoming IR part."""
-    event = ctx.inputs
+) -> ModelResponsePart:
+    """Stash IR index, emit prelude if needed, return part for dispatch."""
     state = ctx.state
+    state.current_ir_index = ctx.inputs.index
     _ensure_response_created(state)
-
-    part = event.part
-    if isinstance(part, TextPart):
-        item = _open_message_item(state, ir_index=event.index)
-        if part.content:
-            item.text_buffer += part.content
-            state.out += _emit_event(
-                "response.output_text.delta",
-                {
-                    "type": "response.output_text.delta",
-                    "item_id": item.item_id,
-                    "output_index": item.output_index,
-                    "content_index": 0,
-                    "delta": part.content,
-                    "logprobs": [],
-                    "sequence_number": _bump_seq(state),
-                },
-            )
-        return
-
-    if isinstance(part, ToolCallPart):
-        item = _open_function_call_item(state, ir_index=event.index, part=part)
-        args_str = _args_to_str(part.args)
-        if args_str:
-            item.args_buffer += args_str
-            state.out += _emit_event(
-                "response.function_call_arguments.delta",
-                {
-                    "type": "response.function_call_arguments.delta",
-                    "item_id": item.item_id,
-                    "output_index": item.output_index,
-                    "delta": args_str,
-                    "sequence_number": _bump_seq(state),
-                },
-            )
-        return
-
-    if isinstance(part, ThinkingPart):
-        item = _open_reasoning_item(state, ir_index=event.index)
-        if part.content:
-            item.text_buffer += part.content
-            state.out += _emit_event(
-                "response.reasoning_text.delta",
-                {
-                    "type": "response.reasoning_text.delta",
-                    "item_id": item.item_id,
-                    "output_index": item.output_index,
-                    "content_index": 0,
-                    "delta": part.content,
-                    "sequence_number": _bump_seq(state),
-                },
-            )
-        return
-
-    # Other part kinds (NativeToolCall*, CompactionPart, FilePart) have no
-    # current Responses wire surface — silently no-op.
+    return ctx.inputs.part
 
 
-@_g.step
-async def handle_part_delta(
+@_psg.step
+async def handle_text_part_start(ctx: StepContext[_OpenAIResponsesRenderState, None, TextPart]) -> None:
+    """``TextPart`` — open a message item and emit any initial text delta."""
+    state = ctx.state
+    part = ctx.inputs
+    item = _open_message_item(state, ir_index=state.current_ir_index)
+    if part.content:
+        item.text_buffer += part.content
+        state.out += _emit_event(
+            "response.output_text.delta",
+            {
+                "type": "response.output_text.delta",
+                "item_id": item.item_id,
+                "output_index": item.output_index,
+                "content_index": 0,
+                "delta": part.content,
+                "logprobs": [],
+                "sequence_number": _bump_seq(state),
+            },
+        )
+
+
+@_psg.step
+async def handle_tool_call_part_start(ctx: StepContext[_OpenAIResponsesRenderState, None, ToolCallPart]) -> None:
+    """``ToolCallPart`` — open a function_call item and emit any initial args delta."""
+    state = ctx.state
+    part = ctx.inputs
+    item = _open_function_call_item(state, ir_index=state.current_ir_index, part=part)
+    args_str = _args_to_str(part.args)
+    if args_str:
+        item.args_buffer += args_str
+        state.out += _emit_event(
+            "response.function_call_arguments.delta",
+            {
+                "type": "response.function_call_arguments.delta",
+                "item_id": item.item_id,
+                "output_index": item.output_index,
+                "delta": args_str,
+                "sequence_number": _bump_seq(state),
+            },
+        )
+
+
+@_psg.step
+async def handle_thinking_part_start(ctx: StepContext[_OpenAIResponsesRenderState, None, ThinkingPart]) -> None:
+    """``ThinkingPart`` — open a reasoning item and emit any initial reasoning text delta."""
+    state = ctx.state
+    part = ctx.inputs
+    item = _open_reasoning_item(state, ir_index=state.current_ir_index)
+    if part.content:
+        item.text_buffer += part.content
+        state.out += _emit_event(
+            "response.reasoning_text.delta",
+            {
+                "type": "response.reasoning_text.delta",
+                "item_id": item.item_id,
+                "output_index": item.output_index,
+                "content_index": 0,
+                "delta": part.content,
+                "sequence_number": _bump_seq(state),
+            },
+        )
+
+
+@_psg.step
+async def handle_unknown_part_start(ctx: StepContext[_OpenAIResponsesRenderState, None, object]) -> None:
+    """Other part kinds (NativeToolCall*, CompactionPart, FilePart) — no Responses wire surface."""
+    del ctx  # protocol-required parameter; intentionally unused
+
+
+_psg.add(
+    _psg.edge_from(_psg.start_node).to(open_responses_part),
+    _psg.edge_from(open_responses_part).to(
+        _psg.decision()
+        .branch(_psg.match(TextPart).to(handle_text_part_start))
+        .branch(_psg.match(ToolCallPart).to(handle_tool_call_part_start))
+        .branch(_psg.match(ThinkingPart).to(handle_thinking_part_start))
+        .branch(_psg.match(TypeExpression[object]).to(handle_unknown_part_start))
+    ),
+    _psg.edge_from(
+        handle_text_part_start,
+        handle_tool_call_part_start,
+        handle_thinking_part_start,
+        handle_unknown_part_start,
+    ).to(_psg.end_node),
+)
+
+_part_start_graph = _psg.build()
+_dispatch_part_start = _g.add_subgraph(_part_start_graph, label="part_start")  # ty: ignore[unresolved-attribute]
+
+
+# ── Inner subgraph: part_delta dispatch ───────────────────────────────────
+#
+# ``handle_part_delta`` previously used an isinstance ladder on ``event.delta``
+# with a lazy-open guard before the dispatch. This subgraph keeps the lazy-open
+# guard in ``open_responses_delta`` (which resolves the open item and stashes it
+# on state) and fans out to per-delta-type handlers.
+#
+# The lazy-open path returns None when the delta type is unknown and no item can
+# be opened; the ``handle_delta_no_item`` leaf is the terminal for that case.
+
+
+@dataclass
+class _ResolvedDelta:
+    """Carrier for the resolved open item + the typed delta."""
+
+    item: _OpenItemState
+    delta: ModelResponsePartDelta
+
+
+_pdg: GraphBuilder[_OpenAIResponsesRenderState, None, PartDeltaEvent, None] = GraphBuilder(
+    name="openai_responses_render_part_delta",
+    state_type=_OpenAIResponsesRenderState,
+    input_type=PartDeltaEvent,
+)
+
+
+@_pdg.step
+async def open_responses_delta(
     ctx: StepContext[_OpenAIResponsesRenderState, None, PartDeltaEvent],
-) -> None:
-    """Emit a delta event for the matching open item."""
+) -> _ResolvedDelta | _NoDelta:
+    """Stash IR index, resolve (or lazily open) the target item, return carrier for dispatch.
+
+    Returns :class:`_NoDelta` when the delta type is unroutable (no item to open
+    and no existing item to target), signalling the ``handle_delta_no_item`` terminal.
+    """
     event = ctx.inputs
     state = ctx.state
+    state.current_ir_index = event.index
     delta = event.delta
 
     output_index = state.part_to_output_index.get(event.index)
     if output_index is None:
-        # PartDelta arrived before PartStart — likely an upstream FSM that
-        # streams deltas without a prior start event. Open a message item
-        # lazily for text deltas; tool_call deltas open a function_call.
+        # PartDelta arrived before PartStart — open a matching item lazily.
         _ensure_response_created(state)
         if isinstance(delta, TextPartDelta):
             item = _open_message_item(state, ir_index=event.index)
@@ -593,60 +691,128 @@ async def handle_part_delta(
         elif isinstance(delta, ThinkingPartDelta):
             item = _open_reasoning_item(state, ir_index=event.index)
         else:
-            return
+            return _NoDelta()
         output_index = item.output_index
 
+    return _ResolvedDelta(item=state.open_items[output_index], delta=delta)
+
+
+@_pdg.step
+async def split_resolved_delta(
+    ctx: StepContext[_OpenAIResponsesRenderState, None, _ResolvedDelta],
+) -> ModelResponsePartDelta:
+    """Unwrap the carrier, returning the delta for the inner type-switch decision."""
+    return ctx.inputs.delta
+
+
+@_pdg.step
+async def handle_text_part_delta(ctx: StepContext[_OpenAIResponsesRenderState, None, TextPartDelta]) -> None:
+    """``TextPartDelta`` — emit a ``response.output_text.delta`` event."""
+    state = ctx.state
+    delta = ctx.inputs
+    output_index = state.part_to_output_index[state.current_ir_index]
     item = state.open_items[output_index]
+    if delta.content_delta:
+        item.text_buffer += delta.content_delta
+        state.out += _emit_event(
+            "response.output_text.delta",
+            {
+                "type": "response.output_text.delta",
+                "item_id": item.item_id,
+                "output_index": item.output_index,
+                "content_index": 0,
+                "delta": delta.content_delta,
+                "logprobs": [],
+                "sequence_number": _bump_seq(state),
+            },
+        )
 
-    if isinstance(delta, TextPartDelta):
-        if delta.content_delta:
-            item.text_buffer += delta.content_delta
-            state.out += _emit_event(
-                "response.output_text.delta",
-                {
-                    "type": "response.output_text.delta",
-                    "item_id": item.item_id,
-                    "output_index": item.output_index,
-                    "content_index": 0,
-                    "delta": delta.content_delta,
-                    "logprobs": [],
-                    "sequence_number": _bump_seq(state),
-                },
-            )
-        return
 
-    if isinstance(delta, ToolCallPartDelta):
-        args_str = _args_to_str(delta.args_delta)
-        if args_str:
-            item.args_buffer += args_str
-            state.out += _emit_event(
-                "response.function_call_arguments.delta",
-                {
-                    "type": "response.function_call_arguments.delta",
-                    "item_id": item.item_id,
-                    "output_index": item.output_index,
-                    "delta": args_str,
-                    "sequence_number": _bump_seq(state),
-                },
-            )
-        return
+@_pdg.step
+async def handle_tool_call_part_delta(ctx: StepContext[_OpenAIResponsesRenderState, None, ToolCallPartDelta]) -> None:
+    """``ToolCallPartDelta`` — emit a ``response.function_call_arguments.delta`` event."""
+    state = ctx.state
+    delta = ctx.inputs
+    output_index = state.part_to_output_index[state.current_ir_index]
+    item = state.open_items[output_index]
+    args_str = _args_to_str(delta.args_delta)
+    if args_str:
+        item.args_buffer += args_str
+        state.out += _emit_event(
+            "response.function_call_arguments.delta",
+            {
+                "type": "response.function_call_arguments.delta",
+                "item_id": item.item_id,
+                "output_index": item.output_index,
+                "delta": args_str,
+                "sequence_number": _bump_seq(state),
+            },
+        )
 
-    if isinstance(delta, ThinkingPartDelta):
-        text_delta = delta.content_delta
-        if text_delta:
-            item.text_buffer += text_delta
-            state.out += _emit_event(
-                "response.reasoning_text.delta",
-                {
-                    "type": "response.reasoning_text.delta",
-                    "item_id": item.item_id,
-                    "output_index": item.output_index,
-                    "content_index": 0,
-                    "delta": text_delta,
-                    "sequence_number": _bump_seq(state),
-                },
-            )
-        return
+
+@_pdg.step
+async def handle_thinking_part_delta(ctx: StepContext[_OpenAIResponsesRenderState, None, ThinkingPartDelta]) -> None:
+    """``ThinkingPartDelta`` — emit a ``response.reasoning_text.delta`` event."""
+    state = ctx.state
+    delta = ctx.inputs
+    output_index = state.part_to_output_index[state.current_ir_index]
+    item = state.open_items[output_index]
+    text_delta = delta.content_delta
+    if text_delta:
+        item.text_buffer += text_delta
+        state.out += _emit_event(
+            "response.reasoning_text.delta",
+            {
+                "type": "response.reasoning_text.delta",
+                "item_id": item.item_id,
+                "output_index": item.output_index,
+                "content_index": 0,
+                "delta": text_delta,
+                "sequence_number": _bump_seq(state),
+            },
+        )
+
+
+@_pdg.step
+async def handle_delta_no_item(ctx: StepContext[_OpenAIResponsesRenderState, None, _NoDelta]) -> None:
+    """Terminal for unroutable deltas that arrived with no resolvable open item."""
+    del ctx  # protocol-required parameter; intentionally unused
+
+
+@_pdg.step
+async def handle_unknown_part_delta(ctx: StepContext[_OpenAIResponsesRenderState, None, object]) -> None:
+    """Catch-all for delta types with no Responses handler — log instead of silently dropping."""
+    logger.debug(
+        "openai_responses render: unhandled delta type %s; dropping",
+        type(ctx.inputs).__name__,
+    )
+
+
+_pdg.add(
+    _pdg.edge_from(_pdg.start_node).to(open_responses_delta),
+    _pdg.edge_from(open_responses_delta).to(
+        _pdg.decision()
+        .branch(_pdg.match(_NoDelta).to(handle_delta_no_item))
+        .branch(_pdg.match(_ResolvedDelta).to(split_resolved_delta))
+    ),
+    _pdg.edge_from(split_resolved_delta).to(
+        _pdg.decision()
+        .branch(_pdg.match(TextPartDelta).to(handle_text_part_delta))
+        .branch(_pdg.match(ToolCallPartDelta).to(handle_tool_call_part_delta))
+        .branch(_pdg.match(ThinkingPartDelta).to(handle_thinking_part_delta))
+        .branch(_pdg.match(TypeExpression[object]).to(handle_unknown_part_delta))
+    ),
+    _pdg.edge_from(
+        handle_delta_no_item,
+        handle_text_part_delta,
+        handle_tool_call_part_delta,
+        handle_thinking_part_delta,
+        handle_unknown_part_delta,
+    ).to(_pdg.end_node),
+)
+
+_part_delta_graph = _pdg.build()
+_dispatch_part_delta = _g.add_subgraph(_part_delta_graph, label="part_delta")  # ty: ignore[unresolved-attribute]
 
 
 @_g.step
@@ -662,7 +828,7 @@ async def handle_part_end(
     item = state.open_items.pop(output_index, None)
     if item is None:
         return
-    _close_item(state, item)
+    _close_item(state, item, state.out)
 
 
 @_g.step
@@ -688,14 +854,14 @@ _g.add(
     _g.edge_from(take_next_event).to(
         _g.decision()
         .branch(_g.match(_RenderDone).to(emit_done))
-        .branch(_g.match(PartStartEvent).to(handle_part_start))
-        .branch(_g.match(PartDeltaEvent).to(handle_part_delta))
+        .branch(_g.match(PartStartEvent).to(_dispatch_part_start))
+        .branch(_g.match(PartDeltaEvent).to(_dispatch_part_delta))
         .branch(_g.match(PartEndEvent).to(handle_part_end))
         .branch(_g.match(FinalResultEvent).to(handle_final_result))
     ),
     _g.edge_from(
-        handle_part_start,
-        handle_part_delta,
+        _dispatch_part_start,
+        _dispatch_part_delta,
         handle_part_end,
         handle_final_result,
     ).to(take_next_event),
@@ -743,10 +909,7 @@ class OpenAIResponsesRenderFSM:
         # PartEndEvent for every open part if the stream cut short).
         for output_index in sorted(state.open_items.keys()):
             item = state.open_items.pop(output_index)
-            saved_out = state.out
-            state.out = out
-            _close_item(state, item)
-            state.out = saved_out
+            _close_item(state, item, out)
 
         # Postlude — response.completed with the final envelope snapshot.
         snapshot = _response_envelope_snapshot(
