@@ -7,6 +7,10 @@ explicit TLS+HTTP/2 fingerprint policy. The request contract is:
 - ``X-CCProxy-Impersonate`` — ``curl-cffi`` impersonate profile name.
 - ``X-CCProxy-Fingerprint`` — optional base64url JSON captured ClientHello
   profile for this flow.
+- ``X-CCProxy-Continuation`` — optional continuation type name. When present,
+  ``body_stream()`` tees chunks through a provider-specific continuation
+  handler that may append further content after the upstream HTTP body ends
+  (e.g. WebSocket handoff for ``openai_conversations``).
 
 The sidecar strips those, forwards everything else through the cached
 ``httpx.AsyncClient`` from :mod:`ccproxy.transport.dispatch`, decodes any
@@ -26,8 +30,10 @@ import json
 import logging
 import socket
 from collections.abc import AsyncIterator
+from typing import Protocol
 from urllib.parse import urlsplit
 
+import httpx
 import uvicorn
 from httpx import Headers
 from httpx._decoders import SUPPORTED_DECODERS, ContentDecoder, DecodingError, MultiDecoder
@@ -38,12 +44,14 @@ from starlette.routing import Route
 
 from ccproxy import transport
 from ccproxy.inspector.fingerprint import CapturedFingerprint
+from ccproxy.openai_conversations.ws_handoff import HandoffState, detect_handoff, run_handoff_bridge
 
 logger = logging.getLogger(__name__)
 
 TARGET_URL_HEADER = "x-ccproxy-target-url"
 IMPERSONATE_HEADER = "x-ccproxy-impersonate"
 FINGERPRINT_HEADER = "x-ccproxy-fingerprint"
+CONTINUATION_HEADER = "x-ccproxy-continuation"
 
 _RELAY_EXCLUDED_HEADERS = frozenset(
     {
@@ -131,7 +139,8 @@ async def _handle(request: Request) -> Response:
     if host is None:
         return Response(f"invalid target URL: {target_url!r}", status_code=400)
 
-    drop = _RELAY_EXCLUDED_HEADERS | {TARGET_URL_HEADER, IMPERSONATE_HEADER, FINGERPRINT_HEADER}
+    continuation = request.headers.get(CONTINUATION_HEADER)
+    drop = _RELAY_EXCLUDED_HEADERS | {TARGET_URL_HEADER, IMPERSONATE_HEADER, FINGERPRINT_HEADER, CONTINUATION_HEADER}
     fwd_headers = _filter_headers(list(request.headers.raw), drop)
     body = await request.body()
 
@@ -169,25 +178,42 @@ async def _handle(request: Request) -> Response:
     decoder = _response_decoder(upstream.headers)
     response_header_drop = _RELAY_RESPONSE_EXCLUDED_HEADERS if decoder is not None else _RELAY_EXCLUDED_HEADERS
 
+    # Resolve a continuation factory when the request opted in.
+    continuation_factory = _CONTINUATION_FACTORIES.get(continuation) if continuation else None
+
     async def body_stream() -> AsyncIterator[bytes]:
+        handoff_state: HandoffState | None = HandoffState() if continuation_factory is not None else None
         try:
             async for chunk in upstream.aiter_raw():
                 if decoder is None:
-                    yield chunk
-                    continue
-                try:
-                    decoded = decoder.decode(chunk)
-                except DecodingError as exc:
-                    logger.warning("sidecar: failed to decode Content-Encoding for %s: %s", target_url, exc)
-                    raise
-                if decoded:
-                    yield decoded
+                    out_chunk = chunk
+                else:
+                    try:
+                        out_chunk = decoder.decode(chunk)
+                    except DecodingError as exc:
+                        logger.warning("sidecar: failed to decode Content-Encoding for %s: %s", target_url, exc)
+                        raise
+                if out_chunk:
+                    if handoff_state is not None:
+                        detect_handoff(handoff_state, out_chunk)
+                    yield out_chunk
             if decoder is not None:
                 flushed = decoder.flush()
                 if flushed:
+                    if handoff_state is not None:
+                        detect_handoff(handoff_state, flushed)
                     yield flushed
         finally:
             await upstream.aclose()
+
+        # Continuation: if a WS handoff topic was detected and no HTTP answer
+        # content arrived, bridge via the WS and stream the continuation.
+        if continuation_factory is not None and handoff_state is not None and handoff_state.should_bridge():
+            async for extra_chunk in continuation_factory(
+                client=client,
+                handoff_state=handoff_state,
+            ):
+                yield extra_chunk
 
     return StreamingResponse(
         body_stream(),
@@ -199,6 +225,33 @@ async def _handle(request: Request) -> Response:
             )
         ),
     )
+
+
+async def _openai_conversations_continuation(
+    *,
+    client: httpx.AsyncClient,
+    handoff_state: HandoffState,
+) -> AsyncIterator[bytes]:
+    """Continuation factory for ``openai_conversations``.
+
+    Calls :func:`ccproxy.openai_conversations.ws_handoff.run_handoff_bridge`
+    with the authenticated client and topic id extracted from ``handoff_state``.
+    """
+    async for chunk in run_handoff_bridge(client=client, topic_id=handoff_state.topic):
+        yield chunk
+
+
+class _ContinuationFactory(Protocol):
+    """Callable protocol for continuation factories."""
+
+    def __call__(self, *, client: httpx.AsyncClient, handoff_state: HandoffState) -> AsyncIterator[bytes]: ...
+
+
+# Mapping from ``X-CCProxy-Continuation`` value to its async-generator factory.
+# New providers add an entry here; the sidecar remains provider-agnostic.
+_CONTINUATION_FACTORIES: dict[str, _ContinuationFactory] = {
+    "openai_conversations": _openai_conversations_continuation,
+}
 
 
 def _fingerprint_from_header(value: str | None) -> CapturedFingerprint | None:

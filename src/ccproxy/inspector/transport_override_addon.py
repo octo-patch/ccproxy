@@ -28,7 +28,7 @@ from mitmproxy import http
 from ccproxy.config import get_config
 from ccproxy.flows.store import HttpSnapshot
 from ccproxy.pipeline.context import metadata_from_flow
-from ccproxy.transport.sidecar import IMPERSONATE_HEADER, TARGET_URL_HEADER
+from ccproxy.transport.sidecar import CONTINUATION_HEADER, IMPERSONATE_HEADER, TARGET_URL_HEADER
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +66,8 @@ class TransportOverrideAddon:
 
         flow.request.headers[TARGET_URL_HEADER] = target_url
         flow.request.headers[IMPERSONATE_HEADER] = profile
+        if provider.type == "openai_conversations":
+            flow.request.headers[CONTINUATION_HEADER] = "openai_conversations"
 
         flow.request.host = "127.0.0.1"
         flow.request.port = self._sidecar_port

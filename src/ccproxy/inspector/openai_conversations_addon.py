@@ -170,7 +170,13 @@ async def _refresh_sentinel(
     resp.raise_for_status()
     result = resp.json()
     sentinel_token = str(result.get("token") or "")
-    expires_at_ms = int(result.get("expires_at") or 0)
+    # Aurora ``sentinelReqResponse.ExpiresAt`` is typed as ``int64`` with no
+    # explicit unit documentation.  Real-world observations show the field
+    # carries unix **seconds** (values ≈ 1.7e9), not milliseconds (≈ 1.7e12).
+    # Guard: treat any value below 1e11 as seconds and multiply by 1000 so
+    # ``is_expired(expiry_ms=…)`` receives the correct millisecond epoch.
+    raw_expires = int(result.get("expires_at") or 0)
+    expires_at_ms = raw_expires * 1000 if 0 < raw_expires < 100_000_000_000 else raw_expires
 
     update_sentinel_fields(
         credential_path,
