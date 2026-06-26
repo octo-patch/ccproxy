@@ -144,6 +144,20 @@
               enabled = false;
               endpoint = "http://localhost:4317";
             };
+            # Dev affordance: route OpenAI-format /v1/chat/completions requests
+            # whose model matches ^claude through the cross-format transform to
+            # the anthropic provider (exercises anthropic_intake + openai_render
+            # end to end through the reverse listener).
+            lightllm = {
+              transforms = [
+                {
+                  match_path = "/v1/chat/completions";
+                  match_model = "^claude";
+                  action = "transform";
+                  dest_provider = "anthropic";
+                }
+              ];
+            };
           };
         };
         inspectorRuntimeDeps = with pkgs; [
