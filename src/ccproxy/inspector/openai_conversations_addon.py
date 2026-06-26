@@ -1,0 +1,653 @@
+"""OpenAI Conversations transport-preparation addon.
+
+Responsibility: for flows whose ``metadata.auth_provider`` resolves to a
+:class:`~ccproxy.config.Provider` with ``type == "openai_conversations"``,
+this addon performs the browser-side pre-flight work that must share the same
+cached curl-cffi client as the final forwarded request:
+
+1. **Cookie-jar warmup** — ``GET /``, ``/api/auth/session``, ``/cdn-cgi/trace``
+   through the cached client. Throttled to at most once per
+   ``warmup_throttle_seconds`` when usable Cloudflare cookies already exist.
+2. **Sentinel refresh** — ``POST /backend-api/sentinel/req`` when the persisted
+   token is missing or within ``sentinel_skew_seconds`` of expiry. Persists
+   the new token + expiry back to the credential file via :func:`update_sentinel_fields`.
+3. **Conduit prepare** (``none → sent → success``) — three ``POST
+   /backend-api/f/conversation/prepare`` calls. All three share one
+   ``x-oai-turn-trace-id``. The first sends an empty ``x-conduit-token``; each
+   subsequent call sends the token returned by the previous one. Fail-closed:
+   any prepare error raises so the request is rejected rather than silently
+   downgraded.
+4. **Header stamping** — browser identity, Sentinel, conduit token, turn trace,
+   target-path/route, ``X-OAI-IS`` from the cookie jar (best-effort).
+   Clears stale downstream sec-*/oai-* headers first. Keeps
+   ``Authorization: Bearer <access_token>`` as set by ``inject_auth``.
+
+``response()`` handles:
+- **One-shot retry** on 401, 403, or Cloudflare challenge: invalidate cached
+  Sentinel state, force warmup, refresh Sentinel, replay once via the same
+  ``get_client(...)`` call, then mark the flow so ``AuthAddon`` skips its generic
+  replay and this addon cannot loop.
+- **ConversationStore write-back**: scan the upstream SSE body for
+  ``conversation_id`` and the last assistant message id, then persist them for
+  the next turn's ``openai_conversations_thread_inject`` hook.
+- **X-OAI-IS-Update**: if the response carries this header, write its value back
+  to the client cookie jar (best-effort).
+- **WS handoff: DEFERRED** — The full WebSocket continuation
+  (``GET /backend-api/celsius/ws/user`` → ``wss`` → subscribe → frame reader)
+  is a joint capstone with CHATGPT-004 (intake FSM surfaces the handoff signal).
+  A clearly commented stub is left here; wiring is done after CHATGPT-004 lands.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import time
+import uuid
+from typing import Any
+
+import httpx
+from mitmproxy import http
+
+from ccproxy import transport
+from ccproxy.config import get_config
+from ccproxy.openai_conversations.conversation_store import get_conversation_store
+from ccproxy.openai_conversations.credentials import (
+    load_credential_state,
+    update_sentinel_fields,
+)
+from ccproxy.openai_conversations.prepare_p import build_requirements_token
+from ccproxy.openai_conversations.profile import get_browser_headers, headers_to_clear
+from ccproxy.openai_conversations.sentinel import (
+    build_sentinel_req_body,
+    build_sentinel_token_header,
+    is_expired,
+)
+from ccproxy.pipeline.context import metadata_from_flow
+
+logger = logging.getLogger(__name__)
+
+# Sentinel flow identifier (mirrors ccproxy.openai_conversations.sentinel._DEFAULT_FLOW).
+_SENTINEL_FLOW = "conversation"
+
+# Per (provider_name, fingerprint_profile) → last warmup timestamp (monotonic).
+_warmup_timestamps: dict[tuple[str, str], float] = {}
+
+_BASE_URL = "https://chatgpt.com"
+_PREPARE_PATH = "/backend-api/f/conversation/prepare"
+_SENTINEL_REQ_PATH = "/backend-api/sentinel/req"
+
+
+def _is_oaic_flow(flow: http.HTTPFlow) -> bool:
+    """True when this flow belongs to the openai_conversations provider."""
+    provider_name = metadata_from_flow(flow).auth_provider
+    if not provider_name:
+        return False
+    provider = get_config().providers.get(provider_name)
+    return provider is not None and provider.type == "openai_conversations"
+
+
+def _has_usable_cookies(client: httpx.AsyncClient) -> bool:
+    """Return True when the client cookie jar has CF-clearance or session tokens."""
+    try:
+        jar = client.cookies
+        names = {c.name for c in jar.jar}
+        return bool(names & {"cf_clearance", "__Secure-next-auth.session-token.0"})
+    except Exception:
+        return False
+
+
+def _should_warmup(
+    *,
+    provider_name: str,
+    profile: str,
+    throttle_seconds: float,
+    client: httpx.AsyncClient,
+) -> bool:
+    """Decide whether cookie-jar warmup should run.
+
+    Skips warmup when all of:
+    - The client already has usable cookies (cf_clearance or session-token), AND
+    - The last warmup for (provider_name, profile) ran within ``throttle_seconds``.
+    """
+    key = (provider_name, profile)
+    last = _warmup_timestamps.get(key, 0.0)
+    elapsed = time.monotonic() - last
+    return not (_has_usable_cookies(client) and elapsed < throttle_seconds)
+
+
+def _mark_warmup(provider_name: str, profile: str) -> None:
+    _warmup_timestamps[(provider_name, profile)] = time.monotonic()
+
+
+async def _run_warmup(client: httpx.AsyncClient, timeout: float) -> None:
+    """GET /, /api/auth/session, /cdn-cgi/trace to bootstrap Cloudflare cookies.
+
+    Mirrors aurora cookie_bootstrap.go:bootstrapCookieJar (MIT-licensed).
+    Failure on any individual URL is non-fatal — the cookie jar receives whatever
+    Set-Cookie headers the server returned before the error.
+    """
+    urls = [
+        f"{_BASE_URL}/",
+        f"{_BASE_URL}/api/auth/session",
+        f"{_BASE_URL}/cdn-cgi/trace",
+    ]
+    for url in urls:
+        try:
+            resp = await client.get(url, timeout=timeout)
+            # Drain body so the connection can be reused.
+            await resp.aread()
+        except Exception as exc:
+            logger.debug("oaic warmup %s failed (non-fatal): %s", url, exc)
+
+
+async def _refresh_sentinel(
+    *,
+    client: httpx.AsyncClient,
+    credential_path: str,
+    device_id: str,
+    timeout: float,
+) -> tuple[str, str]:
+    """POST /backend-api/sentinel/req and persist the new token.
+
+    Returns (sentinel_token, p_token) on success. Raises on any non-200 response.
+
+    Ported from aurora request.go:416-479 (MIT-licensed).
+    """
+    p_token = build_requirements_token()
+    body = build_sentinel_req_body(p=p_token, device_id=device_id, flow=_SENTINEL_FLOW)
+
+    sentinel_url = f"{_BASE_URL}{_SENTINEL_REQ_PATH}"
+    resp = await client.post(
+        sentinel_url,
+        content=body.encode(),
+        headers={
+            "content-type": "text/plain;charset=UTF-8",
+            "referer": f"{_BASE_URL}/backend-api/sentinel/frame.html?sv=20260423af3c",
+        },
+        timeout=timeout,
+    )
+    resp.raise_for_status()
+    result = resp.json()
+    sentinel_token = str(result.get("token") or "")
+    expires_at_ms = int(result.get("expires_at") or 0)
+
+    update_sentinel_fields(
+        credential_path,
+        sentinel_token=sentinel_token,
+        sentinel_p_token=p_token,
+        sentinel_expires_at_ms=expires_at_ms,
+        sentinel_flow=_SENTINEL_FLOW,
+        sentinel_so_token="",
+        label="OpenAIConversations",
+    )
+
+    return sentinel_token, p_token
+
+
+async def _run_conduit_prepare(
+    *,
+    client: httpx.AsyncClient,
+    final_body: dict[str, Any],
+    turn_trace_id: str,
+    timeout: float,
+) -> str:
+    """Three-state conduit prepare: none → sent → success.
+
+    Returns the final conduit_token that must accompany the ``/f/conversation``
+    request. Raises on any prepare failure (fail-closed).
+
+    Ported from aurora request.go:980-1020 (MIT-licensed, PrepareConversationConduitFull).
+    """
+    from ccproxy.lightllm.adapters.openai_conversations import (
+        _PrepareState,
+        build_conversation_prepare_body,
+    )
+
+    states: tuple[_PrepareState, _PrepareState, _PrepareState] = ("none", "sent", "success")
+    conduit_token = ""
+    prepare_url = f"{_BASE_URL}{_PREPARE_PATH}"
+
+    for state in states:
+        prepare_body = build_conversation_prepare_body(final_body=final_body, state=state)
+        headers = {
+            "content-type": "application/json",
+            "accept": "application/json",
+            "x-oai-turn-trace-id": turn_trace_id,
+            "x-openai-target-path": _PREPARE_PATH,
+            "x-openai-target-route": _PREPARE_PATH,
+            "x-conduit-token": conduit_token,
+        }
+        resp = await client.post(
+            prepare_url,
+            content=json.dumps(prepare_body).encode(),
+            headers=headers,
+            timeout=timeout,
+        )
+        if resp.status_code not in (200, 201):
+            raise RuntimeError(f"conduit prepare({state}) failed: HTTP {resp.status_code} — {resp.text[:200]}")
+        data = resp.json()
+        returned = str(data.get("conduit_token") or "")
+        if returned:
+            conduit_token = returned
+
+    return conduit_token
+
+
+def _scan_sse_for_conversation_ids(raw_body: bytes) -> tuple[str, str]:
+    """Scan OpenAI Conversations SSE body for conversation_id and last message id.
+
+    Returns (conversation_id, parent_message_id). Either may be empty when not
+    found. Late events overwrite earlier values.
+    """
+    conversation_id = ""
+    parent_message_id = ""
+    try:
+        text = raw_body.decode("utf-8", errors="replace")
+    except Exception:
+        return conversation_id, parent_message_id
+
+    for line in text.splitlines():
+        line = line.strip()
+        if not line.startswith("data: "):
+            continue
+        data_part = line[len("data: ") :]
+        if data_part == "[DONE]":
+            continue
+        try:
+            event = json.loads(data_part)
+        except (ValueError, json.JSONDecodeError):
+            continue
+        if not isinstance(event, dict):
+            continue
+        cid = event.get("conversation_id")
+        if isinstance(cid, str) and cid:
+            conversation_id = cid
+        msg = event.get("message")
+        if isinstance(msg, dict):
+            mid = msg.get("id")
+            if isinstance(mid, str) and mid:
+                role = (msg.get("author") or {}).get("role", "")
+                if role == "assistant":
+                    parent_message_id = mid
+
+    return conversation_id, parent_message_id
+
+
+class OpenAIConversationsAddon:
+    """mitmproxy addon: browser pre-flight for OpenAI Conversations requests.
+
+    Runs between the outbound pipeline and :class:`TransportOverrideAddon`.
+    Every hook is gated on ``metadata.auth_provider`` resolving to a
+    ``Provider`` with ``type == "openai_conversations"``; all other flows are
+    byte-for-byte unaffected.
+    """
+
+    async def request(self, flow: http.HTTPFlow) -> None:
+        if not _is_oaic_flow(flow):
+            return
+        try:
+            await self._prepare_request(flow)
+        except Exception:
+            logger.error("OpenAIConversationsAddon.request failed", exc_info=True)
+            raise
+
+    async def response(self, flow: http.HTTPFlow) -> None:
+        if not flow.response or not _is_oaic_flow(flow):
+            return
+        try:
+            await self._handle_response(flow)
+        except Exception:
+            logger.error("OpenAIConversationsAddon.response failed", exc_info=True)
+
+    # ------------------------------------------------------------------
+    # request-side orchestration
+    # ------------------------------------------------------------------
+
+    async def _prepare_request(self, flow: http.HTTPFlow) -> None:
+        metadata = metadata_from_flow(flow)
+        provider_name = metadata.auth_provider
+
+        config = get_config()
+        provider = config.providers[provider_name]
+        oaic_cfg = config.lightllm.openai_conversations
+
+        profile = provider.fingerprint_profile or transport.DEFAULT_PROFILE
+        client = await transport.get_client(host=provider.host, profile=profile)
+
+        # Load credential state — need device_id + sentinel fields.
+        credential_path = getattr(provider.auth, "file_path", "") if provider.auth else ""
+        state = load_credential_state(path=credential_path, label="OpenAIConversations") if credential_path else None
+        if state is None:
+            # No credential state — try to proceed without warmup/sentinel.
+            logger.warning(
+                "oaic: no credential state loaded for provider %s; skipping warmup/sentinel",
+                provider_name,
+            )
+            device_id = str(uuid.uuid4())
+            sentinel_token = ""
+            p_token = ""
+        else:
+            device_id = state.device_id or str(uuid.uuid4())
+            sentinel_token = state.sentinel_token
+            p_token = state.sentinel_p_token
+
+        timeout = oaic_cfg.request_timeout_seconds
+
+        # 1. Warmup — bootstraps Cloudflare cookies into the shared client jar.
+        if _should_warmup(
+            provider_name=provider_name,
+            profile=profile,
+            throttle_seconds=oaic_cfg.warmup_throttle_seconds,
+            client=client,
+        ):
+            try:
+                await _run_warmup(client=client, timeout=timeout)
+                _mark_warmup(provider_name=provider_name, profile=profile)
+                logger.debug("oaic warmup complete for provider=%s", provider_name)
+            except Exception as exc:
+                logger.warning("oaic warmup failed (non-fatal): %s", exc)
+
+        # 2. Sentinel refresh — when expired or within skew window.
+        skew_ms = int(oaic_cfg.sentinel_skew_seconds * 1000)
+        sentinel_expires_ms = state.sentinel_expires_at_ms if state else 0
+        if is_expired(expiry_ms=sentinel_expires_ms, skew_ms=skew_ms):
+            try:
+                sentinel_token, p_token = await _refresh_sentinel(
+                    client=client,
+                    credential_path=credential_path,
+                    device_id=device_id,
+                    timeout=timeout,
+                )
+                logger.debug(
+                    "oaic sentinel refreshed for provider=%s token=%s…",
+                    provider_name,
+                    sentinel_token[:12] if sentinel_token else "",
+                )
+            except Exception as exc:
+                logger.error("oaic sentinel refresh failed: %s", exc)
+                raise
+
+        # 3. Conduit prepare (none → sent → success).
+        turn_trace_id = str(uuid.uuid4())
+        try:
+            final_body = json.loads(flow.request.content or b"{}")
+        except (ValueError, json.JSONDecodeError):
+            final_body = {}
+
+        try:
+            conduit_token = await _run_conduit_prepare(
+                client=client,
+                final_body=final_body,
+                turn_trace_id=turn_trace_id,
+                timeout=timeout,
+            )
+        except Exception as exc:
+            logger.error("oaic conduit prepare failed: %s", exc)
+            raise
+
+        # 4. Stamp headers on the flow.
+        conversation_id = str(final_body.get("conversation_id") or "")
+
+        # Clear stale browser-identity / oai-* headers first.
+        for h in headers_to_clear():
+            flow.request.headers.pop(h, None)
+
+        # Stamp browser identity.
+        browser_headers = get_browser_headers(
+            device_id=device_id,
+            session_id=device_id,
+            conversation_id=conversation_id,
+            final=True,
+        )
+        for k, v in browser_headers.items():
+            flow.request.headers[k] = v
+
+        # Sentinel token header.
+        turnstile_token = state.sentinel_so_token if state else ""
+        sentinel_header_value = build_sentinel_token_header(
+            p=p_token,
+            turnstile_token=turnstile_token,
+            sentinel_token=sentinel_token,
+            device_id=device_id,
+            flow=_SENTINEL_FLOW,
+        )
+        flow.request.headers["openai-sentinel-token"] = sentinel_header_value
+
+        # Conduit + turn trace.
+        flow.request.headers["x-conduit-token"] = conduit_token
+        flow.request.headers["x-oai-turn-trace-id"] = turn_trace_id
+
+        # Target path and route (mirrors aurora conversationHeadersWithState).
+        target_path = flow.request.path
+        flow.request.headers["x-openai-target-path"] = target_path
+        flow.request.headers["x-openai-target-route"] = target_path
+
+        # X-OAI-IS — sourced from the shared client cookie jar (best-effort).
+        # The cookie is named __Secure-oai-is; its value is the X-OAI-IS token.
+        oai_is_value = _get_oai_is_from_jar(client)
+        if oai_is_value:
+            flow.request.headers["x-oai-is"] = oai_is_value
+
+        logger.debug(
+            "oaic stamped: provider=%s profile=%s trace=%s conduit=%s…",
+            provider_name,
+            profile,
+            turn_trace_id[:8],
+            conduit_token[:12] if conduit_token else "",
+        )
+
+    # ------------------------------------------------------------------
+    # response-side orchestration
+    # ------------------------------------------------------------------
+
+    async def _handle_response(self, flow: http.HTTPFlow) -> None:
+        assert flow.response is not None
+        metadata = metadata_from_flow(flow)
+
+        # X-OAI-IS-Update: write back to cookie jar before anything else.
+        oai_is_update = flow.response.headers.get("x-oai-is-update") or flow.response.headers.get("X-OAI-IS-Update")
+        if oai_is_update:
+            await self._write_oai_is_to_jar(flow=flow, value=oai_is_update)
+
+        status = flow.response.status_code
+        is_cf_challenge = bool(flow.response.headers.get("cf-mitigated"))
+
+        if (status in (401, 403) or is_cf_challenge) and not metadata.oaic_retry_done:
+            await self._retry_once(flow)
+            return
+
+        # ConversationStore write-back from completed SSE.
+        await self._write_back_conversation(flow)
+
+        # WS handoff: DEFERRED.
+        # When CHATGPT-004 lands, the intake FSM surfaces a typed
+        # ``stream_handoff`` event containing a topic_id.  The 002 addon
+        # should then open ``GET /backend-api/celsius/ws/user`` → wss →
+        # subscribe to the topic → pipe frames back through the intake FSM.
+        # Implementation deferred to the CHATGPT-004 joint capstone.
+        # See: aurora request.go:622-707, 810-891, 1213-1268.
+
+    async def _retry_once(self, flow: http.HTTPFlow) -> None:
+        """One-shot 401/403/CF-challenge retry.
+
+        Invalidates the cached sentinel state, forces a warmup, refreshes the
+        sentinel, then replays the request via the same cached client. Marks
+        both the loop-guard and the AuthAddon-skip flags before returning.
+        """
+        metadata = metadata_from_flow(flow)
+        metadata.oaic_retry_done = True
+        # Prevent AuthAddon's generic 401 replay from firing on top of this one.
+        metadata.auth_injected = False
+
+        provider_name = metadata.auth_provider
+        if not provider_name:
+            return
+
+        config = get_config()
+        provider = config.providers.get(provider_name)
+        if provider is None or provider.type != "openai_conversations":
+            return
+
+        oaic_cfg = config.lightllm.openai_conversations
+        profile = provider.fingerprint_profile or transport.DEFAULT_PROFILE
+        client = await transport.get_client(host=provider.host, profile=profile)
+        credential_path = getattr(provider.auth, "file_path", "") if provider.auth else ""
+        state = load_credential_state(path=credential_path, label="OpenAIConversations") if credential_path else None
+        device_id = (state.device_id or str(uuid.uuid4())) if state else str(uuid.uuid4())
+        timeout = oaic_cfg.request_timeout_seconds
+
+        # Force warmup.
+        _warmup_timestamps.pop((provider_name, profile), None)
+        try:
+            await _run_warmup(client=client, timeout=timeout)
+            _mark_warmup(provider_name=provider_name, profile=profile)
+        except Exception as exc:
+            logger.warning("oaic retry warmup failed (non-fatal): %s", exc)
+
+        # Force sentinel refresh.
+        try:
+            sentinel_token, p_token = await _refresh_sentinel(
+                client=client,
+                credential_path=credential_path,
+                device_id=device_id,
+                timeout=timeout,
+            )
+        except Exception as exc:
+            logger.error("oaic retry sentinel refresh failed: %s", exc)
+            return
+
+        # Stamp the updated sentinel header onto the request.
+        so_token = state.sentinel_so_token if state else ""
+        flow.request.headers["openai-sentinel-token"] = build_sentinel_token_header(
+            p=p_token,
+            turnstile_token=so_token,
+            sentinel_token=sentinel_token,
+            device_id=device_id,
+            flow=_SENTINEL_FLOW,
+        )
+
+        # Replay via the same cached client (bypassing the sidecar rewrite).
+        headers = dict(flow.request.headers)
+        headers.pop("x-ccproxy-auth-injected", None)
+
+        try:
+            retry_resp = await client.request(
+                method=flow.request.method,
+                url=flow.request.pretty_url,
+                headers=headers,
+                content=flow.request.content,
+                timeout=timeout,
+            )
+        except Exception as exc:
+            logger.error("oaic one-shot retry request failed: %s", exc)
+            return
+
+        assert flow.response is not None
+        flow.response.status_code = retry_resp.status_code
+        flow.response.headers.clear()
+        for key, value in retry_resp.headers.multi_items():
+            flow.response.headers.add(key, value)
+        flow.response.content = retry_resp.content
+
+        logger.info(
+            "oaic one-shot retry completed: provider=%s status=%d",
+            provider_name,
+            retry_resp.status_code,
+        )
+
+    async def _write_back_conversation(self, flow: http.HTTPFlow) -> None:
+        """Scan the upstream SSE and persist conversation identifiers to the L1 store."""
+        assert flow.response is not None
+        metadata = metadata_from_flow(flow)
+
+        if flow.response.status_code >= 400:
+            return
+
+        conv_id = metadata.conversation_id
+        if not isinstance(conv_id, str) or not conv_id:
+            return
+
+        raw_body = _extract_raw_body(flow)
+        if not raw_body:
+            return
+
+        chatgpt_conv_id, parent_message_id = _scan_sse_for_conversation_ids(raw_body)
+        if not chatgpt_conv_id or not parent_message_id:
+            logger.debug(
+                "oaic write-back: no conversation_id/parent_message_id found in SSE (conv=%s)",
+                conv_id[:8],
+            )
+            return
+
+        store = get_conversation_store()
+        store.save(
+            key=conv_id,
+            conversation_id=chatgpt_conv_id,
+            parent_message_id=parent_message_id,
+        )
+        logger.debug(
+            "oaic write-back: saved conv=%s chatgpt_id=%s parent=%s",
+            conv_id[:8],
+            chatgpt_conv_id[:8],
+            parent_message_id[:8],
+        )
+
+    async def _write_oai_is_to_jar(self, *, flow: http.HTTPFlow, value: str) -> None:
+        """Write X-OAI-IS-Update back to the shared client cookie jar (best-effort)."""
+        metadata = metadata_from_flow(flow)
+        provider_name = metadata.auth_provider
+        if not provider_name:
+            return
+        provider = get_config().providers.get(provider_name)
+        if provider is None:
+            return
+        profile = provider.fingerprint_profile or transport.DEFAULT_PROFILE
+        try:
+            client = await transport.get_client(host=provider.host, profile=profile)
+            client.cookies.set("__Secure-oai-is", value, domain="chatgpt.com")
+        except Exception as exc:
+            logger.debug("oaic X-OAI-IS-Update jar write failed (non-fatal): %s", exc)
+
+
+# ------------------------------------------------------------------
+# Module-level helpers
+# ------------------------------------------------------------------
+
+
+def _get_oai_is_from_jar(client: httpx.AsyncClient) -> str:
+    """Read ``__Secure-oai-is`` from the client cookie jar (best-effort).
+
+    Returns an empty string when the cookie is absent or the jar is not
+    accessible (curl-cffi may not expose a queryable jar in all configurations —
+    see live-probe note in CHATGPT-002 acceptance checks).
+    """
+    try:
+        return client.cookies.get("__Secure-oai-is", domain="chatgpt.com") or ""
+    except Exception:
+        return ""
+
+
+def _extract_raw_body(flow: http.HTTPFlow) -> bytes:
+    """Extract the raw upstream SSE body from the flow record or response.
+
+    Mirrors :meth:`PerplexityAddon._extract_raw_body` exactly.
+    """
+    metadata = metadata_from_flow(flow)
+    record = metadata.record
+    provider_resp = getattr(record, "provider_response", None) if record else None
+    if provider_resp is not None:
+        body = getattr(provider_resp, "body", None)
+        if isinstance(body, bytes) and body:
+            return body
+    transformer = metadata.sse_transformer
+    if transformer is not None and hasattr(transformer, "raw_body"):
+        raw = transformer.raw_body
+        if isinstance(raw, bytes) and raw:
+            return raw
+    if flow.response is not None:
+        try:
+            return flow.response.content or b""
+        except Exception:
+            return b""
+    return b""

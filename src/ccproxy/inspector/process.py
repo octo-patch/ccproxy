@@ -139,8 +139,9 @@ def _build_addons(
 ) -> list[Any]:
     """Final addon chain: ``InspectorAddon → FingerprintCaptureAddon →
     MultiHARSaver → ShapeCaptureAddon → inbound pipeline → transform
-    (lightllm) → outbound pipeline → TransportOverrideAddon → AuthAddon →
-    GeminiAddon → PerplexityAddon → EgressSanitizerAddon``.
+    (lightllm) → outbound pipeline → OpenAIConversationsAddon →
+    TransportOverrideAddon → AuthAddon → GeminiAddon → PerplexityAddon →
+    EgressSanitizerAddon``.
 
     mitmproxy dispatches addons in registration order. ``AuthAddon`` and
     ``GeminiAddon`` both sit AFTER the outbound pipeline so they see
@@ -162,6 +163,7 @@ def _build_addons(
     from ccproxy.inspector.fingerprint_capture import FingerprintCaptureAddon
     from ccproxy.inspector.gemini_addon import GeminiAddon
     from ccproxy.inspector.multi_har_saver import MultiHARSaver
+    from ccproxy.inspector.openai_conversations_addon import OpenAIConversationsAddon
     from ccproxy.inspector.pplx_addon import PerplexityAddon
     from ccproxy.inspector.shape_capturer import ShapeCaptureAddon
     from ccproxy.inspector.transport_override_addon import TransportOverrideAddon
@@ -220,6 +222,7 @@ def _build_addons(
     if outbound_hooks:
         addons.append(_make_pipeline_router("ccproxy_outbound", outbound_hooks))
 
+    addons.append(OpenAIConversationsAddon())
     addons.append(TransportOverrideAddon(sidecar_port=sidecar_port))
     addons.append(AuthAddon())
     addons.append(GeminiAddon())

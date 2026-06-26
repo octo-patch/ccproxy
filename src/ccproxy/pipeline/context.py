@@ -295,6 +295,7 @@ class CcproxyMetadata(MetadataSection):
     fingerprint_profile: str = metadata_field(default="")
     retry_transport: str = metadata_field(default="")
     retry_profile: str = metadata_field(default="")
+    oaic_retry_done: bool = metadata_field(default=False)
     legacy_client_fingerprint: dict[str, Any] | None = metadata_field(key="client_fingerprint", default=None)
 
     @property
