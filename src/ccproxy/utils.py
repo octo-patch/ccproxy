@@ -2,8 +2,11 @@
 
 import inspect
 import json
+import os
 import re
 import socket
+import stat
+import tempfile
 from pathlib import Path
 from typing import Any, cast
 
@@ -11,6 +14,28 @@ from rich import box
 from rich.console import Console
 from rich.pretty import Pretty
 from rich.table import Table
+
+
+def atomic_write_back(path: Path, data: dict[str, Any]) -> None:
+    """Atomically rewrite a JSON file at ``path`` with mode 0o600.
+
+    Writes to a same-directory tempfile (so ``replace`` is atomic on the same
+    filesystem), fsyncs it, chmods to owner-only, then renames over the target.
+    The tempfile is removed on any failure; on success the rename consumes it.
+    """
+    path = path.expanduser()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w") as tf:
+            json.dump(data, tf)
+            tf.flush()
+            os.fsync(tf.fileno())
+        tmp_path.chmod(stat.S_IRUSR | stat.S_IWUSR)
+        tmp_path.replace(path)
+    finally:
+        tmp_path.unlink(missing_ok=True)
 
 
 def parse_session_id(user_id: str) -> str | None:

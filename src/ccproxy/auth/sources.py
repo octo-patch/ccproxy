@@ -43,6 +43,9 @@ import httpx
 from glom import PathAccessError, assign, glom
 from pydantic import BaseModel, ConfigDict, Field
 
+from ccproxy.openai_conversations.credentials import load_credential_state
+from ccproxy.utils import atomic_write_back
+
 logger = logging.getLogger(__name__)
 
 _COMMAND_TIMEOUT_SEC = 5.0
@@ -506,8 +509,38 @@ class CodexAuthSource(AuthFields):
         return False
 
 
+class OpenAIConversationsAuthSource(AuthFields):
+    """Auth source backed by the OpenAI Conversations flat credential JSON file.
+
+    Returns only the ``access_token`` so the generic ``inject_auth`` hook
+    continues to work unchanged. Sentinel fields are read and written by
+    :mod:`ccproxy.openai_conversations.credentials` helpers under the
+    per-provider lock in ``CCProxyConfig.resolve_auth_token``.
+
+    Missing file or missing ``access_token`` produce a logged error and return
+    ``None``, matching the behavior of other auth sources.
+    """
+
+    type: Literal["openai_conversations"] = "openai_conversations"
+    file_path: str = "~/.config/ccproxy/openai-conversations-credentials.json"
+    """Path to the flat credential JSON file written by
+    ``scripts/acquire_openai_conversations_credentials.py``."""
+
+    def resolve(self, label: str = "Auth") -> str | None:
+        """Read and return the ``access_token`` from the credential file."""
+        state = load_credential_state(path=self.file_path, label=label)
+        if state is None:
+            return None
+        return state.access_token
+
+
 AnyAuthSource = Annotated[
-    CommandAuthSource | FileAuthSource | AnthropicAuthSource | GoogleAuthSource | CodexAuthSource,
+    CommandAuthSource
+    | FileAuthSource
+    | AnthropicAuthSource
+    | GoogleAuthSource
+    | CodexAuthSource
+    | OpenAIConversationsAuthSource,
     Field(discriminator="type"),
 ]
 
@@ -533,51 +566,17 @@ def parse_auth_source(raw: str | dict[str, Any] | AuthFields) -> AuthFields:
             return GoogleAuthSource(**raw)
         if type_ == "codex_oauth":
             return CodexAuthSource(**raw)
+        if type_ == "openai_conversations":
+            return OpenAIConversationsAuthSource(**raw)
         if type_ == "file" or ("file" in raw and "type" not in raw):
             return FileAuthSource(**raw)
         if type_ == "command" or ("command" in raw and "type" not in raw):
             return CommandAuthSource(**raw)
         raise ValueError(
             f"Cannot infer AuthSource type from keys {list(raw.keys())!r}; "
-            f"specify 'type: command|file|anthropic_oauth|google_oauth|codex_oauth'",
+            f"specify 'type: command|file|anthropic_oauth|google_oauth|codex_oauth|openai_conversations'",
         )
     raise TypeError(f"Unsupported auth entry: {type(raw).__name__}")
-
-
-def atomic_write_back(path: Path, data: dict[str, Any]) -> None:
-    """Atomically rewrite a JSON credential file at ``path`` with mode 0o600.
-
-    Writes to a tempfile in the same directory (so ``rename`` is atomic
-    on the same filesystem), fsyncs, renames, then chmods.
-    """
-    import os
-    import stat
-    import tempfile
-
-    path = path.expanduser()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_fd: int | None = None
-    tmp_path: Path | None = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            dir=path.parent,
-            delete=False,
-            prefix=f".{path.name}.",
-            suffix=".tmp",
-        ) as tf:
-            json.dump(data, tf)
-            tf.flush()
-            os.fsync(tf.fileno())
-            tmp_path = Path(tf.name)
-        tmp_path.chmod(stat.S_IRUSR | stat.S_IWUSR)
-        tmp_path.replace(path)
-        tmp_path = None
-    finally:
-        if tmp_fd is not None:
-            os.close(tmp_fd)
-        if tmp_path is not None and tmp_path.exists():
-            tmp_path.unlink(missing_ok=True)
 
 
 def needs_refresh(expiry_ms: float, now_ms: float | None = None) -> bool:
