@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Protocol, runtime_checkable
 from ccproxy.lightllm.adapters.anthropic import AnthropicAdapter
 from ccproxy.lightllm.adapters.google import GoogleAdapter
 from ccproxy.lightllm.adapters.openai_chat import OpenAIChatAdapter
+from ccproxy.lightllm.adapters.openai_conversations import OpenAIConversationsAdapter
 from ccproxy.lightllm.adapters.openai_responses import OpenAIResponsesAdapter
 from ccproxy.lightllm.adapters.perplexity import PerplexityAdapter
 from ccproxy.lightllm.parsed import RawExtras
@@ -67,6 +68,7 @@ __all__ = [
     "GoogleAdapter",
     "LLMRenderInput",
     "OpenAIChatAdapter",
+    "OpenAIConversationsAdapter",
     "OpenAIResponsesAdapter",
     "PerplexityAdapter",
 ]

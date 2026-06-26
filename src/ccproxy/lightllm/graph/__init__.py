@@ -147,5 +147,9 @@ def dispatch_dump_sync(req: "LLMRenderInput", *, provider_type: str) -> bytes:
         from ccproxy.lightllm.adapters.perplexity import PerplexityAdapter
 
         return PerplexityAdapter.render(req)
+    if provider_type == "openai_conversations":
+        from ccproxy.lightllm.adapters.openai_conversations import OpenAIConversationsAdapter
+
+        return OpenAIConversationsAdapter.render(req)
 
     raise UnsupportedUpstreamError(f"no outbound renderer for provider_type={provider_type!r}")

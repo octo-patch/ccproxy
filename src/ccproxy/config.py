@@ -562,6 +562,37 @@ class TransformOverride(BaseModel):
         return self
 
 
+class OpenAIConversationsConfig(BaseModel):
+    """OpenAI Conversations (ChatGPT web) provider runtime knobs.
+
+    Owned by :class:`~ccproxy.inspector.openai_conversations_addon.OpenAIConversationsAddon`
+    and the ``openai_conversations_thread_inject`` hook. Lives under the
+    ``lightllm`` config block (``config.lightllm.openai_conversations``),
+    separate from :class:`Provider` (routing). Browser-profile constants
+    (UA, sec-ch, client version/build) live in code, not config (ADR-0002).
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    warmup_throttle_seconds: float = Field(default=600.0, gt=0)
+    """Skip cookie-jar warmup when it ran within this window and usable cookies
+    already exist (~10 min per aurora ``cookie_bootstrap``; ``cf_clearance``
+    expires in roughly 15-30 min)."""
+
+    sentinel_skew_seconds: float = Field(default=60.0, ge=0)
+    """Refresh the Sentinel token when within this headroom of ``expires_at``."""
+
+    request_timeout_seconds: float = Field(default=120.0, gt=0)
+    """HTTP timeout for warmup / Sentinel / conversation-prepare / final calls."""
+
+    ttl_seconds: float = Field(default=3600.0, gt=0)
+    """L1 TTL for :class:`~ccproxy.openai_conversations.conversation_store.ConversationStore`
+    multi-turn continuation state."""
+
+    default_model: str = "gpt-5-5-pro"
+    """Model slug used when an incoming request omits the model (ADR-0002)."""
+
+
 class LightllmConfig(BaseModel):
     """Configuration for lightllm cross-format routing and transforms."""
 
@@ -573,6 +604,9 @@ class LightllmConfig(BaseModel):
     from :class:`CCProxyConfig.providers` via ``inject_auth``'s sentinel
     detection. Override rules force a specific destination for a
     path/model/host combination."""
+
+    openai_conversations: OpenAIConversationsConfig = Field(default_factory=OpenAIConversationsConfig)
+    """OpenAI Conversations (ChatGPT web) provider runtime knobs (ADR-0002)."""
 
 
 class InspectorConfig(BaseModel):
