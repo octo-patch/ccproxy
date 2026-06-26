@@ -1,6 +1,15 @@
 {
   use = [
     {
+      node = "@repo:gproxy-protocol";
+      mount = "gproxy-protocol";
+    }
+    {
+      node = "@repo:gproxy";
+      mount = "gproxy";
+    }
+
+    {
       node = "@repo:aurora";
       mount = "aurora";
     }
