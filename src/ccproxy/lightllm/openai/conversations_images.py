@@ -37,9 +37,10 @@ from dataclasses import dataclass
 from typing import Any
 
 import httpx
+from pydantic import BaseModel, Field
 from pydantic_ai.messages import ModelMessage, ModelRequest, UserPromptPart
 
-from ccproxy.lightllm.adapters.openai_conversations import build_conversation_body
+from ccproxy.lightllm.adapters.openai_conversations import MessageContent, build_conversation_body
 from ccproxy.lightllm.openai.conversations_image_parse import ParsedImageEdit
 
 __all__ = [
@@ -96,6 +97,71 @@ class UploadedImage:
     height: int
     filename: str
     mime_type: str
+
+
+# ---------------------------------------------------------------------------
+# Wire models — image edit upload bodies + multimodal fragments + image response
+# ---------------------------------------------------------------------------
+
+
+class ImageAssetPointer(BaseModel):
+    """``image_asset_pointer`` part of a ``multimodal_text`` message (image edit)."""
+
+    content_type: str = "image_asset_pointer"
+    asset_pointer: str
+    size_bytes: int
+    width: int
+    height: int
+
+
+class ImageAttachment(BaseModel):
+    """``metadata.attachments[]`` entry for an uploaded edit source image."""
+
+    id: str
+    size: int
+    name: str
+    mime_type: str
+    width: int
+    height: int
+    source: str = "library"
+    is_big_paste: bool = False
+
+
+class FileUploadCreateBody(BaseModel):
+    """``POST /backend-api/files`` request body (upload step 1)."""
+
+    file_name: str
+    file_size: int
+    use_case: str = "multimodal"
+    timezone_offset_min: int = -480
+    reset_rate_limits: bool = False
+    store_in_library: bool = True
+    library_persistence_mode: str = "opportunistic"
+
+
+class FileProcessUploadBody(BaseModel):
+    """``POST /backend-api/files/process_upload_stream`` request body (upload step 3)."""
+
+    file_id: str
+    use_case: str = "multimodal"
+    index_for_retrieval: bool = False
+    file_name: str
+    library_persistence_mode: str = "opportunistic"
+    metadata: dict[str, Any] = Field(default_factory=lambda: {"store_in_library": True})
+
+
+class ImageData(BaseModel):
+    """One entry of the OpenAI ``images.response`` ``data[]`` array."""
+
+    b64_json: str
+    revised_prompt: str | None = None
+
+
+class ImagesResponse(BaseModel):
+    """OpenAI ``images.response`` envelope."""
+
+    created: int
+    data: list[ImageData]
 
 
 # ---------------------------------------------------------------------------
@@ -178,27 +244,27 @@ def attach_uploaded_image(body: dict[str, Any], *, prompt: str, uploaded: Upload
     if not (isinstance(messages, list) and messages and isinstance(messages[0], dict)):
         return
     message = messages[0]
-    asset = {
-        "content_type": "image_asset_pointer",
-        "asset_pointer": f"{_SEDIMENT_SCHEME}{uploaded.file_id}",
-        "size_bytes": uploaded.size_bytes,
-        "width": uploaded.width,
-        "height": uploaded.height,
-    }
-    message["content"] = {"content_type": "multimodal_text", "parts": [asset, prompt]}
+    asset = ImageAssetPointer(
+        asset_pointer=f"{_SEDIMENT_SCHEME}{uploaded.file_id}",
+        size_bytes=uploaded.size_bytes,
+        width=uploaded.width,
+        height=uploaded.height,
+    )
+    message["content"] = MessageContent(
+        content_type="multimodal_text",
+        parts=[asset.model_dump(), prompt],
+    ).model_dump()
     metadata = message.setdefault("metadata", {})
     if isinstance(metadata, dict):
         metadata["attachments"] = [
-            {
-                "id": uploaded.file_id,
-                "size": uploaded.size_bytes,
-                "name": uploaded.filename,
-                "mime_type": uploaded.mime_type,
-                "width": uploaded.width,
-                "height": uploaded.height,
-                "source": "library",
-                "is_big_paste": False,
-            }
+            ImageAttachment(
+                id=uploaded.file_id,
+                size=uploaded.size_bytes,
+                name=uploaded.filename,
+                mime_type=uploaded.mime_type,
+                width=uploaded.width,
+                height=uploaded.height,
+            ).model_dump()
         ]
 
 
@@ -263,10 +329,10 @@ def build_images_response(images: list[bytes]) -> dict[str, Any]:
     ``revised_prompt`` is ``null`` (OpenAI spec shape); chatgpt.com does not
     return a structured revised prompt.
     """
-    return {
-        "created": int(time.time()),
-        "data": [{"b64_json": base64.b64encode(image).decode("ascii"), "revised_prompt": None} for image in images],
-    }
+    return ImagesResponse(
+        created=int(time.time()),
+        data=[ImageData(b64_json=base64.b64encode(image).decode("ascii")) for image in images],
+    ).model_dump()
 
 
 def _normalize_pointer(raw: str) -> ImagePointer | None:
@@ -327,17 +393,7 @@ async def upload_image(
 
     create = await client.post(
         f"{base_url}/backend-api/files",
-        content=json.dumps(
-            {
-                "file_name": parsed.filename,
-                "file_size": parsed.size_bytes,
-                "use_case": "multimodal",
-                "timezone_offset_min": -480,
-                "reset_rate_limits": False,
-                "store_in_library": True,
-                "library_persistence_mode": "opportunistic",
-            }
-        ).encode(),
+        content=FileUploadCreateBody(file_name=parsed.filename, file_size=parsed.size_bytes).model_dump_json().encode(),
         headers=json_headers,
         timeout=timeout,
     )
@@ -360,16 +416,7 @@ async def upload_image(
 
     activate = await client.post(
         f"{base_url}/backend-api/files/process_upload_stream",
-        content=json.dumps(
-            {
-                "file_id": file_id,
-                "use_case": "multimodal",
-                "index_for_retrieval": False,
-                "file_name": parsed.filename,
-                "library_persistence_mode": "opportunistic",
-                "metadata": {"store_in_library": True},
-            }
-        ).encode(),
+        content=FileProcessUploadBody(file_id=file_id, file_name=parsed.filename).model_dump_json().encode(),
         headers=json_headers,
         timeout=timeout,
     )

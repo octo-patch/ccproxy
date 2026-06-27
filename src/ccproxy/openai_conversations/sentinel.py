@@ -29,6 +29,25 @@ import base64
 import json
 import time
 from dataclasses import dataclass
+from typing import Any
+
+from pydantic import BaseModel
+
+
+class SentinelPrepareBody(BaseModel):
+    """``POST /sentinel/chat-requirements/prepare`` request body (sentinel.rs:118)."""
+
+    p: str
+
+
+class SentinelFinalizeBody(BaseModel):
+    """``POST /sentinel/chat-requirements/finalize`` request body (sentinel.rs:128-139).
+
+    ``proofofwork`` is ``None`` (omitted on serialization) when no PoW was required.
+    """
+
+    prepare_token: str
+    proofofwork: str | None = None
 
 
 @dataclass(frozen=True)
@@ -57,7 +76,7 @@ class SentinelResult:
     response's ``so.collector_dx``; empty when ``so`` is absent."""
 
 
-def build_prepare_body(p: str) -> dict[str, str]:
+def build_prepare_body(p: str) -> dict[str, Any]:
     """Build the ``/sentinel/chat-requirements/prepare`` request body.
 
     Args:
@@ -66,10 +85,10 @@ def build_prepare_body(p: str) -> dict[str, str]:
     Returns:
         ``{"p": p}`` (sentinel.rs:118 — no device_id/flow fields).
     """
-    return {"p": p}
+    return SentinelPrepareBody(p=p).model_dump()
 
 
-def build_finalize_body(*, prepare_token: str, proof: str) -> dict[str, str]:
+def build_finalize_body(*, prepare_token: str, proof: str) -> dict[str, Any]:
     """Build the ``/sentinel/chat-requirements/finalize`` request body.
 
     The ``proofofwork`` field is included only when ``proof`` is non-empty
@@ -82,10 +101,7 @@ def build_finalize_body(*, prepare_token: str, proof: str) -> dict[str, str]:
     Returns:
         ``{"prepare_token": …}`` plus ``"proofofwork": proof`` when ``proof``.
     """
-    body: dict[str, str] = {"prepare_token": prepare_token}
-    if proof:
-        body["proofofwork"] = proof
-    return body
+    return SentinelFinalizeBody(prepare_token=prepare_token, proofofwork=proof or None).model_dump(exclude_none=True)
 
 
 def decode_jwt_exp_ms(token: str) -> int | None:

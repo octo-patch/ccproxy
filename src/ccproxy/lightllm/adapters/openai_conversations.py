@@ -35,6 +35,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Literal
 
+from pydantic import BaseModel, Field
 from pydantic_ai.messages import (
     ModelMessage,
     ModelRequest,
@@ -89,6 +90,105 @@ _PREPARE_STRIP_KEYS: frozenset[str] = frozenset(
         "client_prepare_state",
     }
 )
+
+
+# ---------------------------------------------------------------------------
+# Wire models — the /backend-api/f/conversation request schema (chatgpt.com SPA)
+# ---------------------------------------------------------------------------
+
+
+class MessageAuthor(BaseModel):
+    """``author`` block of a conversation message."""
+
+    role: str
+
+
+class MessageContent(BaseModel):
+    """``content`` block of a conversation message.
+
+    ``parts`` is heterogeneous: plain strings for text turns, or
+    ``image_asset_pointer`` dicts interleaved with text for multimodal turns.
+    """
+
+    content_type: str = "text"
+    parts: list[Any] = Field(default_factory=list)
+
+
+class MessageMetadata(BaseModel):
+    """``metadata`` block stamped on each user message (matches the SPA shape)."""
+
+    developer_mode_connector_ids: list[str] = Field(default_factory=list)
+    selected_connector_ids: list[str] = Field(default_factory=list)
+    selected_sync_knowledge_store_ids: list[str] = Field(default_factory=list)
+    selected_sources: list[str] = Field(default_factory=list)
+    selected_github_repos: list[str] = Field(default_factory=list)
+    selected_all_github_repos: bool = False
+    serialization_metadata: dict[str, Any] = Field(default_factory=lambda: {"custom_symbol_offsets": []})
+
+
+class ConversationMessage(BaseModel):
+    """A single ``messages[]`` entry of the ``/f/conversation`` body."""
+
+    id: str
+    author: MessageAuthor
+    create_time: float
+    content: MessageContent
+    metadata: MessageMetadata = Field(default_factory=MessageMetadata)
+
+
+class ConversationMode(BaseModel):
+    """``conversation_mode`` block."""
+
+    kind: str = "primary_assistant"
+
+
+class ClientContextualInfo(BaseModel):
+    """``client_contextual_info`` telemetry block (full form, final body only)."""
+
+    is_dark_mode: bool = False
+    time_since_loaded: int = 5000
+    page_height: int = 1039
+    page_width: int = 1237
+    pixel_ratio: float = 1.35
+    screen_height: int = 1067
+    screen_width: int = 1707
+    app_name: str = "chatgpt.com"
+
+
+class PartialQuery(BaseModel):
+    """``partial_query`` block of a sent/success conduit prepare body."""
+
+    id: str
+    author: MessageAuthor
+    content: MessageContent
+
+
+class ConversationBody(BaseModel):
+    """The full ``POST /backend-api/f/conversation`` request body (manual §5.4).
+
+    Optional fields (``history_and_training_disabled``, ``thinking_effort``,
+    ``conversation_id``) are ``None`` by default and dropped on serialization via
+    ``model_dump(exclude_none=True)`` to match the SPA's conditional emission.
+    """
+
+    action: str = "next"
+    messages: list[ConversationMessage]
+    parent_message_id: str
+    model: str
+    client_prepare_state: str
+    timezone_offset_min: int
+    timezone: str
+    conversation_mode: ConversationMode = Field(default_factory=ConversationMode)
+    enable_message_followups: bool = True
+    system_hints: list[str] = Field(default_factory=list)
+    supports_buffering: bool = True
+    supported_encodings: list[str] = Field(default_factory=lambda: ["v1"])
+    client_contextual_info: ClientContextualInfo = Field(default_factory=ClientContextualInfo)
+    paragen_cot_summary_display_override: str = "allow"
+    force_parallel_switch: str = "auto"
+    history_and_training_disabled: bool | None = None
+    thinking_effort: str | None = None
+    conversation_id: str | None = None
 
 
 @dataclass
@@ -206,45 +306,21 @@ def build_conversation_body(
         messages_block = _build_new_conversation_message(messages_ir=messages_ir)
 
     tz_name, tz_offset = _local_timezone()
-    body: dict[str, Any] = {
-        "action": "next",
-        "messages": messages_block,
-        "parent_message_id": effective_parent,
-        "model": model,
-        "client_prepare_state": "sent" if prepared else "none",
-        "timezone_offset_min": tz_offset,
-        "timezone": tz_name,
-        "conversation_mode": {"kind": "primary_assistant"},
-        "enable_message_followups": True,
-        "system_hints": hints,
-        "supports_buffering": True,
-        "supported_encodings": ["v1"],
-        "client_contextual_info": {
-            "is_dark_mode": False,
-            "time_since_loaded": 5000,
-            "page_height": 1039,
-            "page_width": 1237,
-            "pixel_ratio": 1.35,
-            "screen_height": 1067,
-            "screen_width": 1707,
-            "app_name": "chatgpt.com",
-        },
-        "paragen_cot_summary_display_override": "allow",
-        "force_parallel_switch": "auto",
-    }
-
-    # Emit history_and_training_disabled only when the temporary-chat toggle is
-    # on (manual §5.4) — it protects the operator's ChatGPT history.
-    if temporary_chat:
-        body["history_and_training_disabled"] = True
-
-    if thinking_effort is not None:
-        body["thinking_effort"] = thinking_effort
-
-    if is_continuation and conversation_id:
-        body["conversation_id"] = conversation_id
-
-    return body
+    body = ConversationBody(
+        messages=messages_block,
+        parent_message_id=effective_parent,
+        model=model,
+        client_prepare_state="sent" if prepared else "none",
+        timezone_offset_min=tz_offset,
+        timezone=tz_name,
+        system_hints=hints,
+        # history_and_training_disabled only when temporary chat (manual §5.4) —
+        # protects the operator's ChatGPT history; None ⇒ dropped on dump.
+        history_and_training_disabled=True if temporary_chat else None,
+        thinking_effort=thinking_effort,
+        conversation_id=conversation_id if (is_continuation and conversation_id) else None,
+    )
+    return body.model_dump(exclude_none=True)
 
 
 def build_conversation_prepare_body(
@@ -279,14 +355,11 @@ def build_conversation_prepare_body(
 
     if state in ("sent", "success"):
         partial_text = _extract_partial_query(final_body=final_body)
-        prepare["partial_query"] = {
-            "id": str(uuid.uuid4()),
-            "author": {"role": "user"},
-            "content": {
-                "content_type": "text",
-                "parts": [partial_text],
-            },
-        }
+        prepare["partial_query"] = PartialQuery(
+            id=str(uuid.uuid4()),
+            author=MessageAuthor(role="user"),
+            content=MessageContent(content_type="text", parts=[partial_text]),
+        ).model_dump()
 
     return prepare
 
@@ -432,7 +505,7 @@ def _coerce_user_content(content: Any) -> str:
     return str(content)
 
 
-def _build_new_conversation_message(*, messages_ir: list[ModelMessage]) -> list[dict[str, Any]]:
+def _build_new_conversation_message(*, messages_ir: list[ModelMessage]) -> list[ConversationMessage]:
     """Flatten the full IR history into a single ChatGPT user message.
 
     Non-last turns are prefixed as ``"<role>: <text>"`` lines. The last
@@ -462,7 +535,7 @@ def _build_new_conversation_message(*, messages_ir: list[ModelMessage]) -> list[
     return [_make_user_message(text=final_prompt)]
 
 
-def _build_continuation_message(*, messages_ir: list[ModelMessage]) -> list[dict[str, Any]]:
+def _build_continuation_message(*, messages_ir: list[ModelMessage]) -> list[ConversationMessage]:
     """Emit only the latest user turn for a continuation request.
 
     ChatGPT already holds prior turns server-side; only the new user message
@@ -481,23 +554,14 @@ def _build_continuation_message(*, messages_ir: list[ModelMessage]) -> list[dict
     return [_make_user_message(text=last_user_text)]
 
 
-def _make_user_message(*, text: str) -> dict[str, Any]:
+def _make_user_message(*, text: str) -> ConversationMessage:
     """Build the ChatGPT user message object for the ``messages`` array."""
-    return {
-        "id": str(uuid.uuid4()),
-        "author": {"role": "user"},
-        "create_time": time.time(),
-        "content": {"content_type": "text", "parts": [text]},
-        "metadata": {
-            "developer_mode_connector_ids": [],
-            "selected_connector_ids": [],
-            "selected_sync_knowledge_store_ids": [],
-            "selected_sources": [],
-            "selected_github_repos": [],
-            "selected_all_github_repos": False,
-            "serialization_metadata": {"custom_symbol_offsets": []},
-        },
-    }
+    return ConversationMessage(
+        id=str(uuid.uuid4()),
+        author=MessageAuthor(role="user"),
+        create_time=time.time(),
+        content=MessageContent(content_type="text", parts=[text]),
+    )
 
 
 def _extract_partial_query(*, final_body: dict[str, Any]) -> str:
