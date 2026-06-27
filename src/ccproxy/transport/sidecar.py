@@ -35,8 +35,6 @@ from urllib.parse import urlsplit
 
 import httpx
 import uvicorn
-from httpx import Headers
-from httpx._decoders import SUPPORTED_DECODERS, ContentDecoder, DecodingError, MultiDecoder
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import Response, StreamingResponse
@@ -74,30 +72,12 @@ which the outbound client recomputes from the rewritten target and body.
 """
 
 _RELAY_RESPONSE_EXCLUDED_HEADERS = _RELAY_EXCLUDED_HEADERS | {"content-encoding"}
-"""Response headers that no longer describe the sidecar-relayed body."""
+"""Response headers that no longer describe the sidecar-relayed body.
 
-
-def _content_decodings(headers: Headers) -> list[str]:
-    return [
-        encoding.strip().lower()
-        for value in headers.get_list("content-encoding")
-        for encoding in value.split(",")
-        if encoding.strip()
-    ]
-
-
-def _response_decoder(headers: Headers) -> ContentDecoder | None:
-    decodings = [encoding for encoding in _content_decodings(headers) if encoding != "identity"]
-    if not decodings:
-        return None
-
-    try:
-        decoders = [SUPPORTED_DECODERS[encoding]() for encoding in decodings]
-    except (KeyError, ImportError) as exc:
-        logger.warning("sidecar: unsupported Content-Encoding %s: %s", ", ".join(decodings), exc)
-        return None
-
-    return MultiDecoder(decoders)
+libcurl decodes ``Content-Encoding`` in the transport, so the relayed body is
+always plaintext; the now-stale ``content-encoding`` header is dropped so
+downstream clients don't try to decode it a second time.
+"""
 
 
 def _filter_headers(headers: list[tuple[bytes, bytes]], drop: frozenset[str]) -> dict[str, str]:
@@ -175,34 +155,18 @@ async def _handle(request: Request) -> Response:
         logger.warning("sidecar: transport error for %s: %s", target_url, real)
         return Response(f"transport error: {real}", status_code=502)
 
-    decoder = _response_decoder(upstream.headers)
-    response_header_drop = _RELAY_RESPONSE_EXCLUDED_HEADERS if decoder is not None else _RELAY_EXCLUDED_HEADERS
-
     # Resolve a continuation factory when the request opted in.
     continuation_factory = _CONTINUATION_FACTORIES.get(continuation) if continuation else None
 
     async def body_stream() -> AsyncIterator[bytes]:
+        # libcurl already decoded any Content-Encoding, so chunks are plaintext.
         handoff_state: HandoffState | None = HandoffState() if continuation_factory is not None else None
         try:
             async for chunk in upstream.aiter_raw():
-                if decoder is None:
-                    out_chunk = chunk
-                else:
-                    try:
-                        out_chunk = decoder.decode(chunk)
-                    except DecodingError as exc:
-                        logger.warning("sidecar: failed to decode Content-Encoding for %s: %s", target_url, exc)
-                        raise
-                if out_chunk:
+                if chunk:
                     if handoff_state is not None:
-                        detect_handoff(handoff_state, out_chunk)
-                    yield out_chunk
-            if decoder is not None:
-                flushed = decoder.flush()
-                if flushed:
-                    if handoff_state is not None:
-                        detect_handoff(handoff_state, flushed)
-                    yield flushed
+                        detect_handoff(handoff_state, chunk)
+                    yield chunk
         finally:
             await upstream.aclose()
 
@@ -221,7 +185,7 @@ async def _handle(request: Request) -> Response:
         headers=dict(
             _filter_response_headers(
                 list(upstream.headers.raw),
-                drop=response_header_drop,
+                drop=_RELAY_RESPONSE_EXCLUDED_HEADERS,
             )
         ),
     )

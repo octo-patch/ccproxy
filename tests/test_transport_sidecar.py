@@ -7,7 +7,6 @@ and transport error handling.
 
 from __future__ import annotations
 
-import gzip
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 from unittest.mock import AsyncMock, patch
@@ -691,10 +690,12 @@ class TestStreamingResponse:
         assert chunk_a in bytes(received)
         assert chunk_b in bytes(received)
 
-    async def test_streaming_decodes_content_encoding_for_clients(self, running_sidecar: RunningSidecar) -> None:
+    async def test_streaming_relays_decoded_body_and_strips_encoding(self, running_sidecar: RunningSidecar) -> None:
+        # libcurl decodes Content-Encoding in the transport, so the upstream
+        # stream the sidecar reads is already plaintext; curl leaves a now-stale
+        # content-encoding header that the sidecar must drop before relaying.
         sidecar, async_transport = running_sidecar
         body = b"data: decoded chunk\n\n"
-        encoded = gzip.compress(body)
 
         def handler(request: httpx.Request) -> httpx.Response:
             return httpx.Response(
@@ -703,7 +704,7 @@ class TestStreamingResponse:
                     "content-type": "text/event-stream",
                     "content-encoding": "gzip",
                 },
-                stream=_AsyncChunkedStream([encoded]),
+                stream=_AsyncChunkedStream([body]),
             )
 
         async_transport.handler = handler

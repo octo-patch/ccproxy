@@ -29,7 +29,6 @@ from dataclasses import dataclass
 from typing import cast, get_args
 
 import httpx
-from curl_cffi.const import CurlOpt
 from curl_cffi.requests.impersonate import BrowserTypeLiteral
 from httpx_curl_cffi import AsyncCurlTransport
 
@@ -113,7 +112,6 @@ class _Cache:
                 transport = AsyncCurlTransport(
                     impersonate=impersonate,
                     max_connections=max_connections,
-                    curl_options={CurlOpt.HTTP_CONTENT_DECODING: 0},
                 )
             else:
                 transport = AsyncCurlTransport(

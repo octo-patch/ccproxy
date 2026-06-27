@@ -570,10 +570,12 @@ class TestCapturedFingerprintTransportKwargs:
         fp = _make_captured_fingerprint(http_version="unknown_version")
         assert fp.transport_kwargs()["http_version"] == CurlHttpVersion.V1_1
 
-    def test_curl_options_contains_content_decoding_disabled(self) -> None:
+    def test_curl_options_leaves_content_decoding_enabled(self) -> None:
+        # libcurl decodes Content-Encoding so callers + the sidecar receive
+        # plaintext; the transport must NOT disable HTTP_CONTENT_DECODING.
         fp = _make_captured_fingerprint()
         opts = fp.transport_kwargs()["curl_options"]
-        assert opts[CurlOpt.HTTP_CONTENT_DECODING] == 0
+        assert CurlOpt.HTTP_CONTENT_DECODING not in opts
 
     def test_sig_algs_injected_into_curl_options_when_present(self) -> None:
         fp = _make_captured_fingerprint(

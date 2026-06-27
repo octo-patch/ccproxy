@@ -156,12 +156,11 @@ class CapturedFingerprint:
         return hashlib.sha256(json.dumps(doc, sort_keys=True).encode()).hexdigest()[:16]
 
     def transport_kwargs(self) -> dict[str, Any]:
-        curl_options: dict[CurlOpt, Any] = {CurlOpt.HTTP_CONTENT_DECODING: 0}
-        # Disable libcurl's client-side Content-Encoding decoding so the
-        # sidecar receives wire-faithful bytes; the sidecar's HTTP layer
-        # decodes before relaying to clients that may not support gzip.
-        # The Accept-Encoding request header still goes out on the wire via
-        # CURLOPT_ACCEPT_ENCODING, preserving the browser fingerprint.
+        # libcurl decodes Content-Encoding (gzip/br/zstd/deflate) so callers and
+        # the sidecar receive decoded bytes. The Accept-Encoding request header
+        # still goes out on the wire via CURLOPT_ACCEPT_ENCODING, preserving the
+        # browser fingerprint.
+        curl_options: dict[CurlOpt, Any] = {}
         if self.signature_algorithm_names:
             curl_options[CurlOpt.SSL_SIG_HASH_ALGS] = ",".join(self.signature_algorithm_names)
         return {
