@@ -592,6 +592,15 @@ class OpenAIConversationsConfig(BaseModel):
     default_model: str = "gpt-5-5-pro"
     """Model slug used when an incoming request omits the model (ADR-0002)."""
 
+    image_poll_interval_seconds: float = Field(default=3.0, gt=0)
+    """Seconds between conversation polls while awaiting an async image
+    generation result (CHATGPT-006)."""
+
+    image_poll_max_attempts: int = Field(default=40, gt=0)
+    """Maximum conversation poll attempts before giving up on an async image
+    generation (deadline is roughly ``image_poll_interval_seconds`` times
+    ``image_poll_max_attempts``)."""
+
 
 class LightllmConfig(BaseModel):
     """Configuration for lightllm cross-format routing and transforms."""

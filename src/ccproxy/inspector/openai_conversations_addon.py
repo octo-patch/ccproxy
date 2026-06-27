@@ -48,9 +48,11 @@ from typing import Any
 
 import httpx
 from mitmproxy import http
+from mitmproxy.connection import Server
 
 from ccproxy import transport
-from ccproxy.config import get_config
+from ccproxy.config import OpenAIConversationsConfig, Provider, get_config
+from ccproxy.openai_conversations import image_parse
 from ccproxy.openai_conversations.conversation_store import get_conversation_store
 from ccproxy.openai_conversations.credentials import (
     load_credential_state,
@@ -74,8 +76,17 @@ _SENTINEL_FLOW = "conversation"
 _warmup_timestamps: dict[tuple[str, str], float] = {}
 
 _BASE_URL = "https://chatgpt.com"
+_CONVERSATION_PATH = "/backend-api/f/conversation"
 _PREPARE_PATH = "/backend-api/f/conversation/prepare"
 _SENTINEL_REQ_PATH = "/backend-api/sentinel/req"
+
+
+def _bearer_from_flow(flow: http.HTTPFlow) -> str:
+    """Return the bare bearer token stamped by ``inject_auth`` on the flow."""
+    auth = str(flow.request.headers.get("authorization", "") or "")
+    if auth.lower().startswith("bearer "):
+        return auth[7:].strip()
+    return auth.strip()
 
 
 def _is_oaic_flow(flow: http.HTTPFlow) -> bool:
@@ -298,6 +309,21 @@ class OpenAIConversationsAddon:
             logger.error("OpenAIConversationsAddon.request failed", exc_info=True)
             raise
 
+    async def responseheaders(self, flow: http.HTTPFlow) -> None:
+        """Buffer image responses so ``response()`` can poll/download/repackage.
+
+        Image flows carry no ``TransformMeta`` (no SSEPipeline is installed), so
+        ``InspectorAddon.responseheaders`` would stream the raw ``/f/conversation``
+        SSE straight to the client. Forcing ``stream = False`` here — this runs
+        after ``InspectorAddon`` in the addon chain — buffers the body instead.
+        """
+        if not flow.response or not _is_oaic_flow(flow):
+            return
+        if not metadata_from_flow(flow).oaic_image_operation:
+            return
+        if "text/event-stream" in flow.response.headers.get("content-type", ""):
+            flow.response.stream = False
+
     async def response(self, flow: http.HTTPFlow) -> None:
         if not flow.response or not _is_oaic_flow(flow):
             return
@@ -373,6 +399,21 @@ class OpenAIConversationsAddon:
             except Exception as exc:
                 logger.error("oaic sentinel refresh failed: %s", exc)
                 raise
+
+        # 2b. Image requests: parse/upload/render the /f/conversation body so
+        # conduit prepare derives from the finalized image body.
+        if metadata.oaic_image_operation:
+            await self._render_image_request(
+                flow,
+                client=client,
+                provider=provider,
+                device_id=device_id,
+                oaic_cfg=oaic_cfg,
+            )
+            if flow.response is not None:
+                # Rendering failed and produced a synthetic error response;
+                # skip conduit prepare + stamping and let it pass through.
+                return
 
         # 3. Conduit prepare (none → sent → success).
         turn_trace_id = str(uuid.uuid4())
@@ -456,6 +497,11 @@ class OpenAIConversationsAddon:
         if oai_is_update:
             await self._write_oai_is_to_jar(flow=flow, value=oai_is_update)
 
+        # Image flows: poll/download/repackage into an OpenAI images.response.
+        if metadata.oaic_image_operation:
+            await self._handle_image_response(flow)
+            return
+
         status = flow.response.status_code
         is_cf_challenge = bool(flow.response.headers.get("cf-mitigated"))
 
@@ -473,6 +519,174 @@ class OpenAIConversationsAddon:
         # subscribe to the topic → pipe frames back through the intake FSM.
         # Implementation deferred to the CHATGPT-004 joint capstone.
         # See: aurora request.go:622-707, 810-891, 1213-1268.
+
+    # ------------------------------------------------------------------
+    # image generation / edit
+    # ------------------------------------------------------------------
+
+    async def _render_image_request(
+        self,
+        flow: http.HTTPFlow,
+        *,
+        client: httpx.AsyncClient,
+        provider: Provider,
+        device_id: str,
+        oaic_cfg: OpenAIConversationsConfig,
+    ) -> None:
+        """Render an image request into a ``/backend-api/f/conversation`` body.
+
+        Image edits upload the source image first. On any parse/upload error,
+        sets a synthetic OpenAI error response and clears the image flag so the
+        rest of the pipeline passes it through untouched.
+        """
+        from ccproxy.openai_conversations import images
+
+        metadata = metadata_from_flow(flow)
+        operation = metadata.oaic_image_operation
+        original = flow.request.content or b""
+        content_type_in = flow.request.headers.get("content-type", "")
+        access_token = _bearer_from_flow(flow)
+        timeout = oaic_cfg.request_timeout_seconds
+
+        try:
+            if operation == "edit":
+                parsed_edit = image_parse.parse_image_edit_request(body=original, content_type=content_type_in)
+                uploaded = await images.upload_image(
+                    client=client,
+                    base_url=_BASE_URL,
+                    access_token=access_token,
+                    device_id=device_id,
+                    parsed=parsed_edit,
+                    timeout=timeout,
+                )
+                body = images.build_image_conversation_body(
+                    prompt=parsed_edit.prompt,
+                    model=parsed_edit.model,
+                    uploaded_image=uploaded,
+                )
+            else:
+                parsed_gen = image_parse.parse_image_gen_request(original)
+                body = images.build_image_conversation_body(prompt=parsed_gen.prompt, model=parsed_gen.model)
+        except image_parse.RemoteImageURLError as exc:
+            metadata.oaic_image_operation = ""
+            self._fail_image(flow, status=400, message=str(exc))
+            return
+        except (ValueError, images.ImageGenerationError) as exc:
+            metadata.oaic_image_operation = ""
+            self._fail_image(flow, status=502, message=f"image request preparation failed: {exc}")
+            return
+
+        target_path = provider.path or _CONVERSATION_PATH
+        flow.request.method = "POST"
+        flow.request.scheme = "https"
+        flow.request.host = provider.host
+        flow.request.port = 443
+        flow.request.path = target_path
+        flow.server_conn = Server(address=(provider.host, 443))
+        flow.request.headers["content-type"] = "application/json"
+        flow.request.content = json.dumps(body).encode()
+        logger.debug("oaic image render: op=%s → %s%s", operation, provider.host, target_path)
+
+    async def _handle_image_response(self, flow: http.HTTPFlow) -> None:
+        """Poll/download chatgpt.com image assets → OpenAI ``images.response``."""
+        from ccproxy.openai_conversations import images
+
+        assert flow.response is not None
+        metadata = metadata_from_flow(flow)
+
+        if flow.response.status_code >= 400:
+            self._fail_image(
+                flow,
+                status=502,
+                message=f"chatgpt.com returned HTTP {flow.response.status_code} for the image request",
+            )
+            return
+
+        config = get_config()
+        provider = config.providers.get(metadata.auth_provider)
+        if provider is None:
+            self._fail_image(flow, status=502, message="image provider is not configured")
+            return
+
+        oaic_cfg = config.lightllm.openai_conversations
+        profile = provider.fingerprint_profile or transport.DEFAULT_PROFILE
+        access_token = _bearer_from_flow(flow)
+        device_id = flow.request.headers.get("oai-device-id", "")
+        timeout = oaic_cfg.request_timeout_seconds
+
+        raw_body = _extract_raw_body(flow)
+        conversation_id, _ = _scan_sse_for_conversation_ids(raw_body)
+        pointers = images.extract_pointers_from_sse(raw_body)
+
+        try:
+            client = await transport.get_client(host=provider.host, profile=profile)
+            if not pointers:
+                if not conversation_id:
+                    raise images.ImageGenerationError("no conversation_id in image response; cannot poll for assets")
+                pointers = await images.poll_conversation_for_pointers(
+                    client=client,
+                    base_url=_BASE_URL,
+                    conversation_id=conversation_id,
+                    access_token=access_token,
+                    device_id=device_id,
+                    interval_seconds=oaic_cfg.image_poll_interval_seconds,
+                    max_attempts=oaic_cfg.image_poll_max_attempts,
+                    timeout=timeout,
+                )
+            downloaded: list[bytes] = []
+            for pointer in pointers:
+                downloaded.append(
+                    await images.download_image(
+                        client=client,
+                        base_url=_BASE_URL,
+                        pointer=pointer,
+                        conversation_id=conversation_id,
+                        access_token=access_token,
+                        device_id=device_id,
+                        timeout=timeout,
+                    )
+                )
+            if not downloaded:
+                raise images.ImageGenerationError("image generation produced no downloadable assets")
+            payload = images.build_images_response(downloaded)
+        except images.ImageGenerationError as exc:
+            self._fail_image(flow, status=502, message=str(exc))
+            return
+        except Exception as exc:
+            # Convert any transport/parse failure into a clean client error
+            # rather than leaking the raw ChatGPT SSE body downstream.
+            logger.error("oaic image response handling failed", exc_info=True)
+            self._fail_image(flow, status=502, message=f"image response handling failed: {exc}")
+            return
+
+        self._set_json_response(flow, status=200, payload=payload)
+        logger.info(
+            "oaic image response: provider=%s op=%s images=%d",
+            metadata.auth_provider,
+            metadata.oaic_image_operation,
+            len(downloaded),
+        )
+
+    def _set_json_response(self, flow: http.HTTPFlow, *, status: int, payload: dict[str, Any]) -> None:
+        assert flow.response is not None
+        flow.response.status_code = status
+        flow.response.content = json.dumps(payload).encode()
+        flow.response.headers["content-type"] = "application/json"
+        if "content-encoding" in flow.response.headers:
+            del flow.response.headers["content-encoding"]
+
+    def _fail_image(self, flow: http.HTTPFlow, *, status: int, message: str) -> None:
+        """Set an OpenAI-shape error response for a failed image request."""
+        payload: dict[str, Any] = {"error": {"message": message, "type": "api_error", "code": status}}
+        if flow.response is None:
+            flow.response = http.Response.make(
+                status,
+                json.dumps(payload).encode(),
+                {"content-type": "application/json"},
+            )
+        else:
+            self._set_json_response(flow, status=status, payload=payload)
+        logger.warning("oaic image error (%d): %s", status, message)
 
     async def _retry_once(self, flow: http.HTTPFlow) -> None:
         """One-shot 401/403/CF-challenge retry.
