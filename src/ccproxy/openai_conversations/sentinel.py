@@ -47,6 +47,15 @@ class SentinelResult:
     persona: str
     """Server-reported persona (e.g. ``"chatgpt-paid"``); ``""`` when absent."""
 
+    turnstile_dx: str = ""
+    """Turnstile VM bytecode challenge (base64) from the prepare response's
+    ``turnstile.dx``; empty when turnstile is not required. Raw material for the
+    (deferred) turnstile token solver."""
+
+    so_collector_dx: str = ""
+    """Session-observer collector VM bytecode (base64) from the prepare
+    response's ``so.collector_dx``; empty when ``so`` is absent."""
+
 
 def build_prepare_body(p: str) -> dict[str, str]:
     """Build the ``/sentinel/chat-requirements/prepare`` request body.

@@ -13,16 +13,17 @@ cached curl-cffi client as the final forwarded request:
    chat-requirements token is missing or within ``sentinel_skew_seconds`` of
    expiry. Persists the new chat_req_token + proof_token + expiry back to the
    credential file via :func:`update_sentinel_fields`.
-3. **Conduit prepare** (``none → sent → success``) — three ``POST
-   /backend-api/f/conversation/prepare`` calls. All three share one
-   ``x-oai-turn-trace-id``. The first sends an empty ``x-conduit-token``; each
-   subsequent call sends the token returned by the previous one. Fail-closed:
-   any prepare error raises so the request is rejected rather than silently
-   downgraded.
-4. **Header stamping** — browser identity, Sentinel, conduit token, turn trace,
-   target-path/route, ``X-OAI-IS`` from the cookie jar (best-effort).
-   Clears stale downstream sec-*/oai-* headers first. Keeps
-   ``Authorization: Bearer <access_token>`` as set by ``inject_auth``.
+3. **Conduit prewarm** — ``POST /backend-api/f/conversation/prepare`` as the
+   browser does (HAR): first ``state=none`` with ``x-conduit-token: no-token``
+   (before sentinel), then ``state=success`` looping — chaining each returned
+   ``conduit_token`` until the server returns an empty one. Image turns use a
+   single ``success`` prepare after rendering. Sentinel headers are never sent on
+   prepare; fail-closed on any prepare error.
+4. **Header stamping** — browser identity, the two Sentinel headers
+   (chat-requirements + proof), turn trace, target-path, ``X-OAI-IS`` from the
+   cookie jar (best-effort). The conduit token is NOT sent on the final
+   ``/f/conversation`` (HAR). Clears stale downstream sec-*/oai-* headers first;
+   keeps ``Authorization: Bearer <access_token>`` from ``inject_auth``.
 
 ``response()`` handles:
 - **One-shot retry** on 401, 403, or Cloudflare challenge: invalidate cached
@@ -48,11 +49,14 @@ import time
 import uuid
 from http.cookiejar import LoadError, MozillaCookieJar
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import httpx
 from mitmproxy import http
 from mitmproxy.connection import Server
+
+if TYPE_CHECKING:
+    from ccproxy.lightllm.adapters.openai_conversations import _PrepareState
 
 from ccproxy import transport
 from ccproxy.config import OpenAIConversationsConfig, Provider, get_config
@@ -260,6 +264,22 @@ async def _refresh_sentinel(
     persona = str(finalize.get("persona") or prepare.get("persona") or "")
     expires_at_ms = decode_jwt_exp_ms(chat_req_token) or 0
 
+    # Capture the turnstile + session-observer (so) bytecode challenges. Both are
+    # base64 VM programs the browser executes (turnstile.dx → turnstile token,
+    # so.collector_dx → so token). Not solved yet (test-without-turnstile first);
+    # surfaced as raw material for the turnstile VM port and live analysis.
+    turnstile = prepare.get("turnstile") if isinstance(prepare.get("turnstile"), dict) else {}
+    turnstile_dx = str(turnstile.get("dx") or "")
+    so = prepare.get("so") if isinstance(prepare.get("so"), dict) else {}
+    so_collector_dx = str(so.get("collector_dx") or "")
+    logger.info(
+        "oaic sentinel: persona=%s turnstile_required=%s turnstile_dx=%dB so_collector_dx=%dB",
+        persona,
+        bool(turnstile.get("required")),
+        len(turnstile_dx),
+        len(so_collector_dx),
+    )
+
     update_sentinel_fields(
         credential_path,
         chat_req_token=chat_req_token,
@@ -274,65 +294,65 @@ async def _refresh_sentinel(
         proof_token=proof_token,
         expires_at_ms=expires_at_ms,
         persona=persona,
+        turnstile_dx=turnstile_dx,
+        so_collector_dx=so_collector_dx,
     )
 
 
-async def _run_conduit_prepare(
+_CONDUIT_MAX_SUCCESS = 4
+"""Defensive cap on the success-state conduit prewarm loop. The browser stops
+when the server returns an empty ``conduit_token``; this bounds it regardless."""
+
+_CONDUIT_SEED = "no-token"
+"""Literal placeholder the browser sends as ``x-conduit-token`` on the first
+(state=none) prepare call before any real token exists (HAR). Not a secret."""
+
+
+async def _conduit_prepare_call(
     *,
     client: httpx.AsyncClient,
     final_body: dict[str, Any],
+    state: _PrepareState,
+    conduit_token: str,
     turn_trace_id: str,
     timeout: float,
     device_id: str,
     access_token: str,
 ) -> str:
-    """Three-state conduit prepare: none → sent → success.
+    """One ``POST /f/conversation/prepare``; returns the response ``conduit_token``.
 
-    Returns the final conduit_token that must accompany the ``/f/conversation``
-    request. Raises on any prepare failure (fail-closed).
+    Mirrors the browser conduit prewarm (HAR): the first call sends
+    ``x-conduit-token: no-token`` with ``state=none``; subsequent ``state=success``
+    calls send the token returned by the previous call, looping until the server
+    returns an empty ``conduit_token``. The token is **not** stamped on the final
+    ``/f/conversation`` — the chain is a server-side prewarm side effect.
 
-    The ``/f/conversation/prepare`` endpoint is Cloudflare-gated: it requires
-    both the browser cookies (in the shared jar) AND the full Chrome browser
-    headers — ``cf_clearance`` is bound to the request fingerprint. Without the
-    browser identity it 403s even with valid cookies.
-
-    Ported from aurora request.go:980-1020 (MIT-licensed, PrepareConversationConduitFull).
+    Sentinel headers are deliberately absent from prepare calls. The endpoint is
+    Cloudflare-gated, so the full Chrome header shape + jar cookies are required.
+    Raises on any non-2xx (fail-closed).
     """
-    from ccproxy.lightllm.adapters.openai_conversations import (
-        _PrepareState,
-        build_conversation_prepare_body,
+    from ccproxy.lightllm.adapters.openai_conversations import build_conversation_prepare_body
+
+    prepare_body = build_conversation_prepare_body(final_body=final_body, state=state)
+    headers = {
+        **get_browser_headers(device_id=device_id, session_id=device_id, conversation_id="", final=False),
+        "authorization": f"Bearer {access_token}",
+        "content-type": "application/json",
+        "accept": "*/*",
+        "x-oai-turn-trace-id": turn_trace_id,
+        "x-openai-target-path": _PREPARE_PATH,
+        "x-conduit-token": conduit_token,
+    }
+    resp = await client.post(
+        f"{_BASE_URL}{_PREPARE_PATH}",
+        content=json.dumps(prepare_body).encode(),
+        headers=headers,
+        timeout=timeout,
     )
-
-    states: tuple[_PrepareState, _PrepareState, _PrepareState] = ("none", "sent", "success")
-    conduit_token = ""
-    prepare_url = f"{_BASE_URL}{_PREPARE_PATH}"
-
-    for state in states:
-        prepare_body = build_conversation_prepare_body(final_body=final_body, state=state)
-        headers = {
-            **get_browser_headers(device_id=device_id, session_id=device_id, conversation_id="", final=True),
-            "authorization": f"Bearer {access_token}",
-            "content-type": "application/json",
-            "accept": "*/*",
-            "x-oai-turn-trace-id": turn_trace_id,
-            "x-openai-target-path": _PREPARE_PATH,
-            "x-openai-target-route": _PREPARE_PATH,
-            "x-conduit-token": conduit_token,
-        }
-        resp = await client.post(
-            prepare_url,
-            content=json.dumps(prepare_body).encode(),
-            headers=headers,
-            timeout=timeout,
-        )
-        if resp.status_code not in (200, 201):
-            raise RuntimeError(f"conduit prepare({state}) failed: HTTP {resp.status_code} — {resp.text[:200]}")
-        data = resp.json()
-        returned = str(data.get("conduit_token") or "")
-        if returned:
-            conduit_token = returned
-
-    return conduit_token
+    if resp.status_code not in (200, 201):
+        raise RuntimeError(f"conduit prepare({state}) failed: HTTP {resp.status_code} — {resp.text[:200]}")
+    data = resp.json()
+    return str(data.get("conduit_token") or "")
 
 
 def _scan_sse_for_conversation_ids(raw_body: bytes) -> tuple[str, str]:
@@ -484,10 +504,39 @@ class OpenAIConversationsAddon:
             except Exception as exc:
                 logger.warning("oaic warmup failed (non-fatal): %s", exc)
 
-        # 2. Sentinel refresh + PoW — when the chat-requirements token is missing
-        # or within the skew window. Both the chat_req_token and proof_token are
-        # persisted and reused on cached turns, since both must accompany every
-        # /f/conversation request.
+        # Parse the request body up front (the conduit prepare bodies derive from
+        # it) and mint the per-turn trace id shared across prepare + conversation.
+        turn_trace_id = str(uuid.uuid4())
+        try:
+            final_body = json.loads(flow.request.content or b"{}")
+        except (ValueError, json.JSONDecodeError):
+            final_body = {}
+        is_image = bool(metadata.oaic_image_operation)
+
+        # 2. Conduit prewarm — phase 1 (text only): state=none seeded with the
+        # "no-token" placeholder, BEFORE sentinel, mirroring the browser (HAR).
+        # The returned token seeds the success loop. Image turns use a single
+        # success prepare after rendering (aurora prepareImageConversation).
+        conduit_seed = ""
+        if not is_image:
+            try:
+                conduit_seed = await _conduit_prepare_call(
+                    client=client,
+                    final_body=final_body,
+                    state="none",
+                    conduit_token=_CONDUIT_SEED,
+                    turn_trace_id=turn_trace_id,
+                    device_id=device_id,
+                    access_token=access_token,
+                    timeout=timeout,
+                )
+            except Exception as exc:
+                logger.error("oaic conduit prepare(none) failed: %s", exc)
+                raise
+
+        # 3. Sentinel refresh + PoW — when the chat-requirements token is missing
+        # or within the skew window. chat_req_token + proof_token are persisted and
+        # reused across the token's ~9 min TTL (cached turns skip the refresh).
         skew_ms = int(oaic_cfg.sentinel_skew_seconds * 1000)
         chat_req_expires_ms = state.chat_req_token_expires_at_ms if state else 0
         if is_expired(expiry_ms=chat_req_expires_ms, skew_ms=skew_ms):
@@ -511,9 +560,9 @@ class OpenAIConversationsAddon:
                 chat_req_token[:12] if chat_req_token else "",
             )
 
-        # 2b. Image requests: parse/upload/render the /f/conversation body so
-        # conduit prepare derives from the finalized image body.
-        if metadata.oaic_image_operation:
+        # 4. Conduit prewarm — phase 2.
+        if is_image:
+            # Render the image body, then a single success-state prepare (aurora).
             await self._render_image_request(
                 flow,
                 client=client,
@@ -522,29 +571,46 @@ class OpenAIConversationsAddon:
                 oaic_cfg=oaic_cfg,
             )
             if flow.response is not None:
-                # Rendering failed and produced a synthetic error response;
-                # skip conduit prepare + stamping and let it pass through.
+                # Rendering produced a synthetic error response; pass it through.
                 return
-
-        # 3. Conduit prepare (none → sent → success).
-        turn_trace_id = str(uuid.uuid4())
-        try:
-            final_body = json.loads(flow.request.content or b"{}")
-        except (ValueError, json.JSONDecodeError):
-            final_body = {}
-
-        try:
-            conduit_token = await _run_conduit_prepare(
-                client=client,
-                final_body=final_body,
-                turn_trace_id=turn_trace_id,
-                timeout=timeout,
-                device_id=device_id,
-                access_token=access_token,
-            )
-        except Exception as exc:
-            logger.error("oaic conduit prepare failed: %s", exc)
-            raise
+            try:
+                final_body = json.loads(flow.request.content or b"{}")
+            except (ValueError, json.JSONDecodeError):
+                final_body = {}
+            try:
+                await _conduit_prepare_call(
+                    client=client,
+                    final_body=final_body,
+                    state="success",
+                    conduit_token=_CONDUIT_SEED,
+                    turn_trace_id=turn_trace_id,
+                    device_id=device_id,
+                    access_token=access_token,
+                    timeout=timeout,
+                )
+            except Exception as exc:
+                logger.error("oaic image conduit prepare failed: %s", exc)
+                raise
+        else:
+            # Success loop: chain the conduit token until the server returns empty.
+            tok = conduit_seed
+            for _ in range(_CONDUIT_MAX_SUCCESS):
+                if not tok:
+                    break
+                try:
+                    tok = await _conduit_prepare_call(
+                        client=client,
+                        final_body=final_body,
+                        state="success",
+                        conduit_token=tok,
+                        turn_trace_id=turn_trace_id,
+                        device_id=device_id,
+                        access_token=access_token,
+                        timeout=timeout,
+                    )
+                except Exception as exc:
+                    logger.error("oaic conduit prepare(success) failed: %s", exc)
+                    raise
 
         # 4. Replace the request headers with a clean, Chrome-ordered set.
         # /f/conversation is Cloudflare-gated like prepare: cf_clearance is bound
@@ -570,9 +636,10 @@ class OpenAIConversationsAddon:
             # the solved PoW answer.
             "openai-sentinel-chat-requirements-token": chat_req_token,
             "openai-sentinel-proof-token": proof_token,
-            "x-conduit-token": conduit_token,
             "x-oai-turn-trace-id": turn_trace_id,
             "x-openai-target-path": target_path,
+            # No x-conduit-token: the browser does NOT send it on /f/conversation
+            # (HAR); the conduit prewarm chain is a server-side side effect.
         }
         oai_is_value = _get_oai_is_from_jar(client)
         if oai_is_value:
@@ -585,11 +652,11 @@ class OpenAIConversationsAddon:
         flow.request.content = body_bytes
 
         logger.debug(
-            "oaic stamped: provider=%s profile=%s trace=%s conduit=%s…",
+            "oaic stamped: provider=%s profile=%s trace=%s persona_token=%s…",
             provider_name,
             profile,
             turn_trace_id[:8],
-            conduit_token[:12] if conduit_token else "",
+            chat_req_token[:12] if chat_req_token else "",
         )
 
     # ------------------------------------------------------------------

@@ -50,6 +50,21 @@ from pydantic_ai.ui import UIAdapter, UIEventStream
 
 _PrepareState = Literal["none", "sent", "success"]
 
+
+def _local_timezone() -> tuple[str, int]:
+    """Return the host's local ``(timezone name, timezone_offset_min)`` via ``time``.
+
+    ``timezone_offset_min`` follows the JS ``Date.getTimezoneOffset()`` sign
+    convention (minutes WEST of UTC) that the chatgpt.com SPA sends:
+    :data:`time.timezone` / :data:`time.altzone` are seconds west of UTC, and the
+    name comes from :data:`time.tzname`, honoring the active DST state.
+    """
+    is_dst = bool(time.daylight) and time.localtime().tm_isdst > 0
+    offset_min = (time.altzone if is_dst else time.timezone) // 60
+    name = time.tzname[1] if is_dst else time.tzname[0]
+    return name, offset_min
+
+
 _EFFORT_MAP: dict[str, str] = {
     "low": "standard",
     "medium": "extended",
@@ -190,14 +205,15 @@ def build_conversation_body(
     else:
         messages_block = _build_new_conversation_message(messages_ir=messages_ir)
 
+    tz_name, tz_offset = _local_timezone()
     body: dict[str, Any] = {
         "action": "next",
         "messages": messages_block,
         "parent_message_id": effective_parent,
         "model": model,
         "client_prepare_state": "sent" if prepared else "none",
-        "timezone_offset_min": -480,
-        "timezone": "Asia/Shanghai",
+        "timezone_offset_min": tz_offset,
+        "timezone": tz_name,
         "conversation_mode": {"kind": "primary_assistant"},
         "enable_message_followups": True,
         "system_hints": hints,

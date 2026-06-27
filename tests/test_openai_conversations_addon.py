@@ -20,6 +20,7 @@ Coverage:
 
 from __future__ import annotations
 
+import json
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -547,12 +548,14 @@ class TestSentinelRefresh:
         # chat_req_token_expires_at_ms=0 → always expired.
         cred_state = _make_credential_state(chat_req_token_expires_at_ms=0)
 
+        # Choreography order: conduit none → sentinel prepare → finalize →
+        # conduit success-loop (terminates on empty conduit_token).
         post_resps = [
+            _prepare_post_response("seed"),  # conduit none → seed
             _sentinel_prepare_response(),
             _sentinel_finalize_response(token="new-chat-req-tok"),  # noqa: S106
-            _prepare_post_response("t1"),
-            _prepare_post_response("t2"),
-            _prepare_post_response("t3"),
+            _prepare_post_response("s1"),  # success(seed) → s1
+            _prepare_post_response(""),  # success(s1) → "" terminate
         ]
         client = _make_mock_client(has_cookies=True, post_responses=post_resps)
 
@@ -643,8 +646,9 @@ class TestConduitPrepare:
         _warmup_timestamps.clear()
 
     @pytest.mark.asyncio
-    async def test_prepare_uses_empty_conduit_token_first(self) -> None:
-        """First prepare call must send empty x-conduit-token."""
+    async def test_first_conduit_call_sends_no_token_literal(self) -> None:
+        """First conduit prepare is state=none with x-conduit-token 'no-token' (HAR);
+        subsequent state=success calls chain the returned token until empty."""
         flow = _make_flow()
         cfg = _make_config()
         cred_state = _make_credential_state(chat_req_token_expires_at_ms=9999999999000)
@@ -660,11 +664,20 @@ class TestConduitPrepare:
             **kw: Any,
         ) -> Any:
             h = headers or {}
-            prepare_calls.append({"url": url, "x_conduit_token": h.get("x-conduit-token", "__missing__")})
+            body = json.loads(content or b"{}")
+            prepare_calls.append(
+                {
+                    "url": url,
+                    "state": body.get("client_prepare_state"),
+                    "conduit_hdr": h.get("x-conduit-token", "__missing__"),
+                }
+            )
             r = MagicMock()
             r.status_code = 200
             r.text = ""
-            r.json = MagicMock(return_value={"conduit_token": f"tok-{len(prepare_calls)}"})
+            # none → tok-1, success(tok-1) → tok-2, success(tok-2) → "" (terminate)
+            tok = "" if len(prepare_calls) >= 3 else f"tok-{len(prepare_calls)}"
+            r.json = MagicMock(return_value={"conduit_token": tok})
             return r
 
         client = _make_mock_client(has_cookies=True)
@@ -692,24 +705,19 @@ class TestConduitPrepare:
             addon = OpenAIConversationsAddon()
             await addon.request(flow)
 
-        # Far-future chat-requirements expiry → no sentinel calls; the only POSTs
-        # are the three conduit prepare states (none, sent, success).
+        # Far-future expiry → no sentinel; none + success-loop (terminates on empty).
         prepare_only = [c for c in prepare_calls if "prepare" in c["url"]]
         assert len(prepare_only) == 3
-        # First prepare: always empty conduit token.
-        assert prepare_only[0]["x_conduit_token"] == ""
-        # Second prepare: non-empty (got token from first prepare).
-        assert prepare_only[1]["x_conduit_token"] != ""
-        # Third prepare: non-empty (got token from second prepare).
-        assert prepare_only[2]["x_conduit_token"] != ""
-        # Chaining: each call sends the token returned by the previous one.
-        tokens = [prepare_only[i]["x_conduit_token"] for i in range(3)]
-        assert tokens[1] != tokens[0]
-        assert tokens[2] != tokens[1]
+        assert prepare_only[0]["state"] == "none"
+        assert prepare_only[0]["conduit_hdr"] == "no-token"
+        assert prepare_only[1]["state"] == "success"
+        assert prepare_only[1]["conduit_hdr"] == "tok-1"  # seed from the none call
+        assert prepare_only[2]["state"] == "success"
+        assert prepare_only[2]["conduit_hdr"] == "tok-2"  # chained from success #1
 
     @pytest.mark.asyncio
     async def test_prepare_and_final_share_turn_trace_id(self) -> None:
-        """All three prepare calls AND the final flow must share one x-oai-turn-trace-id."""
+        """All conduit prepare calls AND the final flow share one x-oai-turn-trace-id."""
         flow = _make_flow()
         cfg = _make_config()
         cred_state = _make_credential_state(chat_req_token_expires_at_ms=9999999999000)
@@ -731,7 +739,9 @@ class TestConduitPrepare:
             r = MagicMock()
             r.status_code = 200
             r.text = ""
-            r.json = MagicMock(return_value={"conduit_token": f"tok-{len(trace_ids_seen)}"})
+            # none → tok-1, success → tok-2, success → "" (terminate the loop)
+            tok = "" if len(trace_ids_seen) >= 3 else f"tok-{len(trace_ids_seen)}"
+            r.json = MagicMock(return_value={"conduit_token": tok})
             return r
 
         client = _make_mock_client(has_cookies=True)
@@ -769,7 +779,9 @@ class TestConduitPrepare:
         assert flow_trace_id == prepare_trace_ids[0]
 
     @pytest.mark.asyncio
-    async def test_final_conduit_token_stamped_on_flow(self) -> None:
+    async def test_no_conduit_token_on_final_request(self) -> None:
+        """The final /f/conversation carries NO x-conduit-token (HAR); the conduit
+        prewarm chain is a server-side side effect, not a forwarded header."""
         flow = _make_flow()
         cfg = _make_config()
         cred_state = _make_credential_state(chat_req_token_expires_at_ms=9999999999000)
@@ -777,7 +789,7 @@ class TestConduitPrepare:
         prepare_resps = [
             _prepare_post_response("tok-1"),
             _prepare_post_response("tok-2"),
-            _prepare_post_response("FINAL-TOKEN"),
+            _prepare_post_response(""),  # terminate the success loop
         ]
         client = _make_mock_client(has_cookies=True, post_responses=prepare_resps)
 
@@ -803,7 +815,7 @@ class TestConduitPrepare:
             addon = OpenAIConversationsAddon()
             await addon.request(flow)
 
-        assert flow.request.headers.get("x-conduit-token") == "FINAL-TOKEN"
+        assert flow.request.headers.get("x-conduit-token") is None
 
 
 # ---------------------------------------------------------------------------
