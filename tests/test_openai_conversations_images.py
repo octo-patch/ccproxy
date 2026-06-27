@@ -24,7 +24,7 @@ import pytest
 from ccproxy.config import OpenAIConversationsConfig
 from ccproxy.inspector.openai_conversations_addon import OpenAIConversationsAddon
 from ccproxy.inspector.routes.images import _claim_image_flow, register_image_routes
-from ccproxy.openai_conversations.image_parse import (
+from ccproxy.lightllm.openai.conversations_image_parse import (
     ParsedImageEdit,
     ParsedImageGen,
     RemoteImageURLError,
@@ -34,7 +34,7 @@ from ccproxy.openai_conversations.image_parse import (
     parse_image_gen_request,
     probe_image_dimensions,
 )
-from ccproxy.openai_conversations.images import (
+from ccproxy.lightllm.openai.conversations_images import (
     ImageGenerationError,
     ImagePointer,
     UploadedImage,

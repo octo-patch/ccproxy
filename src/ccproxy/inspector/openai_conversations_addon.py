@@ -52,7 +52,7 @@ from mitmproxy.connection import Server
 
 from ccproxy import transport
 from ccproxy.config import OpenAIConversationsConfig, Provider, get_config
-from ccproxy.openai_conversations import image_parse
+from ccproxy.lightllm.openai import conversations_image_parse as image_parse
 from ccproxy.openai_conversations.conversation_store import get_conversation_store
 from ccproxy.openai_conversations.credentials import (
     load_credential_state,
@@ -539,7 +539,7 @@ class OpenAIConversationsAddon:
         sets a synthetic OpenAI error response and clears the image flag so the
         rest of the pipeline passes it through untouched.
         """
-        from ccproxy.openai_conversations import images
+        from ccproxy.lightllm.openai import conversations_images as images
 
         metadata = metadata_from_flow(flow)
         operation = metadata.oaic_image_operation
@@ -589,7 +589,7 @@ class OpenAIConversationsAddon:
 
     async def _handle_image_response(self, flow: http.HTTPFlow) -> None:
         """Poll/download chatgpt.com image assets → OpenAI ``images.response``."""
-        from ccproxy.openai_conversations import images
+        from ccproxy.lightllm.openai import conversations_images as images
 
         assert flow.response is not None
         metadata = metadata_from_flow(flow)

@@ -40,7 +40,7 @@ import httpx
 from pydantic_ai.messages import ModelMessage, ModelRequest, UserPromptPart
 
 from ccproxy.lightllm.adapters.openai_conversations import build_conversation_body
-from ccproxy.openai_conversations.image_parse import ParsedImageEdit
+from ccproxy.lightllm.openai.conversations_image_parse import ParsedImageEdit
 
 __all__ = [
     "ImageGenerationError",
