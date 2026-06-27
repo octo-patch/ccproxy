@@ -185,12 +185,13 @@ class TestBuildConversationBodyNew:
         )
         assert body["client_prepare_state"] == "none"
 
-    def test_history_and_training_disabled_false_by_default(self) -> None:
+    def test_history_and_training_disabled_omitted_by_default(self) -> None:
+        # Manual §5.4: the field is emitted only when temporary_chat is on.
         body = build_conversation_body(
             messages_ir=_single_user(),
             model="gpt-5-5-pro",
         )
-        assert body["history_and_training_disabled"] is False
+        assert "history_and_training_disabled" not in body
 
     def test_history_and_training_disabled_true_when_temporary(self) -> None:
         body = build_conversation_body(
@@ -618,7 +619,8 @@ class TestRenderInvariantsFromDifferentInputFormats:
         text = body["messages"][0]["content"]["parts"][0]
         assert "capital of France" in text
         assert body["client_prepare_state"] == "sent"
-        assert "history_and_training_disabled" in body
+        # Default (non-temporary) chat omits the field (manual §5.4).
+        assert "history_and_training_disabled" not in body
         assert body["supported_encodings"] == ["v1"]
         assert body["client_contextual_info"]["app_name"] == "chatgpt.com"
 

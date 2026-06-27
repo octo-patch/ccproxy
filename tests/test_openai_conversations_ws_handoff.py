@@ -18,14 +18,14 @@ Coverage:
 - Sidecar ``body_stream`` continuation: upstream body ends with a handoff
   marker + ``X-CCProxy-Continuation`` header → ``body_stream`` emits the
   WS-derived continuation.
-- ``expires_at`` seconds-to-milliseconds guard in
-  ``openai_conversations_addon._refresh_sentinel`` (unit test on the guard
-  branch, no network).
+- ``_refresh_sentinel`` chat-requirements expiry: decoded from the finalize
+  token's JWT ``exp`` claim (unit test, no network).
 """
 
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import json
 from collections.abc import AsyncIterator
@@ -892,47 +892,53 @@ class ExpiresAtCase:
     name: str
     """Scenario identifier."""
 
-    raw_value: int
-    """Value returned by the sentinel API ``expires_at`` field."""
+    exp_seconds: int
+    """``exp`` claim (unix seconds) encoded into the finalize JWT."""
 
     expected_ms: int
-    """Expected ``sentinel_expires_at_ms`` stored after normalisation."""
+    """Expected ``chat_req_token_expires_at_ms`` stored after decoding."""
 
 
 _EXPIRES_AT_CASES: list[ExpiresAtCase] = [
     ExpiresAtCase(
-        name="seconds_value_below_threshold_multiplied",
-        # Typical unix seconds value ~2026: 1_750_000_000 < 1e11.
-        raw_value=1_750_000_000,
+        name="jwt_exp_seconds_to_ms",
+        exp_seconds=1_750_000_000,
         expected_ms=1_750_000_000 * 1000,
     ),
     ExpiresAtCase(
-        name="milliseconds_value_above_threshold_unchanged",
-        # Milliseconds value ~2026: 1_750_000_000_000 > 1e11.
-        raw_value=1_750_000_000_000,
-        expected_ms=1_750_000_000_000,
-    ),
-    ExpiresAtCase(
-        name="zero_stays_zero",
-        raw_value=0,
-        expected_ms=0,
+        name="later_jwt_exp_seconds_to_ms",
+        exp_seconds=1_900_000_000,
+        expected_ms=1_900_000_000 * 1000,
     ),
 ]
+
+
+def _jwt_with_exp(exp_seconds: int) -> str:
+    """Build a minimal unsigned JWT carrying the given exp claim."""
+    header = base64.urlsafe_b64encode(b'{"alg":"none"}').decode().rstrip("=")
+    payload = base64.urlsafe_b64encode(json.dumps({"exp": exp_seconds}).encode()).decode().rstrip("=")
+    return f"{header}.{payload}.sig"
 
 
 @pytest.mark.parametrize(
     "case",
     [pytest.param(c, id=c.name) for c in _EXPIRES_AT_CASES],
 )
-async def test_sentinel_expires_at_guard(case: ExpiresAtCase) -> None:
-    """The ``_refresh_sentinel`` unit guard converts seconds to ms correctly."""
+async def test_sentinel_expires_decoded_from_finalize_jwt(case: ExpiresAtCase) -> None:
+    """_refresh_sentinel decodes chat_req_token_expires_at_ms from the finalize JWT exp."""
     stored: dict[str, object] = {}
+    finalize_token = _jwt_with_exp(case.exp_seconds)
 
-    async def _fake_post(*args: object, **kwargs: object) -> MagicMock:
+    async def _fake_post(url: str, **kwargs: object) -> MagicMock:
         resp = MagicMock()
         resp.status_code = 200
         resp.raise_for_status = MagicMock()
-        resp.json = MagicMock(return_value={"token": "tok", "expires_at": case.raw_value})
+        if url.endswith("/finalize"):
+            resp.json = MagicMock(return_value={"token": finalize_token, "persona": "chatgpt-paid"})
+        else:
+            resp.json = MagicMock(
+                return_value={"prepare_token": "prep", "proofofwork": {"required": False}, "persona": "chatgpt-paid"}
+            )
         return resp
 
     def _fake_update(path: str, **kwargs: object) -> None:
@@ -943,14 +949,17 @@ async def test_sentinel_expires_at_guard(case: ExpiresAtCase) -> None:
 
     with (
         patch("ccproxy.inspector.openai_conversations_addon.update_sentinel_fields", _fake_update),
-        patch("ccproxy.inspector.openai_conversations_addon.build_requirements_token", return_value="p-tok"),
-        patch("ccproxy.inspector.openai_conversations_addon.build_sentinel_req_body", return_value="{}"),
+        patch("ccproxy.inspector.openai_conversations_addon.build_requirements_token", return_value="gAAAAACp"),
     ):
-        await _refresh_sentinel(
+        result = await _refresh_sentinel(
             client=mock_client,
             credential_path="/tmp/fake-creds.json",  # noqa: S108
+            access_token="bearer-jwt",  # noqa: S106
             device_id="device-1",
             timeout=5.0,
         )
 
-    assert stored["sentinel_expires_at_ms"] == case.expected_ms
+    assert stored["chat_req_token_expires_at_ms"] == case.expected_ms
+    assert stored["chat_req_token"] == finalize_token
+    assert result.expires_at_ms == case.expected_ms
+    assert result.persona == "chatgpt-paid"

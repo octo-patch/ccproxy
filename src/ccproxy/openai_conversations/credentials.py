@@ -1,14 +1,14 @@
 """OpenAI Conversations credential state — load/update around a flat JSON file.
 
 Schema (current, no more and no less):
-  access_token           — ChatGPT web bearer JWT
-  sentinel_token         — server-issued c token from /sentinel/req
-  sentinel_p_token       — requirements or proof p token
-  sentinel_expires_at_ms — sentinel token expiry as unix milliseconds
-  sentinel_flow          — flow identifier ("conversation")
-  sentinel_so_token      — session-observer token (optional, may be empty)
-  persona                — account persona (e.g. "chatgpt-paid")
-  device_id              — OAI-Device-Id UUID (stable per installation)
+  access_token                 — ChatGPT web bearer JWT
+  device_id                    — OAI-Device-Id UUID (stable per installation)
+  persona                      — account persona (e.g. "chatgpt-paid")
+  chat_req_token               — finalize-issued chat-requirements token, sent as
+                                 the ``openai-sentinel-chat-requirements-token`` header
+  proof_token                  — solved proof-of-work answer (``gAAAAAB…~S``), sent
+                                 as the ``openai-sentinel-proof-token`` header
+  chat_req_token_expires_at_ms — chat_req_token expiry as unix milliseconds
 
 Explicitly excluded fields (request-derived, cookie-derived, or request-only):
   x_oai_is, x_conduit_token, turnstile tokens, OAI-Telemetry.
@@ -56,26 +56,22 @@ class OpenAIConversationsCredentialState:
     access_token: str
     """ChatGPT web bearer JWT."""
 
-    sentinel_token: str = ""
-    """Server-issued c token from /sentinel/req."""
-
-    sentinel_p_token: str = ""
-    """Requirements or proof p token."""
-
-    sentinel_expires_at_ms: int = 0
-    """Sentinel token expiry as unix milliseconds (0 = expired/unknown)."""
-
-    sentinel_flow: str = "conversation"
-    """Sentinel flow identifier."""
-
-    sentinel_so_token: str = ""
-    """Session-observer token (optional, may be empty)."""
+    device_id: str = ""
+    """OAI-Device-Id UUID (stable per installation)."""
 
     persona: str = "chatgpt-paid"
     """Account persona."""
 
-    device_id: str = ""
-    """OAI-Device-Id UUID (stable per installation)."""
+    chat_req_token: str = ""
+    """Finalize-issued chat-requirements token (sent as
+    ``openai-sentinel-chat-requirements-token``)."""
+
+    proof_token: str = ""
+    """Solved proof-of-work answer ``gAAAAAB…~S`` (sent as
+    ``openai-sentinel-proof-token``)."""
+
+    chat_req_token_expires_at_ms: int = 0
+    """chat_req_token expiry as unix milliseconds (0 = expired/unknown)."""
 
     _extra: dict[str, Any] = field(default_factory=dict)
 
@@ -83,14 +79,24 @@ class OpenAIConversationsCredentialState:
         """Serialize to the flat JSON schema, merging back unknown siblings."""
         out: dict[str, Any] = dict(self._extra)
         out["access_token"] = self.access_token
-        out["sentinel_token"] = self.sentinel_token
-        out["sentinel_p_token"] = self.sentinel_p_token
-        out["sentinel_expires_at_ms"] = self.sentinel_expires_at_ms
-        out["sentinel_flow"] = self.sentinel_flow
-        out["sentinel_so_token"] = self.sentinel_so_token
-        out["persona"] = self.persona
         out["device_id"] = self.device_id
+        out["persona"] = self.persona
+        out["chat_req_token"] = self.chat_req_token
+        out["proof_token"] = self.proof_token
+        out["chat_req_token_expires_at_ms"] = self.chat_req_token_expires_at_ms
         return out
+
+
+_KNOWN_KEYS = frozenset(
+    {
+        "access_token",
+        "device_id",
+        "persona",
+        "chat_req_token",
+        "proof_token",
+        "chat_req_token_expires_at_ms",
+    }
+)
 
 
 def load_credential_state(
@@ -127,27 +133,15 @@ def load_credential_state(
         logger.error("%s missing or empty access_token in %s", label, resolved)
         return None
 
-    known_keys = {
-        "access_token",
-        "sentinel_token",
-        "sentinel_p_token",
-        "sentinel_expires_at_ms",
-        "sentinel_flow",
-        "sentinel_so_token",
-        "persona",
-        "device_id",
-    }
-    extra = {k: v for k, v in data.items() if k not in known_keys}
+    extra = {k: v for k, v in data.items() if k not in _KNOWN_KEYS}
 
     return OpenAIConversationsCredentialState(
         access_token=access_token,
-        sentinel_token=str(data.get("sentinel_token") or ""),
-        sentinel_p_token=str(data.get("sentinel_p_token") or ""),
-        sentinel_expires_at_ms=int(data.get("sentinel_expires_at_ms") or 0),
-        sentinel_flow=str(data.get("sentinel_flow") or "conversation"),
-        sentinel_so_token=str(data.get("sentinel_so_token") or ""),
-        persona=str(data.get("persona") or "chatgpt-paid"),
         device_id=str(data.get("device_id") or ""),
+        persona=str(data.get("persona") or "chatgpt-paid"),
+        chat_req_token=str(data.get("chat_req_token") or ""),
+        proof_token=str(data.get("proof_token") or ""),
+        chat_req_token_expires_at_ms=int(data.get("chat_req_token_expires_at_ms") or 0),
         _extra=extra,
     )
 
@@ -155,25 +149,24 @@ def load_credential_state(
 def update_sentinel_fields(
     path: Path | str,
     *,
-    sentinel_token: str,
-    sentinel_p_token: str,
-    sentinel_expires_at_ms: int,
-    sentinel_flow: str = "conversation",
-    sentinel_so_token: str = "",
+    chat_req_token: str,
+    proof_token: str,
+    chat_req_token_expires_at_ms: int,
+    persona: str = "",
     label: str = "OpenAIConversations",
 ) -> bool:
-    """Atomically update only the Sentinel fields in the credential file.
+    """Atomically update the chat-requirements fields in the credential file.
 
-    Reads the current file, updates the four Sentinel fields, and atomically
-    writes the result back. Unknown sibling fields are preserved.
+    Reads the current file, updates the chat-requirements token, proof token,
+    expiry, and (when non-empty) persona, then atomically writes the result
+    back. Unknown sibling fields are preserved.
 
     Args:
         path: Path to the credential JSON file.
-        sentinel_token: New server-issued c token.
-        sentinel_p_token: New p token (requirements or proof).
-        sentinel_expires_at_ms: New expiry as unix milliseconds.
-        sentinel_flow: Flow identifier. Default: ``"conversation"``.
-        sentinel_so_token: Session-observer token. Default: ``""``.
+        chat_req_token: New finalize-issued chat-requirements token.
+        proof_token: New solved proof-of-work answer.
+        chat_req_token_expires_at_ms: New expiry as unix milliseconds.
+        persona: Server-reported persona; written only when non-empty.
         label: Log label prefix.
 
     Returns:
@@ -181,27 +174,27 @@ def update_sentinel_fields(
     """
     resolved = Path(path).expanduser()
     if not resolved.is_file():
-        logger.error("%s credential file not found for sentinel update: %s", label, resolved)
+        logger.error("%s credential file not found for chat-requirements update: %s", label, resolved)
         return False
     try:
         raw: Any = json.loads(resolved.read_text())
     except (OSError, json.JSONDecodeError) as exc:
-        logger.error("%s could not read %s for sentinel update: %s", label, resolved, exc)
+        logger.error("%s could not read %s for chat-requirements update: %s", label, resolved, exc)
         return False
     if not isinstance(raw, dict):
         logger.error("%s credential file must contain a JSON object: %s", label, resolved)
         return False
 
     merged: dict[str, Any] = copy.deepcopy(raw)
-    merged["sentinel_token"] = sentinel_token
-    merged["sentinel_p_token"] = sentinel_p_token
-    merged["sentinel_expires_at_ms"] = sentinel_expires_at_ms
-    merged["sentinel_flow"] = sentinel_flow
-    merged["sentinel_so_token"] = sentinel_so_token
+    merged["chat_req_token"] = chat_req_token
+    merged["proof_token"] = proof_token
+    merged["chat_req_token_expires_at_ms"] = chat_req_token_expires_at_ms
+    if persona:
+        merged["persona"] = persona
 
     try:
         atomic_write_back(resolved, merged)
     except Exception as exc:
-        logger.error("%s failed to write sentinel fields to %s: %s", label, resolved, exc)
+        logger.error("%s failed to write chat-requirements fields to %s: %s", label, resolved, exc)
         return False
     return True

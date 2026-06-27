@@ -8,9 +8,11 @@ cached curl-cffi client as the final forwarded request:
 1. **Cookie-jar warmup** — ``GET /``, ``/api/auth/session``, ``/cdn-cgi/trace``
    through the cached client. Throttled to at most once per
    ``warmup_throttle_seconds`` when usable Cloudflare cookies already exist.
-2. **Sentinel refresh** — ``POST /backend-api/sentinel/req`` when the persisted
-   token is missing or within ``sentinel_skew_seconds`` of expiry. Persists
-   the new token + expiry back to the credential file via :func:`update_sentinel_fields`.
+2. **Sentinel refresh** — ``POST /backend-api/sentinel/chat-requirements/prepare``
+   → solve PoW locally → ``POST .../finalize`` when the persisted
+   chat-requirements token is missing or within ``sentinel_skew_seconds`` of
+   expiry. Persists the new chat_req_token + proof_token + expiry back to the
+   credential file via :func:`update_sentinel_fields`.
 3. **Conduit prepare** (``none → sent → success``) — three ``POST
    /backend-api/f/conversation/prepare`` calls. All three share one
    ``x-oai-turn-trace-id``. The first sends an empty ``x-conduit-token``; each
@@ -44,6 +46,8 @@ import json
 import logging
 import time
 import uuid
+from http.cookiejar import LoadError, MozillaCookieJar
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -58,19 +62,19 @@ from ccproxy.openai_conversations.credentials import (
     load_credential_state,
     update_sentinel_fields,
 )
+from ccproxy.openai_conversations.pow import PowExhaustedError, solve_pow
 from ccproxy.openai_conversations.prepare_p import build_requirements_token
-from ccproxy.openai_conversations.profile import get_browser_headers, headers_to_clear
+from ccproxy.openai_conversations.profile import get_browser_headers
 from ccproxy.openai_conversations.sentinel import (
-    build_sentinel_req_body,
-    build_sentinel_token_header,
+    SentinelResult,
+    build_finalize_body,
+    build_prepare_body,
+    decode_jwt_exp_ms,
     is_expired,
 )
 from ccproxy.pipeline.context import metadata_from_flow
 
 logger = logging.getLogger(__name__)
-
-# Sentinel flow identifier (mirrors ccproxy.openai_conversations.sentinel._DEFAULT_FLOW).
-_SENTINEL_FLOW = "conversation"
 
 # Per (provider_name, fingerprint_profile) → last warmup timestamp (monotonic).
 _warmup_timestamps: dict[tuple[str, str], float] = {}
@@ -78,7 +82,8 @@ _warmup_timestamps: dict[tuple[str, str], float] = {}
 _BASE_URL = "https://chatgpt.com"
 _CONVERSATION_PATH = "/backend-api/f/conversation"
 _PREPARE_PATH = "/backend-api/f/conversation/prepare"
-_SENTINEL_REQ_PATH = "/backend-api/sentinel/req"
+_SENTINEL_PREPARE_PATH = "/backend-api/sentinel/chat-requirements/prepare"
+_SENTINEL_FINALIZE_PATH = "/backend-api/sentinel/chat-requirements/finalize"
 
 
 def _bearer_from_flow(flow: http.HTTPFlow) -> str:
@@ -87,6 +92,39 @@ def _bearer_from_flow(flow: http.HTTPFlow) -> str:
     if auth.lower().startswith("bearer "):
         return auth[7:].strip()
     return auth.strip()
+
+
+def _cookie_value(client: httpx.AsyncClient, name: str) -> str:
+    """Return a chatgpt.com cookie value from the client jar (best-effort)."""
+    try:
+        return client.cookies.get(name, domain="chatgpt.com") or ""
+    except Exception:
+        return ""
+
+
+def _load_cookies_from_file(client: httpx.AsyncClient, cookie_file: str) -> int:
+    """Load Netscape-format cookies (gateau export) into the client jar.
+
+    Supplies the Cloudflare ``cf_clearance`` and chatgpt.com session cookies
+    that warmup cannot synthesize (Cloudflare-gated endpoints 403 without them).
+    Returns the number of cookies loaded; a missing or malformed file is
+    non-fatal (returns 0). Idempotent — re-setting the same cookies each request
+    keeps the jar current when the file is refreshed.
+    """
+    path = Path(cookie_file).expanduser()
+    if not path.is_file():
+        return 0
+    jar = MozillaCookieJar(str(path))
+    try:
+        jar.load(ignore_discard=True, ignore_expires=True)
+    except (OSError, LoadError) as exc:
+        logger.warning("oaic cookie load failed for %s: %s", path, exc)
+        return 0
+    count = 0
+    for cookie in jar:
+        client.cookies.set(cookie.name, cookie.value or "", domain=cookie.domain, path=cookie.path or "/")
+        count += 1
+    return count
 
 
 def _is_oaic_flow(flow: http.HTTPFlow) -> bool:
@@ -156,50 +194,87 @@ async def _refresh_sentinel(
     *,
     client: httpx.AsyncClient,
     credential_path: str,
+    access_token: str,
     device_id: str,
     timeout: float,
-) -> tuple[str, str]:
-    """POST /backend-api/sentinel/req and persist the new token.
+) -> SentinelResult:
+    """Run the chat-requirements prepare→PoW→finalize cycle and persist tokens.
 
-    Returns (sentinel_token, p_token) on success. Raises on any non-200 response.
+    Mirrors gproxy ``run_sentinel`` (sentinel.rs:74-110):
 
-    Ported from aurora request.go:416-479 (MIT-licensed).
+    1. ``POST /sentinel/chat-requirements/prepare`` with ``{"p": <requirements
+       token>}`` carrying the bearer + Chrome browser headers (without these the
+       server resolves an anonymous ``chatgpt-noauth`` persona).
+    2. Solve the returned proof-of-work challenge locally.
+    3. ``POST /sentinel/chat-requirements/finalize`` with the prepare_token and
+       the solved proof (omitted when no PoW was required).
+
+    Returns a :class:`SentinelResult`. ``chat_req_token`` is the finalize token
+    (sent as ``openai-sentinel-chat-requirements-token``); ``proof_token`` is the
+    solved PoW answer (sent as ``openai-sentinel-proof-token``) — the same string
+    is used for finalize and the subsequent ``/f/conversation`` request. Persists
+    the result to the credential file. Raises on any non-200 response.
     """
-    p_token = build_requirements_token()
-    body = build_sentinel_req_body(p=p_token, device_id=device_id, flow=_SENTINEL_FLOW)
+    headers = {
+        **get_browser_headers(device_id=device_id, session_id=device_id, conversation_id="", final=False),
+        "authorization": f"Bearer {access_token}",
+        "content-type": "application/json",
+        "accept": "*/*",
+    }
 
-    sentinel_url = f"{_BASE_URL}{_SENTINEL_REQ_PATH}"
-    resp = await client.post(
-        sentinel_url,
-        content=body.encode(),
-        headers={
-            "content-type": "text/plain;charset=UTF-8",
-            "referer": f"{_BASE_URL}/backend-api/sentinel/frame.html?sv=20260423af3c",
-        },
+    # 1. prepare
+    p_token = build_requirements_token()
+    prepare_resp = await client.post(
+        f"{_BASE_URL}{_SENTINEL_PREPARE_PATH}",
+        content=json.dumps(build_prepare_body(p_token)).encode(),
+        headers=headers,
         timeout=timeout,
     )
-    resp.raise_for_status()
-    result = resp.json()
-    sentinel_token = str(result.get("token") or "")
-    # Aurora ``sentinelReqResponse.ExpiresAt`` is typed as ``int64`` with no
-    # explicit unit documentation.  Real-world observations show the field
-    # carries unix **seconds** (values ≈ 1.7e9), not milliseconds (≈ 1.7e12).
-    # Guard: treat any value below 1e11 as seconds and multiply by 1000 so
-    # ``is_expired(expiry_ms=…)`` receives the correct millisecond epoch.
-    raw_expires = int(result.get("expires_at") or 0)
-    expires_at_ms = raw_expires * 1000 if 0 < raw_expires < 100_000_000_000 else raw_expires
+    prepare_resp.raise_for_status()
+    prepare = prepare_resp.json()
+    prepare_token = str(prepare.get("prepare_token") or "")
+
+    # 2. solve the proof-of-work challenge locally.
+    proof_token = ""
+    challenge = prepare.get("proofofwork")
+    if isinstance(challenge, dict) and challenge.get("required"):
+        seed = str(challenge.get("seed") or "")
+        difficulty = str(challenge.get("difficulty") or "")
+        if not (seed and difficulty):
+            raise RuntimeError("sentinel prepare: proofofwork required but seed/difficulty missing")
+        try:
+            proof_token = solve_pow(seed, difficulty)
+        except PowExhaustedError as exc:
+            raise RuntimeError(f"sentinel proof-of-work exhausted: {exc}") from exc
+
+    # 3. finalize — proof omitted when empty; turnstile deliberately not sent.
+    finalize_resp = await client.post(
+        f"{_BASE_URL}{_SENTINEL_FINALIZE_PATH}",
+        content=json.dumps(build_finalize_body(prepare_token=prepare_token, proof=proof_token)).encode(),
+        headers=headers,
+        timeout=timeout,
+    )
+    finalize_resp.raise_for_status()
+    finalize = finalize_resp.json()
+    chat_req_token = str(finalize.get("token") or "")
+    persona = str(finalize.get("persona") or prepare.get("persona") or "")
+    expires_at_ms = decode_jwt_exp_ms(chat_req_token) or 0
 
     update_sentinel_fields(
         credential_path,
-        sentinel_token=sentinel_token,
-        sentinel_p_token=p_token,
-        sentinel_expires_at_ms=expires_at_ms,
-        sentinel_flow=_SENTINEL_FLOW,
-        sentinel_so_token="",
+        chat_req_token=chat_req_token,
+        proof_token=proof_token,
+        chat_req_token_expires_at_ms=expires_at_ms,
+        persona=persona,
         label="OpenAIConversations",
     )
 
-    return sentinel_token, p_token
+    return SentinelResult(
+        chat_req_token=chat_req_token,
+        proof_token=proof_token,
+        expires_at_ms=expires_at_ms,
+        persona=persona,
+    )
 
 
 async def _run_conduit_prepare(
@@ -208,11 +283,18 @@ async def _run_conduit_prepare(
     final_body: dict[str, Any],
     turn_trace_id: str,
     timeout: float,
+    device_id: str,
+    access_token: str,
 ) -> str:
     """Three-state conduit prepare: none → sent → success.
 
     Returns the final conduit_token that must accompany the ``/f/conversation``
     request. Raises on any prepare failure (fail-closed).
+
+    The ``/f/conversation/prepare`` endpoint is Cloudflare-gated: it requires
+    both the browser cookies (in the shared jar) AND the full Chrome browser
+    headers — ``cf_clearance`` is bound to the request fingerprint. Without the
+    browser identity it 403s even with valid cookies.
 
     Ported from aurora request.go:980-1020 (MIT-licensed, PrepareConversationConduitFull).
     """
@@ -228,8 +310,10 @@ async def _run_conduit_prepare(
     for state in states:
         prepare_body = build_conversation_prepare_body(final_body=final_body, state=state)
         headers = {
+            **get_browser_headers(device_id=device_id, session_id=device_id, conversation_id="", final=True),
+            "authorization": f"Bearer {access_token}",
             "content-type": "application/json",
-            "accept": "application/json",
+            "accept": "*/*",
             "x-oai-turn-trace-id": turn_trace_id,
             "x-openai-target-path": _PREPARE_PATH,
             "x-openai-target-route": _PREPARE_PATH,
@@ -347,7 +431,7 @@ class OpenAIConversationsAddon:
         profile = provider.fingerprint_profile or transport.DEFAULT_PROFILE
         client = await transport.get_client(host=provider.host, profile=profile)
 
-        # Load credential state — need device_id + sentinel fields.
+        # Load credential state — need device_id + chat-requirements fields.
         credential_path = getattr(provider.auth, "file_path", "") if provider.auth else ""
         state = load_credential_state(path=credential_path, label="OpenAIConversations") if credential_path else None
         if state is None:
@@ -357,14 +441,34 @@ class OpenAIConversationsAddon:
                 provider_name,
             )
             device_id = str(uuid.uuid4())
-            sentinel_token = ""
-            p_token = ""
+            chat_req_token = ""
+            proof_token = ""
+            access_token = ""
         else:
             device_id = state.device_id or str(uuid.uuid4())
-            sentinel_token = state.sentinel_token
-            p_token = state.sentinel_p_token
+            chat_req_token = state.chat_req_token
+            proof_token = state.proof_token
+            access_token = state.access_token
 
         timeout = oaic_cfg.request_timeout_seconds
+
+        # 0. Load browser cookies (cf_clearance + session) into the shared jar.
+        # These supply the Cloudflare clearance warmup cannot synthesize; with
+        # them present, warmup (which lacks browser headers and would 403) is
+        # skipped.
+        cookie_file = getattr(provider.auth, "cookie_file", "") if provider.auth else ""
+        cookies_loaded = _load_cookies_from_file(client, cookie_file) if cookie_file else 0
+        if cookies_loaded:
+            _mark_warmup(provider_name=provider_name, profile=profile)
+            logger.debug("oaic loaded %d browser cookies for provider=%s", cookies_loaded, provider_name)
+
+        # Align the device id with the browser session (the oai-did cookie). A
+        # mismatch between the oai-device-id header and the session's device id
+        # trips OpenAI's "unusual activity has been detected" abuse check, so the
+        # browser value must be used everywhere (Sentinel, conduit, headers).
+        browser_did = _cookie_value(client, "oai-did")
+        if browser_did:
+            device_id = browser_did
 
         # 1. Warmup — bootstraps Cloudflare cookies into the shared client jar.
         if _should_warmup(
@@ -380,25 +484,32 @@ class OpenAIConversationsAddon:
             except Exception as exc:
                 logger.warning("oaic warmup failed (non-fatal): %s", exc)
 
-        # 2. Sentinel refresh — when expired or within skew window.
+        # 2. Sentinel refresh + PoW — when the chat-requirements token is missing
+        # or within the skew window. Both the chat_req_token and proof_token are
+        # persisted and reused on cached turns, since both must accompany every
+        # /f/conversation request.
         skew_ms = int(oaic_cfg.sentinel_skew_seconds * 1000)
-        sentinel_expires_ms = state.sentinel_expires_at_ms if state else 0
-        if is_expired(expiry_ms=sentinel_expires_ms, skew_ms=skew_ms):
+        chat_req_expires_ms = state.chat_req_token_expires_at_ms if state else 0
+        if is_expired(expiry_ms=chat_req_expires_ms, skew_ms=skew_ms):
             try:
-                sentinel_token, p_token = await _refresh_sentinel(
+                result = await _refresh_sentinel(
                     client=client,
                     credential_path=credential_path,
+                    access_token=access_token,
                     device_id=device_id,
                     timeout=timeout,
-                )
-                logger.debug(
-                    "oaic sentinel refreshed for provider=%s token=%s…",
-                    provider_name,
-                    sentinel_token[:12] if sentinel_token else "",
                 )
             except Exception as exc:
                 logger.error("oaic sentinel refresh failed: %s", exc)
                 raise
+            chat_req_token = result.chat_req_token
+            proof_token = result.proof_token
+            logger.debug(
+                "oaic sentinel refreshed for provider=%s persona=%s token=%s…",
+                provider_name,
+                result.persona,
+                chat_req_token[:12] if chat_req_token else "",
+            )
 
         # 2b. Image requests: parse/upload/render the /f/conversation body so
         # conduit prepare derives from the finalized image body.
@@ -428,53 +539,50 @@ class OpenAIConversationsAddon:
                 final_body=final_body,
                 turn_trace_id=turn_trace_id,
                 timeout=timeout,
+                device_id=device_id,
+                access_token=access_token,
             )
         except Exception as exc:
             logger.error("oaic conduit prepare failed: %s", exc)
             raise
 
-        # 4. Stamp headers on the flow.
+        # 4. Replace the request headers with a clean, Chrome-ordered set.
+        # /f/conversation is Cloudflare-gated like prepare: cf_clearance is bound
+        # to the request fingerprint. The original listener headers (appended to
+        # in mitmproxy insertion order) fail the check, so the whole header block
+        # is rebuilt in browser order — exactly like the conduit-prepare call.
         conversation_id = str(final_body.get("conversation_id") or "")
-
-        # Clear stale browser-identity / oai-* headers first.
-        for h in headers_to_clear():
-            flow.request.headers.pop(h, None)
-
-        # Stamp browser identity.
-        browser_headers = get_browser_headers(
-            device_id=device_id,
-            session_id=device_id,
-            conversation_id=conversation_id,
-            final=True,
-        )
-        for k, v in browser_headers.items():
-            flow.request.headers[k] = v
-
-        # Sentinel token header.
-        turnstile_token = state.sentinel_so_token if state else ""
-        sentinel_header_value = build_sentinel_token_header(
-            p=p_token,
-            turnstile_token=turnstile_token,
-            sentinel_token=sentinel_token,
-            device_id=device_id,
-            flow=_SENTINEL_FLOW,
-        )
-        flow.request.headers["openai-sentinel-token"] = sentinel_header_value
-
-        # Conduit + turn trace.
-        flow.request.headers["x-conduit-token"] = conduit_token
-        flow.request.headers["x-oai-turn-trace-id"] = turn_trace_id
-
-        # Target path and route (mirrors aurora conversationHeadersWithState).
         target_path = flow.request.path
-        flow.request.headers["x-openai-target-path"] = target_path
-        flow.request.headers["x-openai-target-route"] = target_path
 
-        # X-OAI-IS — sourced from the shared client cookie jar (best-effort).
-        # The cookie is named __Secure-oai-is; its value is the X-OAI-IS token.
+        final_headers: dict[str, str] = {
+            **get_browser_headers(
+                device_id=device_id,
+                session_id=device_id,
+                conversation_id=conversation_id,
+                final=True,
+            ),
+            "authorization": f"Bearer {access_token}",
+            "content-type": "application/json",
+            "accept": "text/event-stream",
+            # Sentinel goes as two separate headers (gproxy channel.rs:485-489),
+            # NOT a single combined openai-sentinel-token blob: the
+            # chat-requirements token is the finalize token, the proof token is
+            # the solved PoW answer.
+            "openai-sentinel-chat-requirements-token": chat_req_token,
+            "openai-sentinel-proof-token": proof_token,
+            "x-conduit-token": conduit_token,
+            "x-oai-turn-trace-id": turn_trace_id,
+            "x-openai-target-path": target_path,
+        }
         oai_is_value = _get_oai_is_from_jar(client)
         if oai_is_value:
-            flow.request.headers["x-oai-is"] = oai_is_value
+            final_headers["x-oai-is"] = oai_is_value
+
+        # Replacing the header block drops Content-Length; re-apply the body so
+        # mitmproxy re-stamps it (otherwise the upstream receives an empty body).
+        body_bytes = flow.request.content or b""
+        flow.request.headers = http.Headers([(k.encode(), v.encode()) for k, v in final_headers.items()])
+        flow.request.content = body_bytes
 
         logger.debug(
             "oaic stamped: provider=%s profile=%s trace=%s conduit=%s…",
@@ -595,10 +703,13 @@ class OpenAIConversationsAddon:
         metadata = metadata_from_flow(flow)
 
         if flow.response.status_code >= 400:
+            status = flow.response.status_code
+            upstream_body = _extract_raw_body(flow)[:600].decode("utf-8", errors="replace")
+            logger.warning("oaic image upstream HTTP %d body: %s", status, upstream_body)
             self._fail_image(
                 flow,
                 status=502,
-                message=f"chatgpt.com returned HTTP {flow.response.status_code} for the image request",
+                message=f"chatgpt.com HTTP {status} for image request: {upstream_body[:240]}",
             )
             return
 
@@ -715,6 +826,7 @@ class OpenAIConversationsAddon:
         credential_path = getattr(provider.auth, "file_path", "") if provider.auth else ""
         state = load_credential_state(path=credential_path, label="OpenAIConversations") if credential_path else None
         device_id = (state.device_id or str(uuid.uuid4())) if state else str(uuid.uuid4())
+        access_token = state.access_token if state else _bearer_from_flow(flow)
         timeout = oaic_cfg.request_timeout_seconds
 
         # Force warmup.
@@ -725,11 +837,12 @@ class OpenAIConversationsAddon:
         except Exception as exc:
             logger.warning("oaic retry warmup failed (non-fatal): %s", exc)
 
-        # Force sentinel refresh.
+        # Force sentinel refresh + PoW.
         try:
-            sentinel_token, p_token = await _refresh_sentinel(
+            result = await _refresh_sentinel(
                 client=client,
                 credential_path=credential_path,
+                access_token=access_token,
                 device_id=device_id,
                 timeout=timeout,
             )
@@ -737,15 +850,9 @@ class OpenAIConversationsAddon:
             logger.error("oaic retry sentinel refresh failed: %s", exc)
             return
 
-        # Stamp the updated sentinel header onto the request.
-        so_token = state.sentinel_so_token if state else ""
-        flow.request.headers["openai-sentinel-token"] = build_sentinel_token_header(
-            p=p_token,
-            turnstile_token=so_token,
-            sentinel_token=sentinel_token,
-            device_id=device_id,
-            flow=_SENTINEL_FLOW,
-        )
+        # Stamp the refreshed sentinel headers onto the request.
+        flow.request.headers["openai-sentinel-chat-requirements-token"] = result.chat_req_token
+        flow.request.headers["openai-sentinel-proof-token"] = result.proof_token
 
         # Replay via the same cached client (bypassing the sidecar rewrite).
         headers = dict(flow.request.headers)

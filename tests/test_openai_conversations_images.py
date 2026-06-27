@@ -224,7 +224,8 @@ class TestBuildImageConversationBody:
         body = build_image_conversation_body(prompt="a red cube", model="gpt-image-1")
         assert body["model"] == "auto"
         assert body["system_hints"] == ["picture_v2"]
-        assert body["history_and_training_disabled"] is False
+        # Non-temporary (saved) image turns omit the field (manual §5.4).
+        assert "history_and_training_disabled" not in body
         message = body["messages"][0]
         assert message["content"] == {"content_type": "text", "parts": ["a red cube"]}
         assert message["metadata"]["system_hints"] == ["picture_v2"]
@@ -650,7 +651,7 @@ class TestAddonRenderImageRequest:
         rendered = json.loads(flow.request.content)
         assert rendered["model"] == "auto"
         assert rendered["system_hints"] == ["picture_v2"]
-        assert rendered["history_and_training_disabled"] is False
+        assert "history_and_training_disabled" not in rendered
         assert rendered["messages"][0]["content"]["parts"] == ["a red cube"]
 
     def test_edit_uploads_and_attaches(self) -> None:

@@ -203,7 +203,6 @@ def build_conversation_body(
         "system_hints": hints,
         "supports_buffering": True,
         "supported_encodings": ["v1"],
-        "history_and_training_disabled": bool(temporary_chat),
         "client_contextual_info": {
             "is_dark_mode": False,
             "time_since_loaded": 5000,
@@ -217,6 +216,11 @@ def build_conversation_body(
         "paragen_cot_summary_display_override": "allow",
         "force_parallel_switch": "auto",
     }
+
+    # Emit history_and_training_disabled only when the temporary-chat toggle is
+    # on (manual §5.4) — it protects the operator's ChatGPT history.
+    if temporary_chat:
+        body["history_and_training_disabled"] = True
 
     if thinking_effort is not None:
         body["thinking_effort"] = thinking_effort

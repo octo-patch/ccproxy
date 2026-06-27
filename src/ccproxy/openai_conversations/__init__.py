@@ -4,13 +4,14 @@ Ported from the MIT-licensed gproxy chatgpt channel:
   Copyright (c) 2026 LeenHawk
   https://github.com/LeenHawk/gproxy  (MIT License)
 
-Cross-checked against aurora-develop/aurora (also MIT) for the current
-2026-06 sentinel/req protocol and Build25 fingerprint layout.
+Cross-checked against the gproxy chatgpt channel for the two-call
+sentinel chat-requirements (prepare→PoW→finalize) protocol and Build25
+fingerprint layout.
 
 Public surface:
     pow.py       — FNV-1a PoW hash and solver
     prepare_p.py — 25-slot config builder for the p field
-    sentinel.py  — /sentinel/req body and openai-sentinel-token header builders
+    sentinel.py  — chat-requirements prepare/finalize body builders + expiry helpers
     credentials.py — credential state load/update for the JSON state file
 """
 
@@ -31,8 +32,9 @@ from ccproxy.openai_conversations.prepare_p import (
     encode_config,
 )
 from ccproxy.openai_conversations.sentinel import (
-    build_sentinel_req_body,
-    build_sentinel_token_header,
+    SentinelResult,
+    build_finalize_body,
+    build_prepare_body,
     decode_jwt_exp_ms,
     is_expired,
 )
@@ -41,10 +43,11 @@ __all__ = [
     "ConfigOptions",
     "OpenAIConversationsCredentialState",
     "PowExhaustedError",
+    "SentinelResult",
+    "build_finalize_body",
+    "build_prepare_body",
     "build_prepare_p",
     "build_requirements_token",
-    "build_sentinel_req_body",
-    "build_sentinel_token_header",
     "decode_jwt_exp_ms",
     "encode_config",
     "is_expired",

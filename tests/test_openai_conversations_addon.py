@@ -111,18 +111,16 @@ def _make_credential_state(
     *,
     access_token: str = "jwt.access.token",  # noqa: S107
     device_id: str = "dev-id-uuid",
-    sentinel_token: str = "",
-    sentinel_p_token: str = "",
-    sentinel_expires_at_ms: int = 0,
-    sentinel_so_token: str = "",
+    chat_req_token: str = "",
+    proof_token: str = "",
+    chat_req_token_expires_at_ms: int = 0,
 ) -> MagicMock:
     state = MagicMock()
     state.access_token = access_token
     state.device_id = device_id
-    state.sentinel_token = sentinel_token
-    state.sentinel_p_token = sentinel_p_token
-    state.sentinel_expires_at_ms = sentinel_expires_at_ms
-    state.sentinel_so_token = sentinel_so_token
+    state.chat_req_token = chat_req_token
+    state.proof_token = proof_token
+    state.chat_req_token_expires_at_ms = chat_req_token_expires_at_ms
     return state
 
 
@@ -207,10 +205,28 @@ def _make_mock_client(
     return client
 
 
-def _sentinel_post_response(token: str = "sentinel-c-token", expires_at: int = 9999999999000) -> MagicMock:  # noqa: S107
+def _sentinel_prepare_response(*, required: bool = True, persona: str = "chatgpt-paid") -> MagicMock:
+    """Mock the /sentinel/chat-requirements/prepare response.
+
+    Difficulty ``"ffffff"`` (the max 6-hex prefix) lets the real ``solve_pow``
+    accept attempt 0 immediately, keeping the test fast and deterministic while
+    still exercising the genuine PoW path.
+    """
     resp = MagicMock()
     resp.status_code = 200
-    resp.json = MagicMock(return_value={"token": token, "flow": "conversation", "expires_at": expires_at})
+    pow_info: dict[str, Any] = (
+        {"required": True, "seed": "seed-0", "difficulty": "ffffff"} if required else {"required": False}
+    )
+    resp.json = MagicMock(return_value={"prepare_token": "prep-token", "proofofwork": pow_info, "persona": persona})
+    resp.raise_for_status = MagicMock()
+    return resp
+
+
+def _sentinel_finalize_response(token: str = "chat-req-tok", persona: str = "chatgpt-paid") -> MagicMock:  # noqa: S107
+    """Mock the /sentinel/chat-requirements/finalize response."""
+    resp = MagicMock()
+    resp.status_code = 200
+    resp.json = MagicMock(return_value={"token": token, "persona": persona})
     resp.raise_for_status = MagicMock()
     return resp
 
@@ -445,15 +461,14 @@ class TestWarmupThrottle:
     async def test_warmup_runs_when_no_usable_cookies(self) -> None:
         flow = _make_flow()
         cfg = _make_config(warmup_throttle_seconds=600.0)
-        cred_state = _make_credential_state(sentinel_expires_at_ms=9999999999000)
+        cred_state = _make_credential_state(chat_req_token_expires_at_ms=9999999999000)
 
-        sentinel_resp = _sentinel_post_response()
-        prepare_resps = [
+        # Far-future expiry → no sentinel refresh; only the 3 conduit prepares run.
+        post_resps = [
             _prepare_post_response("t1"),
             _prepare_post_response("t2"),
             _prepare_post_response("t3"),
         ]
-        post_resps = [sentinel_resp, *prepare_resps]
         client = _make_mock_client(has_cookies=False, post_responses=post_resps)
 
         with (
@@ -487,15 +502,14 @@ class TestWarmupThrottle:
 
         flow = _make_flow()
         cfg = _make_config(warmup_throttle_seconds=600.0)
-        cred_state = _make_credential_state(sentinel_expires_at_ms=9999999999000)
+        cred_state = _make_credential_state(chat_req_token_expires_at_ms=9999999999000)
 
-        sentinel_resp = _sentinel_post_response()
-        prepare_resps = [
+        # Far-future expiry → no sentinel refresh; only the 3 conduit prepares run.
+        post_resps = [
             _prepare_post_response("t1"),
             _prepare_post_response("t2"),
             _prepare_post_response("t3"),
         ]
-        post_resps = [sentinel_resp, *prepare_resps]
         client = _make_mock_client(has_cookies=True, post_responses=post_resps)
 
         with (
@@ -530,16 +544,16 @@ class TestSentinelRefresh:
     async def test_sentinel_refreshed_when_expired(self) -> None:
         flow = _make_flow()
         cfg = _make_config()
-        # sentinel_expires_at_ms=0 → always expired.
-        cred_state = _make_credential_state(sentinel_expires_at_ms=0)
+        # chat_req_token_expires_at_ms=0 → always expired.
+        cred_state = _make_credential_state(chat_req_token_expires_at_ms=0)
 
-        sentinel_resp = _sentinel_post_response(token="new-sentinel-tok")  # noqa: S106
-        prepare_resps = [
+        post_resps = [
+            _sentinel_prepare_response(),
+            _sentinel_finalize_response(token="new-chat-req-tok"),  # noqa: S106
             _prepare_post_response("t1"),
             _prepare_post_response("t2"),
             _prepare_post_response("t3"),
         ]
-        post_resps = [sentinel_resp, *prepare_resps]
         client = _make_mock_client(has_cookies=True, post_responses=post_resps)
 
         _warmup_timestamps[("openai_conversations", "chrome136")] = 0.0
@@ -564,19 +578,22 @@ class TestSentinelRefresh:
             await addon.request(flow)
 
         update_mock.assert_called_once()
-        # Sentinel token should appear in stamped headers.
-        header_val = flow.request.headers.get("openai-sentinel-token", "")
-        assert "new-sentinel-tok" in header_val
+        # The finalize token and solved proof go as two separate headers; the
+        # combined openai-sentinel-token blob must NOT be sent.
+        assert flow.request.headers.get("openai-sentinel-chat-requirements-token") == "new-chat-req-tok"
+        proof = flow.request.headers.get("openai-sentinel-proof-token")
+        assert proof is not None and proof.startswith("gAAAAAB") and proof.endswith("~S")
+        assert flow.request.headers.get("openai-sentinel-token") is None
 
     @pytest.mark.asyncio
     async def test_sentinel_not_refreshed_when_valid(self) -> None:
         flow = _make_flow()
         cfg = _make_config(sentinel_skew_seconds=60.0)
-        # Far-future expiry → not expired.
+        # Far-future expiry → not expired; cached chat_req_token + proof reused.
         cred_state = _make_credential_state(
-            sentinel_token="existing-tok",  # noqa: S106
-            sentinel_p_token="existing-p",  # noqa: S106
-            sentinel_expires_at_ms=9999999999000,
+            chat_req_token="existing-tok",  # noqa: S106
+            proof_token="existing-proof",  # noqa: S106
+            chat_req_token_expires_at_ms=9999999999000,
         )
 
         prepare_resps = [
@@ -611,9 +628,9 @@ class TestSentinelRefresh:
 
         # Sentinel NOT refreshed — update_sentinel_fields should not be called.
         update_mock.assert_not_called()
-        # But the existing sentinel token must still appear in the header.
-        header_val = flow.request.headers.get("openai-sentinel-token", "")
-        assert "existing-tok" in header_val
+        # The cached chat-requirements + proof tokens are reused on the stamped headers.
+        assert flow.request.headers.get("openai-sentinel-chat-requirements-token") == "existing-tok"
+        assert flow.request.headers.get("openai-sentinel-proof-token") == "existing-proof"
 
 
 # ---------------------------------------------------------------------------
@@ -630,7 +647,7 @@ class TestConduitPrepare:
         """First prepare call must send empty x-conduit-token."""
         flow = _make_flow()
         cfg = _make_config()
-        cred_state = _make_credential_state(sentinel_expires_at_ms=9999999999000)
+        cred_state = _make_credential_state(chat_req_token_expires_at_ms=9999999999000)
 
         prepare_calls: list[dict[str, Any]] = []
 
@@ -675,8 +692,8 @@ class TestConduitPrepare:
             addon = OpenAIConversationsAddon()
             await addon.request(flow)
 
-        # First POST may be sentinel/req (hits _post_capture since client.post is patched);
-        # next three are the prepare states (none, sent, success).
+        # Far-future chat-requirements expiry → no sentinel calls; the only POSTs
+        # are the three conduit prepare states (none, sent, success).
         prepare_only = [c for c in prepare_calls if "prepare" in c["url"]]
         assert len(prepare_only) == 3
         # First prepare: always empty conduit token.
@@ -695,7 +712,7 @@ class TestConduitPrepare:
         """All three prepare calls AND the final flow must share one x-oai-turn-trace-id."""
         flow = _make_flow()
         cfg = _make_config()
-        cred_state = _make_credential_state(sentinel_expires_at_ms=9999999999000)
+        cred_state = _make_credential_state(chat_req_token_expires_at_ms=9999999999000)
 
         trace_ids_seen: list[str] = []
 
@@ -755,7 +772,7 @@ class TestConduitPrepare:
     async def test_final_conduit_token_stamped_on_flow(self) -> None:
         flow = _make_flow()
         cfg = _make_config()
-        cred_state = _make_credential_state(sentinel_expires_at_ms=9999999999000)
+        cred_state = _make_credential_state(chat_req_token_expires_at_ms=9999999999000)
 
         prepare_resps = [
             _prepare_post_response("tok-1"),
@@ -803,15 +820,15 @@ class TestSharedClientInstance:
         """All warmup, sentinel, and prepare operations must use the same client instance."""
         flow = _make_flow()
         cfg = _make_config()
-        cred_state = _make_credential_state(sentinel_expires_at_ms=0)
+        cred_state = _make_credential_state(chat_req_token_expires_at_ms=0)
 
-        sentinel_resp = _sentinel_post_response()
-        prepare_resps = [
+        post_resps = [
+            _sentinel_prepare_response(),
+            _sentinel_finalize_response(),
             _prepare_post_response("t1"),
             _prepare_post_response("t2"),
             _prepare_post_response("t3"),
         ]
-        post_resps = [sentinel_resp, *prepare_resps]
         client = _make_mock_client(has_cookies=False, post_responses=post_resps)
 
         get_client_calls: list[tuple[str, str]] = []
@@ -858,7 +875,7 @@ class TestXOaiIs:
     async def test_x_oai_is_set_when_cookie_present(self) -> None:
         flow = _make_flow()
         cfg = _make_config()
-        cred_state = _make_credential_state(sentinel_expires_at_ms=9999999999000)
+        cred_state = _make_credential_state(chat_req_token_expires_at_ms=9999999999000)
 
         prepare_resps = [
             _prepare_post_response("t1"),
@@ -899,7 +916,7 @@ class TestXOaiIs:
     async def test_x_oai_is_absent_when_no_cookie(self) -> None:
         flow = _make_flow()
         cfg = _make_config()
-        cred_state = _make_credential_state(sentinel_expires_at_ms=9999999999000)
+        cred_state = _make_credential_state(chat_req_token_expires_at_ms=9999999999000)
 
         prepare_resps = [
             _prepare_post_response("t1"),
@@ -946,15 +963,10 @@ class TestResponseRetry:
     async def test_retry_runs_once_on_401(self) -> None:
         flow = _make_flow(status_code=401)
         cfg = _make_config()
-        cred_state = _make_credential_state(sentinel_expires_at_ms=0)
+        cred_state = _make_credential_state(chat_req_token_expires_at_ms=0)
 
-        sentinel_resp = _sentinel_post_response("new-tok")
-        prepare_resps = [
-            _prepare_post_response("t1"),
-            _prepare_post_response("t2"),
-            _prepare_post_response("t3"),
-        ]
-        post_resps = [sentinel_resp, *prepare_resps]
+        # _retry_once runs the sentinel prepare→finalize then replays via client.request.
+        post_resps = [_sentinel_prepare_response(), _sentinel_finalize_response("new-tok")]
         client = _make_mock_client(has_cookies=True, post_responses=post_resps)
 
         with (
@@ -1006,10 +1018,9 @@ class TestResponseRetry:
         """After retry, ccproxy.auth_injected must be False so AuthAddon skips."""
         flow = _make_flow(status_code=401)
         cfg = _make_config()
-        cred_state = _make_credential_state(sentinel_expires_at_ms=0)
+        cred_state = _make_credential_state(chat_req_token_expires_at_ms=0)
 
-        sentinel_resp = _sentinel_post_response()
-        post_resps = [sentinel_resp]
+        post_resps = [_sentinel_prepare_response(), _sentinel_finalize_response()]
         client = _make_mock_client(has_cookies=True, post_responses=post_resps)
 
         with (
@@ -1040,10 +1051,12 @@ class TestResponseRetry:
             response_headers={"cf-mitigated": "challenge"},
         )
         cfg = _make_config()
-        cred_state = _make_credential_state(sentinel_expires_at_ms=0)
+        cred_state = _make_credential_state(chat_req_token_expires_at_ms=0)
 
-        sentinel_resp = _sentinel_post_response()
-        client = _make_mock_client(has_cookies=True, post_responses=[sentinel_resp])
+        client = _make_mock_client(
+            has_cookies=True,
+            post_responses=[_sentinel_prepare_response(), _sentinel_finalize_response()],
+        )
 
         with (
             patch("ccproxy.inspector.openai_conversations_addon.get_config", return_value=cfg),

@@ -5,7 +5,8 @@ Covers:
   - Difficulty-check behavior (lexicographic, not numeric)
   - PoW exhaustion raises PowExhaustedError (typed domain exception)
   - solve_pow returns gAAAAAB…~S with a valid solution
-  - Requirements and proof token shapes: 25 slots, correct prefixes, ~S suffix
+  - Requirements token: gAAAAAC prefix, 25 slots, slot[9]=performance_now, no ~S suffix
+  - Proof token: gAAAAAB prefix with ~S suffix
   - encode_config_array round-trips
 """
 
@@ -163,20 +164,24 @@ def test_solve_pow_exhaustion_raises_typed_exception() -> None:
 
 
 def _decode_requirements_token(token: str) -> list[Any]:
-    """Strip gAAAAAC prefix and ~S suffix, base64-decode."""
+    """Strip the gAAAAAC prefix (no ~S suffix) and base64-decode."""
     assert token.startswith("gAAAAAC"), f"unexpected prefix: {token[:10]}"
-    assert token.endswith("~S"), f"missing ~S suffix: {token[-4:]}"
-    inner = token[len("gAAAAAC") : -len("~S")]
+    assert not token.endswith("~S"), "requirements token must not carry the ~S proof suffix"
+    inner = token[len("gAAAAAC") :]
     decoded: list[Any] = json.loads(base64.b64decode(inner))
     return decoded
 
 
-def test_build_requirements_token_prefix_and_suffix() -> None:
-    """Requirements token must start with gAAAAAC and end with ~S."""
+def test_build_requirements_token_prefix_no_proof_suffix() -> None:
+    """Requirements token starts with gAAAAAC and carries NO ~S proof suffix.
+
+    Matches gproxy build_prepare_p (prepare_p.rs:253-260): only the solved PoW
+    answer (gAAAAAB…~S) carries the ~S suffix.
+    """
     opts = ConfigOptions.fixed_for_tests()
     token = build_requirements_token(opts=opts)
     assert token.startswith("gAAAAAC")
-    assert token.endswith("~S")
+    assert not token.endswith("~S")
 
 
 def test_build_requirements_token_decodes_to_25_slots() -> None:
@@ -193,6 +198,14 @@ def test_build_requirements_token_slot3_is_1() -> None:
     token = build_requirements_token(opts=opts)
     config = _decode_requirements_token(token)
     assert config[3] == 1
+
+
+def test_build_requirements_token_slot9_is_performance_now() -> None:
+    """Slot [9] carries performance_now, not 0 (matches gproxy build_prepare_p)."""
+    opts = ConfigOptions.fixed_for_tests()
+    token = build_requirements_token(opts=opts)
+    config = _decode_requirements_token(token)
+    assert config[9] == opts.performance_now
 
 
 def test_build_prepare_p_is_alias_for_requirements_token() -> None:
@@ -283,7 +296,7 @@ def test_build_requirements_token_defaults_to_browser_options() -> None:
     """build_requirements_token() with no opts uses browser_default and stays valid."""
     token = build_requirements_token()
     assert token.startswith("gAAAAAC")
-    assert token.endswith("~S")
+    assert not token.endswith("~S")
     config = _decode_requirements_token(token)
     assert len(config) == 25
     assert config[3] == 1

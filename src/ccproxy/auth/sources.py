@@ -526,6 +526,14 @@ class OpenAIConversationsAuthSource(AuthFields):
     """Path to the flat credential JSON file written by
     ``scripts/acquire_openai_conversations_credentials.py``."""
 
+    cookie_file: str = ""
+    """Optional path to a Netscape-format cookie file (gateau export) loaded
+    into the browser transport's cookie jar. Supplies the Cloudflare
+    ``cf_clearance`` and chatgpt.com session cookies that warmup cannot
+    synthesize — without them, Cloudflare-gated endpoints
+    (``/f/conversation*``) return 403. Written alongside the credential by
+    ``scripts/acquire_openai_conversations_credentials.py``."""
+
     def resolve(self, label: str = "Auth") -> str | None:
         """Read and return the ``access_token`` from the credential file."""
         state = load_credential_state(path=self.file_path, label=label)

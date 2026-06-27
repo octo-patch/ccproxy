@@ -41,9 +41,11 @@ DEFAULT_IMPERSONATE = "chrome136"
 DEFAULT_PERSONA = "chatgpt-paid"
 USER_AGENT = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36"
 OBSOLETE_SENTINEL_FIELDS = (
-    "chat_req_token",
-    "proof_token",
-    "chat_req_token_expires_at_ms",
+    "sentinel_token",
+    "sentinel_p_token",
+    "sentinel_expires_at_ms",
+    "sentinel_flow",
+    "sentinel_so_token",
 )
 
 
@@ -306,17 +308,13 @@ def build_state(args: argparse.Namespace, access_token: str) -> tuple[dict[str, 
         state.pop(field, None)
 
     if keep_sentinel:
-        state.setdefault("sentinel_token", "")
-        state.setdefault("sentinel_p_token", "")
-        state.setdefault("sentinel_expires_at_ms", 0)
-        state.setdefault("sentinel_flow", "conversation")
-        state.setdefault("sentinel_so_token", "")
+        state.setdefault("chat_req_token", "")
+        state.setdefault("proof_token", "")
+        state.setdefault("chat_req_token_expires_at_ms", 0)
     else:
-        state["sentinel_token"] = ""
-        state["sentinel_p_token"] = ""
-        state["sentinel_expires_at_ms"] = 0
-        state["sentinel_flow"] = "conversation"
-        state["sentinel_so_token"] = ""
+        state["chat_req_token"] = ""
+        state["proof_token"] = ""
+        state["chat_req_token_expires_at_ms"] = 0
 
     return state, token_changed
 

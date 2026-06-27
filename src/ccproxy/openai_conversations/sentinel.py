@@ -1,19 +1,26 @@
-"""Current Sentinel /sentinel/req helpers for OpenAI Conversations.
+"""Sentinel chat-requirements helpers for OpenAI Conversations.
 
-Implements the 2026 single-call Sentinel protocol:
-  POST /backend-api/sentinel/req
-  Content-Type: text/plain;charset=UTF-8
-  body: {"p":<requirementsToken>,"id":<deviceID>,"flow":<flow>}
+Implements the two-call 2026 Sentinel proof-of-work protocol:
 
-  Response header: openai-sentinel-token = compact JSON {p,t,c,id,flow}
+  POST /backend-api/sentinel/chat-requirements/prepare
+    body: {"p": "gAAAAAC<base64(json(25-slot config))>"}
+    ◀ {prepare_token, proofofwork:{required,seed,difficulty}, persona, turnstile}
 
-Cross-referenced against:
-  aurora-develop/aurora  internal/chatgpt/request.go:436-479   (POSTSentinelReq)
-  aurora-develop/aurora  internal/prooftoken/prooftoken.go:307-340  (BuildSentinelTokenHeader)
-  basketikun/chatgpt2api utils/sentinel.py:96-159
-  is7Qin/chatgpt-queue-reg backend/integrations/chatgpt/sentinel_token.py
+  solve PoW locally
 
-No network calls are made in this module.
+  POST /backend-api/sentinel/chat-requirements/finalize
+    body: {"prepare_token": ..., "proofofwork": "gAAAAAB…~S"}  (proof omitted if empty)
+    ◀ {token, persona}
+
+  chat_req_token = finalize.token  → openai-sentinel-chat-requirements-token
+  proof_token    = <PoW answer>    → openai-sentinel-proof-token
+                   (the same string is sent to finalize AND on /f/conversation)
+
+Cross-referenced against the gproxy chatgpt channel
+(sdk/gproxy-channel/src/channels/chatgpt/sentinel.rs:74-183).
+
+No network calls are made in this module — the addon composes these pure
+helpers with the shared curl-cffi client.
 """
 
 from __future__ import annotations
@@ -21,53 +28,55 @@ from __future__ import annotations
 import base64
 import json
 import time
-
-_DEFAULT_FLOW = "conversation"
-
-
-def build_sentinel_req_body(p: str, device_id: str, flow: str = _DEFAULT_FLOW) -> str:
-    """Build the POST /sentinel/req request body as a JSON string.
-
-    Serialized with ``separators=(",", ":")`` for compact output matching
-    observed network captures. Sent with ``Content-Type: text/plain;charset=UTF-8``.
-
-    Args:
-        p: Requirements token (``gAAAAAC…~S``).
-        device_id: OAI-Device-Id / oai-did UUID.
-        flow: Sentinel flow identifier. Default: ``"conversation"``.
-
-    Returns:
-        Compact JSON string ``{"p":…,"id":…,"flow":…}``.
-    """
-    return json.dumps({"p": p, "id": device_id, "flow": flow}, separators=(",", ":"))
+from dataclasses import dataclass
 
 
-def build_sentinel_token_header(
-    p: str,
-    turnstile_token: str,
-    sentinel_token: str,
-    device_id: str,
-    flow: str = _DEFAULT_FLOW,
-) -> str:
-    """Build the ``openai-sentinel-token`` header value as compact JSON.
+@dataclass(frozen=True)
+class SentinelResult:
+    """Outcome of a chat-requirements prepare→PoW→finalize cycle."""
 
-    Key order is ``p, t, c, id, flow`` matching observed network specimens
-    (aurora prooftoken.go:316-329, basketikun sentinel.py:144-149).
+    chat_req_token: str
+    """Finalize-issued token, sent as ``openai-sentinel-chat-requirements-token``."""
+
+    proof_token: str
+    """Solved proof-of-work answer, sent as ``openai-sentinel-proof-token``."""
+
+    expires_at_ms: int
+    """``chat_req_token`` expiry as unix milliseconds (0 = unknown)."""
+
+    persona: str
+    """Server-reported persona (e.g. ``"chatgpt-paid"``); ``""`` when absent."""
+
+
+def build_prepare_body(p: str) -> dict[str, str]:
+    """Build the ``/sentinel/chat-requirements/prepare`` request body.
 
     Args:
-        p: Requirements or proof token.
-        turnstile_token: Turnstile token (empty string when not required).
-        sentinel_token: Server-issued ``c`` token from /sentinel/req response.
-        device_id: OAI-Device-Id / oai-did UUID.
-        flow: Sentinel flow identifier. Default: ``"conversation"``.
+        p: Requirements token (``gAAAAAC…``).
 
     Returns:
-        Compact JSON string ``{"p":…,"t":…,"c":…,"id":…,"flow":…}``.
+        ``{"p": p}`` (sentinel.rs:118 — no device_id/flow fields).
     """
-    return json.dumps(
-        {"p": p, "t": turnstile_token, "c": sentinel_token, "id": device_id, "flow": flow},
-        separators=(",", ":"),
-    )
+    return {"p": p}
+
+
+def build_finalize_body(*, prepare_token: str, proof: str) -> dict[str, str]:
+    """Build the ``/sentinel/chat-requirements/finalize`` request body.
+
+    The ``proofofwork`` field is included only when ``proof`` is non-empty
+    (sentinel.rs:128-139). Turnstile is deliberately never sent.
+
+    Args:
+        prepare_token: ``prepare_token`` from the prepare response.
+        proof: Solved proof-of-work answer (``gAAAAAB…~S``) or ``""``.
+
+    Returns:
+        ``{"prepare_token": …}`` plus ``"proofofwork": proof`` when ``proof``.
+    """
+    body: dict[str, str] = {"prepare_token": prepare_token}
+    if proof:
+        body["proofofwork"] = proof
+    return body
 
 
 def decode_jwt_exp_ms(token: str) -> int | None:
@@ -95,7 +104,7 @@ def decode_jwt_exp_ms(token: str) -> int | None:
 
 
 def is_expired(expiry_ms: int, skew_ms: int = 0) -> bool:
-    """Return True when the sentinel token is expired or within the skew window.
+    """Return True when the chat-requirements token is expired or within the skew window.
 
     Args:
         expiry_ms: Token expiry as unix milliseconds (0 → always expired).

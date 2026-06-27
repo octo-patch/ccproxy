@@ -261,23 +261,26 @@ def encode_config(opts: ConfigOptions) -> str:
 
 
 def build_requirements_token(opts: ConfigOptions | None = None) -> str:
-    """Build the requirements p-token: ``gAAAAAC<base64(config)>~S``.
+    """Build the requirements p-token: ``gAAAAAC<base64(config)>``.
 
-    Slot [3] is fixed to 1 (not PoW nonce). Slot [9] is 0 (no elapsed timing).
-    The ``~S`` suffix is appended as per the current 2026 SDK.
+    Slot [3] is fixed to 1 (not the PoW nonce). Slot [9] carries
+    ``performance_now``. Matches gproxy ``build_prepare_p``
+    (prepare_p.rs:253-260): the requirements token has NO ``~S`` suffix — only
+    the PoW answer (``gAAAAAB…~S``) from the solver does.
     """
     if opts is None:
         opts = ConfigOptions.browser_default()
     arr = _build_base_array(opts)
     arr[3] = 1
-    arr[9] = 0
-    return f"gAAAAAC{encode_config_array(arr)}~S"
+    arr[9] = opts.performance_now
+    return f"gAAAAAC{encode_config_array(arr)}"
 
 
 def build_prepare_p(opts: ConfigOptions | None = None) -> str:
-    """Build the prepare-phase p value: ``gAAAAAC<base64(config)>~S``.
+    """Build the prepare-phase p value: ``gAAAAAC<base64(config)>``.
 
     Alias for :func:`build_requirements_token`. Both names are valid; the
-    proof prefix (``gAAAAAB``) is used only on PoW solutions from the solver.
+    proof prefix (``gAAAAAB``) and ``~S`` suffix are used only on PoW solutions
+    from the solver.
     """
     return build_requirements_token(opts=opts)

@@ -2,11 +2,10 @@
 """Tests for OpenAI Conversations credentials and Sentinel helpers.
 
 Covers:
-  - build_sentinel_req_body: JSON shape with p, id, flow keys
-  - build_sentinel_token_header: compact JSON with p, t, c, id, flow (in order)
+  - build_prepare_body / build_finalize_body: chat-requirements request shapes
   - decode_jwt_exp_ms + is_expired: JWT expiry decoding and skew
   - OpenAIConversationsCredentialState load / round-trip / unknown-sibling preservation
-  - Schema has none of the forbidden fields (x_oai_is, x_conduit_token, etc.)
+  - Schema carries chat_req_token/proof_token and none of the legacy/forbidden fields
   - OpenAIConversationsAuthSource: parses through Provider.auth, resolve() returns token
   - parse_auth_source dispatches type: openai_conversations
 """
@@ -14,6 +13,7 @@ Covers:
 from __future__ import annotations
 
 import base64
+import dataclasses
 import json
 import stat
 import time
@@ -34,80 +34,34 @@ from ccproxy.openai_conversations.credentials import (
     update_sentinel_fields,
 )
 from ccproxy.openai_conversations.sentinel import (
-    build_sentinel_req_body,
-    build_sentinel_token_header,
+    build_finalize_body,
+    build_prepare_body,
     decode_jwt_exp_ms,
     is_expired,
 )
 
 # ---------------------------------------------------------------------------
-# build_sentinel_req_body
+# build_prepare_body / build_finalize_body
 # ---------------------------------------------------------------------------
 
 
-def test_sentinel_req_body_has_p_id_flow_keys() -> None:
-    """build_sentinel_req_body must return JSON with exactly p, id, flow."""
-    body = build_sentinel_req_body(
-        p="gAAAAACrequirements~S",
-        device_id="device-uuid-1234",
-        flow="conversation",
-    )
-    parsed = json.loads(body)
-    assert set(parsed.keys()) == {"p", "id", "flow"}
-    assert parsed["p"] == "gAAAAACrequirements~S"
-    assert parsed["id"] == "device-uuid-1234"
-    assert parsed["flow"] == "conversation"
+def test_prepare_body_has_only_p_key() -> None:
+    """build_prepare_body returns exactly {"p": <token>} (sentinel.rs:118)."""
+    body = build_prepare_body("gAAAAACrequirements")
+    assert body == {"p": "gAAAAACrequirements"}
 
 
-def test_sentinel_req_body_default_flow() -> None:
-    """Default flow is 'conversation'."""
-    body = build_sentinel_req_body(p="tok", device_id="did")
-    parsed = json.loads(body)
-    assert parsed["flow"] == "conversation"
+def test_finalize_body_includes_proof_when_present() -> None:
+    """build_finalize_body includes proofofwork when proof is non-empty."""
+    body = build_finalize_body(prepare_token="prep-tok", proof="gAAAAABproof~S")
+    assert body == {"prepare_token": "prep-tok", "proofofwork": "gAAAAABproof~S"}
 
 
-def test_sentinel_req_body_is_compact_json() -> None:
-    """build_sentinel_req_body must not include extra whitespace."""
-    body = build_sentinel_req_body(p="p", device_id="id", flow="conversation")
-    assert " " not in body
-    assert "\n" not in body
-
-
-# ---------------------------------------------------------------------------
-# build_sentinel_token_header
-# ---------------------------------------------------------------------------
-
-
-def test_sentinel_token_header_key_order_p_t_c_id_flow() -> None:
-    """openai-sentinel-token must serialize as compact JSON with keys p,t,c,id,flow."""
-    header = build_sentinel_token_header(
-        p="gAAAAACrequirements~S",
-        turnstile_token="",
-        sentinel_token="server-token-abc",
-        device_id="device-uuid-5678",
-        flow="conversation",
-    )
-    parsed = json.loads(header)
-    assert list(parsed.keys()) == ["p", "t", "c", "id", "flow"]
-    assert parsed["p"] == "gAAAAACrequirements~S"
-    assert parsed["t"] == ""
-    assert parsed["c"] == "server-token-abc"
-    assert parsed["id"] == "device-uuid-5678"
-    assert parsed["flow"] == "conversation"
-
-
-def test_sentinel_token_header_is_compact_json() -> None:
-    """No whitespace in the serialized header value."""
-    header = build_sentinel_token_header(p="p", turnstile_token="t", sentinel_token="c", device_id="id")
-    assert " " not in header
-    assert "\n" not in header
-
-
-def test_sentinel_token_header_default_flow() -> None:
-    """Default flow is 'conversation'."""
-    header = build_sentinel_token_header(p="p", turnstile_token="", sentinel_token="c", device_id="id")
-    parsed = json.loads(header)
-    assert parsed["flow"] == "conversation"
+def test_finalize_body_omits_proof_when_empty() -> None:
+    """build_finalize_body omits proofofwork entirely when no PoW was required."""
+    body = build_finalize_body(prepare_token="prep-tok", proof="")
+    assert body == {"prepare_token": "prep-tok"}
+    assert "proofofwork" not in body
 
 
 # ---------------------------------------------------------------------------
@@ -210,25 +164,21 @@ def test_load_credential_state_returns_state_for_valid_file(tmp_path: Path) -> N
         path=creds_path,
         data={
             "access_token": "bearer.jwt.token",
-            "sentinel_token": "server-c-token",
-            "sentinel_p_token": "gAAAAACrequirements~S",
-            "sentinel_expires_at_ms": 1_800_000_000_000,
-            "sentinel_flow": "conversation",
-            "sentinel_so_token": "",
-            "persona": "chatgpt-paid",
             "device_id": "uuid-1234-5678",
+            "persona": "chatgpt-paid",
+            "chat_req_token": "finalize.jwt.token",
+            "proof_token": "gAAAAABproof~S",
+            "chat_req_token_expires_at_ms": 1_800_000_000_000,
         },
     )
     state = load_credential_state(path=creds_path)
     assert state is not None
     assert state.access_token == "bearer.jwt.token"
-    assert state.sentinel_token == "server-c-token"
-    assert state.sentinel_p_token == "gAAAAACrequirements~S"
-    assert state.sentinel_expires_at_ms == 1_800_000_000_000
-    assert state.sentinel_flow == "conversation"
-    assert state.sentinel_so_token == ""
-    assert state.persona == "chatgpt-paid"
     assert state.device_id == "uuid-1234-5678"
+    assert state.persona == "chatgpt-paid"
+    assert state.chat_req_token == "finalize.jwt.token"
+    assert state.proof_token == "gAAAAABproof~S"
+    assert state.chat_req_token_expires_at_ms == 1_800_000_000_000
 
 
 def test_load_credential_state_missing_file_returns_none(tmp_path: Path) -> None:
@@ -247,7 +197,7 @@ def test_load_credential_state_corrupt_json_returns_none(tmp_path: Path) -> None
 def test_load_credential_state_missing_access_token_returns_none(tmp_path: Path) -> None:
     """File without access_token returns None."""
     creds_path = tmp_path / "no-token.json"
-    _write_creds(path=creds_path, data={"sentinel_token": "tok"})
+    _write_creds(path=creds_path, data={"device_id": "uuid", "chat_req_token": "tok"})
     assert load_credential_state(path=creds_path) is None
 
 
@@ -272,52 +222,54 @@ def test_load_credential_state_preserves_unknown_sibling_fields(tmp_path: Path) 
 
 
 def test_to_dict_round_trips_all_known_fields(tmp_path: Path) -> None:
-    """to_dict() returns all eight canonical credential fields."""
+    """to_dict() returns all six canonical credential fields."""
     creds_path = tmp_path / "creds.json"
     _write_creds(
         path=creds_path,
         data={
             "access_token": "tok",
-            "sentinel_token": "stok",
-            "sentinel_p_token": "ptok",
-            "sentinel_expires_at_ms": 12345,
-            "sentinel_flow": "chatgpt",
-            "sentinel_so_token": "so",
-            "persona": "chatgpt-free",
             "device_id": "did-abc",
+            "persona": "chatgpt-free",
+            "chat_req_token": "crtok",
+            "proof_token": "gAAAAABproof~S",
+            "chat_req_token_expires_at_ms": 12345,
         },
     )
     state = load_credential_state(path=creds_path)
     assert state is not None
     out = state.to_dict()
     assert out["access_token"] == "tok"
-    assert out["sentinel_token"] == "stok"
-    assert out["sentinel_p_token"] == "ptok"
-    assert out["sentinel_expires_at_ms"] == 12345
-    assert out["sentinel_flow"] == "chatgpt"
-    assert out["sentinel_so_token"] == "so"
-    assert out["persona"] == "chatgpt-free"
     assert out["device_id"] == "did-abc"
+    assert out["persona"] == "chatgpt-free"
+    assert out["chat_req_token"] == "crtok"
+    assert out["proof_token"] == "gAAAAABproof~S"
+    assert out["chat_req_token_expires_at_ms"] == 12345
 
 
-def test_credential_state_has_no_forbidden_fields() -> None:
-    """OpenAIConversationsCredentialState has none of the forbidden field names."""
-    import dataclasses
-
+def test_credential_state_schema_fields() -> None:
+    """Schema carries the live chat-requirements fields and no legacy/forbidden ones."""
     field_names = {f.name for f in dataclasses.fields(OpenAIConversationsCredentialState)}
-    forbidden = {
-        "x_oai_is",
-        "x_conduit_token",
-        "oai_is",
-        "turnstile_token",
-        "oai_telemetry",
+
+    # Live chat-requirements fields must be present.
+    assert {"chat_req_token", "proof_token", "chat_req_token_expires_at_ms"} <= field_names
+
+    # Legacy /sentinel/req-era fields must be gone.
+    legacy = {
+        "sentinel_token",
+        "sentinel_p_token",
+        "sentinel_flow",
+        "sentinel_so_token",
+        "sentinel_expires_at_ms",
     }
-    overlap = field_names & forbidden
-    assert overlap == set(), f"Forbidden fields present: {overlap}"
+    assert field_names.isdisjoint(legacy), f"legacy fields present: {field_names & legacy}"
+
+    # Request/cookie-derived fields must never be schema fields.
+    forbidden = {"x_oai_is", "x_conduit_token", "oai_is", "turnstile_token", "oai_telemetry"}
+    assert field_names.isdisjoint(forbidden), f"forbidden fields present: {field_names & forbidden}"
 
 
 def test_update_sentinel_fields_writes_and_preserves_siblings(tmp_path: Path) -> None:
-    """update_sentinel_fields atomically updates sentinel fields, preserving sibling fields."""
+    """update_sentinel_fields atomically updates chat-requirements fields, preserving siblings."""
     creds_path = tmp_path / "creds.json"
     _write_creds(
         path=creds_path,
@@ -325,39 +277,54 @@ def test_update_sentinel_fields_writes_and_preserves_siblings(tmp_path: Path) ->
             "access_token": "jwt-bearer",
             "device_id": "uuid-123",
             "persona": "chatgpt-paid",
-            "sentinel_token": "",
-            "sentinel_p_token": "",
-            "sentinel_expires_at_ms": 0,
-            "sentinel_flow": "conversation",
-            "sentinel_so_token": "",
+            "chat_req_token": "",
+            "proof_token": "",
+            "chat_req_token_expires_at_ms": 0,
             "custom_extra": "preserve-me",
         },
     )
     result = update_sentinel_fields(
         path=creds_path,
-        sentinel_token="new-server-token",
-        sentinel_p_token="gAAAAABproof~S",
-        sentinel_expires_at_ms=1_800_000_000_000,
-        sentinel_flow="conversation",
-        sentinel_so_token="so-tok",
+        chat_req_token="new-finalize-token",
+        proof_token="gAAAAABproof~S",
+        chat_req_token_expires_at_ms=1_800_000_000_000,
+        persona="chatgpt-paid",
     )
     assert result is True
     on_disk = json.loads(creds_path.read_text())
-    assert on_disk["sentinel_token"] == "new-server-token"
-    assert on_disk["sentinel_p_token"] == "gAAAAABproof~S"
-    assert on_disk["sentinel_expires_at_ms"] == 1_800_000_000_000
-    assert on_disk["sentinel_so_token"] == "so-tok"
+    assert on_disk["chat_req_token"] == "new-finalize-token"
+    assert on_disk["proof_token"] == "gAAAAABproof~S"
+    assert on_disk["chat_req_token_expires_at_ms"] == 1_800_000_000_000
+    assert on_disk["persona"] == "chatgpt-paid"
     assert on_disk["access_token"] == "jwt-bearer"
     assert on_disk["custom_extra"] == "preserve-me"
+
+
+def test_update_sentinel_fields_skips_persona_when_empty(tmp_path: Path) -> None:
+    """An empty persona argument leaves the existing on-disk persona untouched."""
+    creds_path = tmp_path / "creds.json"
+    _write_creds(
+        path=creds_path,
+        data={"access_token": "jwt", "device_id": "uuid", "persona": "chatgpt-paid"},
+    )
+    update_sentinel_fields(
+        path=creds_path,
+        chat_req_token="tok",
+        proof_token="p",
+        chat_req_token_expires_at_ms=1,
+        persona="",
+    )
+    on_disk = json.loads(creds_path.read_text())
+    assert on_disk["persona"] == "chatgpt-paid"
 
 
 def test_update_sentinel_fields_missing_file_returns_false(tmp_path: Path) -> None:
     """update_sentinel_fields returns False when the credential file is missing."""
     result = update_sentinel_fields(
         path=tmp_path / "missing.json",
-        sentinel_token="tok",
-        sentinel_p_token="p",
-        sentinel_expires_at_ms=0,
+        chat_req_token="tok",
+        proof_token="p",
+        chat_req_token_expires_at_ms=0,
     )
     assert result is False
 
@@ -371,9 +338,9 @@ def test_update_sentinel_fields_writes_with_mode_0600(tmp_path: Path) -> None:
     )
     update_sentinel_fields(
         path=creds_path,
-        sentinel_token="tok",
-        sentinel_p_token="p",
-        sentinel_expires_at_ms=12345,
+        chat_req_token="tok",
+        proof_token="p",
+        chat_req_token_expires_at_ms=12345,
     )
     mode = creds_path.stat().st_mode & 0o777
     assert mode == stat.S_IRUSR | stat.S_IWUSR
