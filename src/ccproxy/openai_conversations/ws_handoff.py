@@ -324,19 +324,56 @@ def _parse_ws_frames(raw: bytes) -> list[dict[str, Any]]:
 def _decode_encoded_item(encoded: str) -> str:
     """Return the SSE text carried by an ``encoded_item``.
 
-    In captured fixtures the value is already a plaintext SSE line
-    (``data: {...}``). The live wire may base64-encode it (the SPA decodes via
-    ``_Nn``); both are tolerated. The exact on-wire encoding is pending live
-    confirmation — every raw frame is preserved verbatim by the capture sink, so
-    a wrong guess here never loses data.
+    Tolerates every shape we've seen or expect, falling back to the original
+    string so nothing is lost (the capture sink preserves the raw frame anyway):
+
+    * plaintext SSE line (``data: {...}`` / ``event: …``) — captured fixtures;
+    * base64 of an SSE line;
+    * the SPA ``_Nn`` shape — a JSON ``{event, data}`` object (raw or
+      base64-wrapped) that re-wraps the SSE-v1 payload in its ``data`` field;
+      reconstructed into an ``event:``/``data:`` SSE line.
     """
     if encoded.lstrip().startswith(("data:", "event:")):
         return encoded
+
     try:
-        decoded = base64.b64decode(encoded, validate=True).decode("utf-8")
+        candidate = base64.b64decode(encoded, validate=True).decode("utf-8")
     except (ValueError, UnicodeDecodeError):
-        return encoded
-    return decoded if decoded.lstrip().startswith(("data:", "event:")) else encoded
+        candidate = encoded
+
+    if candidate.lstrip().startswith(("data:", "event:")):
+        return candidate
+
+    sse = _sse_from_event_data(candidate)
+    return sse if sse is not None else encoded
+
+
+def _sse_from_event_data(text: str) -> str | None:
+    """Reconstruct an SSE line from a JSON ``{event, data}`` object.
+
+    Mirrors the chatgpt.com SPA ``_Nn`` decode → ``{event, data}`` → the SSE-v1
+    patch is ``data``. Returns ``None`` when ``text`` is not such an object.
+    """
+    if not text.lstrip().startswith("{"):
+        return None
+    try:
+        obj = json.loads(text)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(obj, dict) or "data" not in obj:
+        return None
+    data = obj["data"]
+    if not isinstance(data, str):
+        try:
+            data = json.dumps(data)
+        except (TypeError, ValueError):
+            return None
+    event = obj.get("event")
+    lines = []
+    if isinstance(event, str) and event:
+        lines.append(f"event: {event}")
+    lines.append(f"data: {data}")
+    return "\n".join(lines) + "\n\n"
 
 
 def _walk_sse_items(obj: Any, topic: str | None = None) -> list[tuple[str | None, str]]:
@@ -519,6 +556,7 @@ async def _stream_handoff_sse_impl(
                     # so non-turn / unhandled events stay inspectable.
                     capture.record(topic=topic_id, raw=raw_text, forwarded=forwarded_here)
                     logger.debug("ws_handoff: WS msg: %d frame(s), forwarded=%d", len(frames), forwarded_here)
+                    logger.debug("ws_handoff: RAWFRAME %s", raw_text)
                     if done:
                         logger.debug("ws_handoff: WS done, yielded=%d items (topic=%s)", yielded, topic_id)
                         return

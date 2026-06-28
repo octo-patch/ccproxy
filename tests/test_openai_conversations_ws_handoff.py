@@ -411,10 +411,35 @@ class TestDecodeEncodedItem:
         assert _decode_encoded_item(encoded) == raw
 
     def test_base64_of_non_sse_passthrough(self) -> None:
-        # base64 that decodes to non-SSE text is returned verbatim (intake drops it;
-        # the raw frame is preserved by the capture sink for inspection).
+        # base64 that decodes to a non-{event,data} blob is returned verbatim
+        # (intake drops it; the raw frame is preserved by the capture sink).
         encoded = base64.b64encode(b'{"foo": 1}').decode()
         assert _decode_encoded_item(encoded) == encoded
+
+    def test_event_data_object_reconstructed(self) -> None:
+        # The SPA _Nn shape: a JSON {event, data} object wrapping the SSE payload.
+        patch = json.dumps({"p": "/message/content/text", "o": "append", "v": "hi"})
+        raw = json.dumps({"event": "delta", "data": patch})
+        assert _decode_encoded_item(raw) == f"event: delta\ndata: {patch}\n\n"
+
+    def test_base64_event_data_object_reconstructed(self) -> None:
+        patch = json.dumps({"v": "tok"})
+        raw = json.dumps({"event": "delta", "data": patch})
+        encoded = base64.b64encode(raw.encode()).decode()
+        assert _decode_encoded_item(encoded) == f"event: delta\ndata: {patch}\n\n"
+
+    def test_data_only_object_reconstructed(self) -> None:
+        # No event field → just a data: line.
+        assert _decode_encoded_item('{"data": "[DONE]"}') == "data: [DONE]\n\n"
+        assert _is_done_item(_decode_encoded_item('{"data": "[DONE]"}')) is True
+
+    def test_event_data_with_object_data_serialized(self) -> None:
+        # data may already be a parsed object → serialized back into the data: line.
+        out = _decode_encoded_item('{"event": "delta", "data": {"v": "x"}}')
+        assert out == 'event: delta\ndata: {"v": "x"}\n\n'
+
+    def test_json_without_data_field_passthrough(self) -> None:
+        assert _decode_encoded_item('{"foo": 1}') == '{"foo": 1}'
 
 
 class TestTopicMatches:
