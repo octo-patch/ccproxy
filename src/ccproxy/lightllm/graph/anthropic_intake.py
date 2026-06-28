@@ -117,6 +117,16 @@ class _AnthropicIntakeState:
     events_queue: deque[BetaRawMessageStreamEvent] = field(default_factory=deque)
     out_events: list[ModelResponseStreamEvent] = field(default_factory=list)
 
+    # ── Telemetry (never-silently-drop diagnostics) ───────────────────────────
+    frames_seen: int = 0
+    """Total typed SSE events drained from the wire (across all feed calls)."""
+
+    frames_unparseable: int = 0
+    """SSE frames whose ``data:`` payload failed ``BetaRawMessageStreamEvent`` validation."""
+
+    emitted_events: int = 0
+    """Total IR ``ModelResponseStreamEvent`` instances emitted (across all feed calls)."""
+
 
 class _FeedDone:
     """Marker returned by the router when the events queue is exhausted."""
@@ -561,6 +571,7 @@ async def emit_done(
 ) -> list[ModelResponseStreamEvent]:
     """Terminal step — drain the accumulated IR events and reset for the next feed."""
     out = ctx.state.out_events
+    ctx.state.emitted_events += len(out)
     ctx.state.out_events = []
     return out
 
@@ -625,6 +636,11 @@ class AnthropicResponseIntakeFSM:
         """Expose the underlying parts manager for tests and downstream renderers."""
         return self._state.parts_manager
 
+    @property
+    def state(self) -> _AnthropicIntakeState:
+        """Expose FSM state for tests and telemetry inspection."""
+        return self._state
+
     async def feed(self, data: bytes) -> list[ModelResponseStreamEvent]:
         """Buffer bytes, frame SSE events, drive the FSM, return emitted IR events."""
         self.upstream_raw_bytes.extend(data)
@@ -634,6 +650,7 @@ class AnthropicResponseIntakeFSM:
         # Drain complete SSE frames into typed Anthropic events.
         for raw_event in self._drain_sse_events():
             self._state.events_queue.append(raw_event)
+            self._state.frames_seen += 1
         # If there were no complete frames, short-circuit — the graph run would
         # produce no events.
         if not self._state.events_queue:
@@ -642,7 +659,19 @@ class AnthropicResponseIntakeFSM:
         return result
 
     async def close(self) -> list[ModelResponseStreamEvent]:
-        """Stream end. ``message_stop`` already closes everything; nothing to flush."""
+        """Stream end. ``message_stop`` already closes everything; nothing to flush.
+
+        Emits a telemetry warning when the stream carried events but produced no
+        IR output — a silent empty Anthropic turn must be explainable from logs.
+        """
+        s = self._state
+        if s.frames_seen and not s.emitted_events:
+            logger.warning(
+                "anthropic intake produced NO IR events after %d frame(s) "
+                "(unparseable=%d) — the upstream stream carried no renderable content",
+                s.frames_seen,
+                s.frames_unparseable,
+            )
         return []
 
     def _drain_sse_events(self) -> Iterator[BetaRawMessageStreamEvent]:
@@ -671,6 +700,7 @@ class AnthropicResponseIntakeFSM:
             try:
                 yield _EVENT_ADAPTER.validate_json(payload)
             except ValidationError:
+                self._state.frames_unparseable += 1
                 logger.debug("anthropic intake: skipping unparseable frame", exc_info=True)
 
     @staticmethod

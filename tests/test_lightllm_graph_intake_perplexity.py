@@ -637,3 +637,58 @@ def test_separate_text_and_thinking_parts_emitted(intake_factory: _IntakeFactory
     events = _collect_feed(intake, _sse_payload(event))
     assert _final_text(events) == "OK"
     assert _final_thinking(events) == "searching"
+
+
+class TestSilentDropTelemetry:
+    """Never-silently-drop diagnostics for the Perplexity intake.
+
+    Drives the real async FSM directly so the state-level telemetry counters
+    are observable.
+    """
+
+    @staticmethod
+    def _run(fsm: PerplexityResponseIntakeFSM, data: bytes) -> None:
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(fsm.feed(data))
+            loop.run_until_complete(fsm.close())
+        finally:
+            loop.close()
+
+    def test_contentless_event_stream_emits_no_ir_warns(self, caplog: pytest.LogCaptureFixture) -> None:
+        """Events carrying only identifiers (no blocks → no answer) parse fine but
+        emit ZERO IR events — the intake must WARN, never go silent."""
+        fsm = PerplexityResponseIntakeFSM(model="perplexity/best", request_params=ModelRequestParameters())
+        stream = _sse_payload({"backend_uuid": "be-1"}) + _sse_payload(
+            {"backend_uuid": "be-1", "final_sse_message": True}
+        )
+        with caplog.at_level("WARNING", logger="ccproxy.lightllm.graph.perplexity_intake"):
+            self._run(fsm, stream)
+        assert fsm.state.frames_seen >= 1
+        assert fsm.state.emitted_events == 0
+        assert "produced NO IR events" in caplog.text
+
+    def test_clean_answer_stream_emits_no_warning(self, caplog: pytest.LogCaptureFixture) -> None:
+        fsm = PerplexityResponseIntakeFSM(model="perplexity/best", request_params=ModelRequestParameters())
+        event = {
+            "blocks": [
+                {
+                    "intended_usage": "ask_text_0_markdown",
+                    "diff_block": {
+                        "field": "markdown_block",
+                        "patches": [{"path": "/markdown_block", "value": {"answer": "Hello world."}}],
+                    },
+                }
+            ]
+        }
+        with caplog.at_level("WARNING", logger="ccproxy.lightllm.graph.perplexity_intake"):
+            self._run(fsm, _sse_payload(event))
+        assert fsm.state.emitted_events >= 1
+        assert "produced NO IR events" not in caplog.text
+
+    def test_unparseable_frame_is_logged(self, caplog: pytest.LogCaptureFixture) -> None:
+        fsm = PerplexityResponseIntakeFSM(model="perplexity/best", request_params=ModelRequestParameters())
+        stream = b"data: {not valid\n\n"
+        with caplog.at_level("DEBUG", logger="ccproxy.lightllm.graph.perplexity_intake"):
+            self._run(fsm, stream)
+        assert "unparseable SSE data frame" in caplog.text

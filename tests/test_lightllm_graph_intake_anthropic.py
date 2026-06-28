@@ -570,3 +570,88 @@ def test_unparseable_frame_is_skipped_without_crashing(
         events = list(intake.feed(bad))
     assert events == []
     assert any("skipping unparseable frame" in r.message for r in caplog.records)
+
+
+class TestSilentDropTelemetry:
+    """Never-silently-drop diagnostics for the Anthropic intake.
+
+    Drives the real async FSM directly so the state-level telemetry counters
+    are observable.
+    """
+
+    @staticmethod
+    def _run(fsm: AnthropicResponseIntakeFSM, data: bytes) -> None:
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(fsm.feed(data))
+            loop.run_until_complete(fsm.close())
+        finally:
+            loop.close()
+
+    def test_envelope_only_stream_emits_no_ir_warns(self, caplog: pytest.LogCaptureFixture) -> None:
+        """A ``message_start`` + ``message_stop`` with no content blocks parses
+        frames but emits ZERO IR events — the intake must WARN, never go silent."""
+        fsm = AnthropicResponseIntakeFSM(model="claude", request_params=ModelRequestParameters())
+        stream = _frames(
+            [
+                {
+                    "type": "message_start",
+                    "message": {
+                        "id": "msg_1",
+                        "type": "message",
+                        "role": "assistant",
+                        "model": "claude",
+                        "content": [],
+                        "stop_reason": None,
+                        "stop_sequence": None,
+                        "usage": {"input_tokens": 1, "output_tokens": 0},
+                    },
+                },
+                {"type": "message_stop"},
+            ]
+        )
+        with caplog.at_level("WARNING", logger="ccproxy.lightllm.graph.anthropic_intake"):
+            self._run(fsm, stream)
+        assert fsm.state.frames_seen >= 1
+        assert fsm.state.emitted_events == 0
+        assert "produced NO IR events" in caplog.text
+
+    def test_clean_text_stream_emits_no_warning(self, caplog: pytest.LogCaptureFixture) -> None:
+        fsm = AnthropicResponseIntakeFSM(model="claude", request_params=ModelRequestParameters())
+        stream = _frames(
+            [
+                {
+                    "type": "message_start",
+                    "message": {
+                        "id": "msg_1",
+                        "type": "message",
+                        "role": "assistant",
+                        "model": "claude",
+                        "content": [],
+                        "stop_reason": None,
+                        "stop_sequence": None,
+                        "usage": {"input_tokens": 1, "output_tokens": 0},
+                    },
+                },
+                {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}},
+                {
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": {"type": "text_delta", "text": "hello"},
+                },
+                {"type": "content_block_stop", "index": 0},
+                {"type": "message_stop"},
+            ]
+        )
+        with caplog.at_level("WARNING", logger="ccproxy.lightllm.graph.anthropic_intake"):
+            self._run(fsm, stream)
+        assert fsm.state.emitted_events >= 1
+        assert "produced NO IR events" not in caplog.text
+
+    def test_unparseable_frame_is_counted(self, caplog: pytest.LogCaptureFixture) -> None:
+        fsm = AnthropicResponseIntakeFSM(model="claude", request_params=ModelRequestParameters())
+        stream = b"event: garbage\ndata: {not json\n\n"
+        with caplog.at_level("DEBUG", logger="ccproxy.lightllm.graph.anthropic_intake"):
+            self._run(fsm, stream)
+        assert fsm.state.frames_unparseable >= 1
+        assert "unparseable frame" in caplog.text

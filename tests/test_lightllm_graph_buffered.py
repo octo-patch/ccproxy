@@ -502,3 +502,60 @@ class TestErrorPaths:
         # Empty body → no parts → a valid but empty ChatCompletion envelope.
         assert out["object"] == "chat.completion"
         assert out["choices"][0]["message"]["content"] is None
+
+
+class TestSilentDropTelemetry:
+    """The buffered transform must surface a WARNING when it assembles a
+    contentless object — a silent empty buffered response must be explainable."""
+
+    def test_render_parts_to_listener_empty_parts_warns(self, caplog: pytest.LogCaptureFixture) -> None:
+        from ccproxy.lightllm.graph.buffered import render_parts_to_listener
+
+        with caplog.at_level("WARNING", logger="ccproxy.lightllm.graph.buffered"):
+            out = render_parts_to_listener(parts=[], inbound_format=InboundFormat.OPENAI_CHAT, model="gpt-4o")
+        assert "CONTENTLESS" in caplog.text
+        # Still produces a valid (empty-content) object — additive logging only.
+        decoded = json.loads(out)
+        assert decoded["object"] == "chat.completion"
+        assert decoded["choices"][0]["message"]["content"] is None
+
+    def test_render_parts_to_listener_with_parts_no_warning(self, caplog: pytest.LogCaptureFixture) -> None:
+        from pydantic_ai.messages import TextPart
+
+        from ccproxy.lightllm.graph.buffered import render_parts_to_listener
+
+        with caplog.at_level("WARNING", logger="ccproxy.lightllm.graph.buffered"):
+            render_parts_to_listener(
+                parts=[TextPart(content="hi")], inbound_format=InboundFormat.OPENAI_CHAT, model="gpt-4o"
+            )
+        assert "CONTENTLESS" not in caplog.text
+
+    def test_empty_synthetic_sse_warns(self, caplog: pytest.LogCaptureFixture) -> None:
+        """An OpenAI body with no ``choices`` synthesizes EMPTY SSE — the transform
+        must WARN that nothing renderable could be built from the upstream bytes."""
+        with caplog.at_level("WARNING", logger="ccproxy.lightllm.graph.buffered"):
+            transform_buffered_response_sync(
+                raw_bytes=json.dumps({"id": "x", "object": "chat.completion", "choices": []}).encode(),
+                provider_type="openai",
+                inbound_format=InboundFormat.OPENAI_CHAT,
+                model="gpt-4o",
+                request_params=ModelRequestParameters(),
+            )
+        assert "EMPTY synthetic SSE" in caplog.text
+
+    def test_unparseable_body_produces_contentless_object_warns(self, caplog: pytest.LogCaptureFixture) -> None:
+        """An unparseable upstream body coerces to ``{}``; the synthesized stream
+        carries no content, so the transform assembles a CONTENTLESS object — the
+        client never gets a silent empty response."""
+        with caplog.at_level("WARNING", logger="ccproxy.lightllm.graph.buffered"):
+            out_bytes = transform_buffered_response_sync(
+                raw_bytes=b"not json at all",
+                provider_type="anthropic",
+                inbound_format=InboundFormat.OPENAI_CHAT,
+                model="claude-3",
+                request_params=ModelRequestParameters(),
+            )
+        assert "CONTENTLESS" in caplog.text
+        # The transform still returns a well-formed (empty) object.
+        decoded = json.loads(out_bytes)
+        assert decoded["object"] == "chat.completion"

@@ -600,3 +600,48 @@ class TestWireFormat:
         assert len(starts) == 1
         assert starts[0][1].content == "first"
         assert any("2 choices" in r.message for r in caplog.records)
+
+
+class TestSilentDropTelemetry:
+    """Never-silently-drop diagnostics for the OpenAI Chat intake.
+
+    Drives the real async FSM directly (not the sync adapter) so the
+    state-level telemetry counters are observable.
+    """
+
+    @staticmethod
+    def _run(fsm: OpenAIResponseIntakeFSM, data: bytes) -> None:
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(fsm.feed(data))
+            loop.run_until_complete(fsm.close())
+        finally:
+            loop.close()
+
+    def test_usage_only_stream_emits_no_text_warns(self, caplog: pytest.LogCaptureFixture) -> None:
+        """A stream of only usage-only (no-choices) chunks parses frames but emits
+        ZERO IR events — the intake must surface a WARNING, never a silent empty turn."""
+        fsm = OpenAIResponseIntakeFSM(model="gpt-4o", request_params=ModelRequestParameters())
+        stream = _build_stream([_chunk(no_choices=True), _chunk(no_choices=True), "[DONE]"])
+        with caplog.at_level("WARNING", logger="ccproxy.lightllm.graph.openai_intake"):
+            self._run(fsm, stream)
+        assert fsm.state.frames_seen >= 1
+        assert fsm.state.emitted_events == 0
+        assert "produced NO IR events" in caplog.text
+
+    def test_clean_text_stream_emits_no_warning(self, caplog: pytest.LogCaptureFixture) -> None:
+        fsm = OpenAIResponseIntakeFSM(model="gpt-4o", request_params=ModelRequestParameters())
+        stream = _build_stream([_chunk(delta={"content": "hello"}), _chunk(finish_reason="stop"), "[DONE]"])
+        with caplog.at_level("WARNING", logger="ccproxy.lightllm.graph.openai_intake"):
+            self._run(fsm, stream)
+        assert fsm.state.emitted_events >= 1
+        assert "produced NO IR events" not in caplog.text
+
+    def test_unparseable_frame_is_counted(self, caplog: pytest.LogCaptureFixture) -> None:
+        """A garbage data frame is dropped but counted + logged, never silent."""
+        fsm = OpenAIResponseIntakeFSM(model="gpt-4o", request_params=ModelRequestParameters())
+        stream = b"data: {not valid json\n\n" + _build_stream([_chunk(delta={"content": "ok"}), "[DONE]"])
+        with caplog.at_level("DEBUG", logger="ccproxy.lightllm.graph.openai_intake"):
+            self._run(fsm, stream)
+        assert fsm.state.frames_unparseable >= 1
+        assert "unparseable chunk" in caplog.text

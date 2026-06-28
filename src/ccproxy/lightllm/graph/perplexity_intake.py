@@ -151,6 +151,13 @@ class _PerplexityIntakeState:
     events_queue: deque[Any] = field(default_factory=deque)
     out_events: list[ModelResponseStreamEvent] = field(default_factory=list)
 
+    # ── Telemetry (never-silently-drop diagnostics) ───────────────────────────
+    frames_seen: int = 0
+    """Total parsed SSE event envelopes drained from the wire (across all feed calls)."""
+
+    emitted_events: int = 0
+    """Total IR ``ModelResponseStreamEvent`` instances emitted (across all feed calls)."""
+
     # ── Per-event scratch (reset by flush_event_deltas) ────────────────────
 
     has_plan_block: bool = False
@@ -573,6 +580,7 @@ async def emit_done(
 ) -> list[ModelResponseStreamEvent]:
     """Terminal step — drain the accumulated IR events and reset for the next feed."""
     out = ctx.state.out_events
+    ctx.state.emitted_events += len(out)
     ctx.state.out_events = []
     return out
 
@@ -637,13 +645,27 @@ class PerplexityResponseIntakeFSM:
         self._sse_buffer.extend(data)
         for envelope in self._drain_sse_envelopes():
             self._state.events_queue.append(envelope)
+            self._state.frames_seen += 1
         if not self._state.events_queue:
             return []
         result = await _intake_graph.run(state=self._state)
         return result
 
     async def close(self) -> list[ModelResponseStreamEvent]:
-        """Stream end. No trailing events required — parts_manager keeps state."""
+        """Stream end. No trailing events required — parts_manager keeps state.
+
+        Emits a telemetry warning when the stream carried events but produced no
+        IR output — a silent empty Perplexity turn must be explainable from logs.
+        """
+        s = self._state
+        if s.frames_seen and not s.emitted_events:
+            logger.warning(
+                "pplx intake produced NO IR events after %d event(s) "
+                "(final=%s ids=%s) — the upstream stream carried no renderable content",
+                s.frames_seen,
+                s.final,
+                sorted(s.ids.keys()),
+            )
         return []
 
     def _drain_sse_envelopes(self) -> Iterator[_PerplexityEventEnvelope]:
@@ -686,6 +708,10 @@ def _parse_frame(frame: bytes) -> dict[str, Any] | None:
         try:
             parsed = json.loads(payload)
         except json.JSONDecodeError:
+            logger.debug("pplx intake: dropped unparseable SSE data frame (%d bytes): %.160r", len(payload), payload)
             return None
-        return parsed if isinstance(parsed, dict) else None
+        if not isinstance(parsed, dict):
+            logger.debug("pplx intake: dropped non-object SSE data frame: %.160r", payload)
+            return None
+        return parsed
     return None

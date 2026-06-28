@@ -545,3 +545,72 @@ class TestChunkBoundaries:
         assert [part.content for _, part in _text_starts(events)] == ["a"]
         assert [delta.content_delta for _, delta in _text_deltas(events)] == ["b"]
         assert intake._terminated is True
+
+
+class TestSilentDropTelemetry:
+    """Never-silently-drop diagnostics for the OpenAI Responses intake.
+
+    Drives the real async FSM directly so the state-level telemetry counters
+    are observable.
+    """
+
+    @staticmethod
+    def _run(fsm: OpenAIResponsesIntakeFSM, data: bytes) -> None:
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(fsm.feed(data))
+            loop.run_until_complete(fsm.close())
+        finally:
+            loop.close()
+
+    def test_envelope_only_stream_emits_no_ir_warns(self, caplog: pytest.LogCaptureFixture) -> None:
+        """A stream of only response-envelope events (created/in_progress/completed)
+        with no output items parses frames but emits ZERO IR events — the intake
+        must WARN, never go silent."""
+        base = _base_response()
+        fsm = OpenAIResponsesIntakeFSM(model="gpt-5", request_params=ModelRequestParameters())
+        stream = _build_stream(
+            [
+                resp.ResponseCreatedEvent(response=base, type="response.created", sequence_number=0),
+                resp.ResponseInProgressEvent(response=base, type="response.in_progress", sequence_number=1),
+                resp.ResponseCompletedEvent(response=base, type="response.completed", sequence_number=2),
+            ],
+            done=True,
+        )
+        with caplog.at_level("WARNING", logger="ccproxy.lightllm.graph.openai_responses_intake"):
+            self._run(fsm, stream)
+        assert fsm.state.frames_seen >= 1
+        assert fsm.state.emitted_events == 0
+        assert "produced NO IR events" in caplog.text
+
+    def test_clean_text_stream_emits_no_warning(self, caplog: pytest.LogCaptureFixture) -> None:
+        base = _base_response()
+        fsm = OpenAIResponsesIntakeFSM(model="gpt-5", request_params=ModelRequestParameters())
+        stream = _build_stream(
+            [
+                resp.ResponseCreatedEvent(response=base, type="response.created", sequence_number=0),
+                resp.ResponseTextDeltaEvent(
+                    content_index=0,
+                    delta="Hello",
+                    item_id="msg_001",
+                    output_index=0,
+                    type="response.output_text.delta",
+                    sequence_number=1,
+                    logprobs=[],
+                ),
+                resp.ResponseCompletedEvent(response=base, type="response.completed", sequence_number=2),
+            ],
+            done=True,
+        )
+        with caplog.at_level("WARNING", logger="ccproxy.lightllm.graph.openai_responses_intake"):
+            self._run(fsm, stream)
+        assert fsm.state.emitted_events >= 1
+        assert "produced NO IR events" not in caplog.text
+
+    def test_unparseable_frame_is_counted(self, caplog: pytest.LogCaptureFixture) -> None:
+        fsm = OpenAIResponsesIntakeFSM(model="gpt-5", request_params=ModelRequestParameters())
+        stream = b"event: garbage\ndata: {not json\n\n"
+        with caplog.at_level("DEBUG", logger="ccproxy.lightllm.graph.openai_responses_intake"):
+            self._run(fsm, stream)
+        assert fsm.state.frames_unparseable >= 1
+        assert "unparseable frame" in caplog.text

@@ -316,6 +316,7 @@ def _synthesize_openai_sse(body: dict[str, Any]) -> bytes:
     """
     choices = body.get("choices") or []
     if not choices:
+        logger.debug("buffered transform: ChatCompletion body has no choices; no synthetic SSE")
         return b""
     choice = choices[0]
     message = choice.get("message") or {}
@@ -947,6 +948,12 @@ def render_parts_to_listener(
     and ``finish_reason`` are honored by the OpenAI Chat / Responses renderers
     and ignored by the Anthropic renderer (which derives its own stop reason).
     """
+    if not parts:
+        logger.warning(
+            "buffered render: assembling a CONTENTLESS %s object — the intake produced "
+            "no IR parts; the client receives an empty response",
+            inbound_format,
+        )
     if inbound_format is InboundFormat.OPENAI_CHAT:
         out_dict = _parts_to_openai_chat_completion(
             parts=parts,
@@ -1021,6 +1028,14 @@ def transform_buffered_response_sync(
         # through SSEPipeline (the egress sidecar reconstructs inline OR WS-bridged
         # content), so it never reaches the buffered transform.
         raise UnsupportedUpstreamError(f"no buffered transform for provider_type={provider_type!r}")
+
+    if not synthetic_sse:
+        logger.warning(
+            "buffered transform: provider_type=%s produced EMPTY synthetic SSE from %d "
+            "upstream byte(s) — the buffered body was not parseable; client gets an empty response",
+            provider_type,
+            len(raw_bytes),
+        )
 
     intake = dispatch_intake(
         provider_type=provider_type,

@@ -394,3 +394,58 @@ class TestCollectMode:
         )
         with pytest.raises(ValueError, match="exactly one"):
             SSEPipeline(intake=intake)
+
+
+def _build_anthropic_empty_sse() -> bytes:
+    """Synthetic Anthropic stream with no content blocks — produces no IR text."""
+    events: list[dict[str, Any]] = [
+        {
+            "type": "message_start",
+            "message": {
+                "id": "msg_empty",
+                "type": "message",
+                "role": "assistant",
+                "content": [],
+                "model": "claude-3-5-haiku-20241022",
+                "stop_reason": None,
+                "stop_sequence": None,
+                "usage": {"input_tokens": 1, "output_tokens": 0},
+            },
+        },
+        {
+            "type": "message_delta",
+            "delta": {"stop_reason": "end_turn", "stop_sequence": None},
+            "usage": {"output_tokens": 0},
+        },
+        {"type": "message_stop"},
+    ]
+    return b"".join(_frame(e) for e in events)
+
+
+class TestSilentDropTelemetry:
+    """The pipeline must surface a WARNING when EOS produces no content bytes —
+    a silent empty response (only the SSE terminator) must be explainable."""
+
+    def test_eos_with_no_content_bytes_warns(self, caplog: pytest.LogCaptureFixture) -> None:
+        pipeline = _make_fsm_pipeline(provider_type="anthropic", inbound_format=InboundFormat.OPENAI_CHAT)
+        with caplog.at_level("WARNING", logger="ccproxy.lightllm.graph.sse_pipeline"):
+            _drive_pipeline(pipeline, _build_anthropic_empty_sse(), chunk_size=0)
+            pipeline.close()
+        assert "EOS produced NO content bytes" in caplog.text
+
+    def test_eos_with_content_emits_no_warning(self, caplog: pytest.LogCaptureFixture) -> None:
+        pipeline = _make_fsm_pipeline(provider_type="anthropic", inbound_format=InboundFormat.OPENAI_CHAT)
+        with caplog.at_level("WARNING", logger="ccproxy.lightllm.graph.sse_pipeline"):
+            out = _drive_pipeline(pipeline, _build_anthropic_text_sse("hello"), chunk_size=0)
+            pipeline.close()
+        assert b"hello" in out
+        assert "EOS produced NO content bytes" not in caplog.text
+
+    def test_collect_mode_no_parts_warns(self, caplog: pytest.LogCaptureFixture) -> None:
+        pipeline = _make_collect_pipeline(
+            provider_type="anthropic", inbound_format=InboundFormat.OPENAI_CHAT, model="claude-3-5-haiku-20241022"
+        )
+        with caplog.at_level("WARNING", logger="ccproxy.lightllm.graph.sse_pipeline"):
+            _drive_pipeline(pipeline, _build_anthropic_empty_sse(), chunk_size=0)
+            pipeline.close()
+        assert "assembled NO parts" in caplog.text

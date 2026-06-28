@@ -121,6 +121,16 @@ class _GoogleIntakeState:
     parts_queue: deque[Part] = field(default_factory=deque)
     """Per-chunk queue of ``Part`` instances; drained by the per-chunk subgraph."""
 
+    # ── Telemetry (never-silently-drop diagnostics) ───────────────────────────
+    frames_seen: int = 0
+    """Total ``GenerateContentResponse`` chunks drained from the wire (across all feed calls)."""
+
+    frames_unparseable: int = 0
+    """SSE frames whose payload failed JSON decode or ``GenerateContentResponse`` validation."""
+
+    emitted_events: int = 0
+    """Total IR ``ModelResponseStreamEvent`` instances emitted (across all feed calls)."""
+
 
 # ── Per-chunk dispatch subgraph ─────────────────────────────────────────────
 
@@ -347,6 +357,7 @@ async def emit_done(
 ) -> list[ModelResponseStreamEvent]:
     """Terminal step — drain the accumulated IR events and reset for the next feed."""
     out = ctx.state.out_events
+    ctx.state.emitted_events += len(out)
     ctx.state.out_events = []
     return out
 
@@ -397,6 +408,11 @@ class GoogleResponseIntakeFSM:
         """Expose the underlying parts manager for tests and downstream renderers."""
         return self._state.parts_manager
 
+    @property
+    def state(self) -> _GoogleIntakeState:
+        """Expose FSM state for tests and telemetry inspection."""
+        return self._state
+
     async def feed(self, data: bytes) -> list[ModelResponseStreamEvent]:
         """Buffer bytes, frame SSE events, drive the FSM, return emitted IR events."""
         if not data:
@@ -405,6 +421,7 @@ class GoogleResponseIntakeFSM:
         self._sse_buffer.extend(data)
         for envelope in self._drain_sse_envelopes():
             self._state.events_queue.append(envelope)
+            self._state.frames_seen += 1
         if not self._state.events_queue:
             return []
         result = await _intake_graph.run(state=self._state)
@@ -414,17 +431,29 @@ class GoogleResponseIntakeFSM:
         """Stream end. Drain any complete remaining event in the buffer.
 
         Some servers omit the trailing blank line on the last event; this
-        catches them by treating the tail as a complete frame.
+        catches them by treating the tail as a complete frame. Emits a
+        telemetry warning when the stream carried chunks but produced no IR
+        output — a silent empty Gemini turn must be explainable from logs.
         """
-        if not self._sse_buffer:
-            return []
-        tail = bytes(self._sse_buffer)
-        self._sse_buffer.clear()
-        envelope = self._parse_event(tail)
-        if envelope is None:
-            return []
-        self._state.events_queue.append(envelope)
-        return await _intake_graph.run(state=self._state)
+        out: list[ModelResponseStreamEvent] = []
+        if self._sse_buffer:
+            tail = bytes(self._sse_buffer)
+            self._sse_buffer.clear()
+            envelope = self._parse_event(tail)
+            if envelope is not None:
+                self._state.events_queue.append(envelope)
+                self._state.frames_seen += 1
+                out = await _intake_graph.run(state=self._state)
+
+        s = self._state
+        if s.frames_seen and not s.emitted_events:
+            logger.warning(
+                "google intake produced NO IR events after %d chunk(s) "
+                "(unparseable=%d) — the upstream stream carried no renderable content",
+                s.frames_seen,
+                s.frames_unparseable,
+            )
+        return out
 
     def _drain_sse_envelopes(self) -> Iterator[_GenerateChunk]:
         """Frame SSE events from ``self._sse_buffer``; validate surviving frames into a dispatch envelope.
@@ -447,8 +476,7 @@ class GoogleResponseIntakeFSM:
             if envelope is not None:
                 yield envelope
 
-    @staticmethod
-    def _parse_event(event: bytes) -> _GenerateChunk | None:
+    def _parse_event(self, event: bytes) -> _GenerateChunk | None:
         """Parse a single SSE event into a ``_GenerateChunk``.
 
         Concatenates all ``data:`` lines into one JSON payload, peels off
@@ -470,6 +498,7 @@ class GoogleResponseIntakeFSM:
         try:
             parsed: object = json.loads(raw)
         except (ValueError, TypeError):
+            self._state.frames_unparseable += 1
             logger.debug("google intake: skipping unparseable SSE event", exc_info=True)
             return None
         # cloudcode-pa wraps each chunk in {response: {...}}; standard Gemini
@@ -484,6 +513,7 @@ class GoogleResponseIntakeFSM:
         try:
             chunk = _RESPONSE_ADAPTER.validate_python(parsed)
         except ValidationError:
+            self._state.frames_unparseable += 1
             logger.debug("google intake: skipping unparseable SSE event", exc_info=True)
             return None
         return _GenerateChunk(chunk=chunk)

@@ -190,6 +190,16 @@ class _OpenAIResponsesIntakeState:
     events_queue: deque[_QueueEvent] = field(default_factory=deque)
     out_events: list[ModelResponseStreamEvent] = field(default_factory=list)
 
+    # ── Telemetry (never-silently-drop diagnostics) ───────────────────────────
+    frames_seen: int = 0
+    """Total dispatch envelopes drained from the wire (across all feed calls)."""
+
+    frames_unparseable: int = 0
+    """SSE frames whose ``data:`` payload failed ``ResponseStreamEvent`` validation."""
+
+    emitted_events: int = 0
+    """Total IR ``ModelResponseStreamEvent`` instances emitted (across all feed calls)."""
+
 
 _g: GraphBuilder[_OpenAIResponsesIntakeState, None, None, list[ModelResponseStreamEvent]] = GraphBuilder(
     name="openai_responses_intake",
@@ -592,6 +602,7 @@ async def emit_done(
     ctx: StepContext[_OpenAIResponsesIntakeState, None, _FeedDone],
 ) -> list[ModelResponseStreamEvent]:
     out = ctx.state.out_events
+    ctx.state.emitted_events += len(out)
     ctx.state.out_events = []
     return out
 
@@ -657,6 +668,11 @@ class OpenAIResponsesIntakeFSM:
         return self._state.parts_manager
 
     @property
+    def state(self) -> _OpenAIResponsesIntakeState:
+        """Expose FSM state for tests and telemetry inspection."""
+        return self._state
+
+    @property
     def _model(self) -> str:
         return self._state.model
 
@@ -687,6 +703,7 @@ class OpenAIResponsesIntakeFSM:
         self._sse_buffer.extend(data)
         for envelope in self._drain_sse_envelopes():
             self._state.events_queue.append(envelope)
+            self._state.frames_seen += 1
         if not self._state.events_queue:
             return []
         result = await _intake_graph.run(state=self._state)
@@ -698,6 +715,15 @@ class OpenAIResponsesIntakeFSM:
                 **(self._state.provider_details or {}),
                 "refusal": self._state.refusal_text,
             }
+        s = self._state
+        if s.frames_seen and not s.emitted_events and not s.has_refusal:
+            logger.warning(
+                "openai responses intake produced NO IR events after %d frame(s) "
+                "(unparseable=%d finish_reason=%s) — the upstream stream carried no renderable content",
+                s.frames_seen,
+                s.frames_unparseable,
+                s.finish_reason,
+            )
         return []
 
     def _drain_sse_envelopes(self) -> Iterator[_QueueEvent]:
@@ -723,6 +749,7 @@ class OpenAIResponsesIntakeFSM:
             try:
                 event = _EVENT_ADAPTER.validate_json(payload)
             except ValidationError:
+                self._state.frames_unparseable += 1
                 logger.debug("openai responses intake: skipping unparseable frame: %r", payload)
                 continue
             yield _classify_event(event)

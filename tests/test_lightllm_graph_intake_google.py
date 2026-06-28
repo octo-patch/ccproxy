@@ -608,3 +608,47 @@ class TestEnvelopeUnwrap:
         assert first.content == "abc"
         delta_contents = [d.delta.content_delta for d in text_deltas if isinstance(d.delta, TextPartDelta)]
         assert delta_contents == ["def"]
+
+
+class TestSilentDropTelemetry:
+    """Never-silently-drop diagnostics for the Google intake.
+
+    Drives the real async FSM directly so the state-level telemetry counters
+    are observable.
+    """
+
+    @staticmethod
+    def _run(fsm: GoogleResponseIntakeFSM, data: bytes) -> None:
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(fsm.feed(data))
+            loop.run_until_complete(fsm.close())
+        finally:
+            loop.close()
+
+    def test_candidateless_stream_emits_no_ir_warns(self, caplog: pytest.LogCaptureFixture) -> None:
+        """Chunks with no candidates parse fine but emit ZERO IR events — the
+        intake must WARN, never go silent."""
+        fsm = GoogleResponseIntakeFSM(model="gemini-2.5-flash", request_params=ModelRequestParameters())
+        stream = _sse(_chunk(no_candidates=True)) + _sse(_chunk(no_candidates=True))
+        with caplog.at_level("WARNING", logger="ccproxy.lightllm.graph.google_intake"):
+            self._run(fsm, stream)
+        assert fsm.state.frames_seen >= 1
+        assert fsm.state.emitted_events == 0
+        assert "produced NO IR events" in caplog.text
+
+    def test_clean_text_stream_emits_no_warning(self, caplog: pytest.LogCaptureFixture) -> None:
+        fsm = GoogleResponseIntakeFSM(model="gemini-2.5-flash", request_params=ModelRequestParameters())
+        stream = _sse(_chunk(parts=[{"text": "hello"}]))
+        with caplog.at_level("WARNING", logger="ccproxy.lightllm.graph.google_intake"):
+            self._run(fsm, stream)
+        assert fsm.state.emitted_events >= 1
+        assert "produced NO IR events" not in caplog.text
+
+    def test_unparseable_frame_is_counted(self, caplog: pytest.LogCaptureFixture) -> None:
+        fsm = GoogleResponseIntakeFSM(model="gemini-2.5-flash", request_params=ModelRequestParameters())
+        stream = b"data: not-json\n\n"
+        with caplog.at_level("DEBUG", logger="ccproxy.lightllm.graph.google_intake"):
+            self._run(fsm, stream)
+        assert fsm.state.frames_unparseable >= 1
+        assert "unparseable SSE event" in caplog.text

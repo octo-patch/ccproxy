@@ -582,3 +582,40 @@ def test_final_result_event_emits_no_bytes(render_factory: _RenderFactory) -> No
     render = render_factory()
     out = render.render(FinalResultEvent(tool_name=None, tool_call_id=None))
     assert out == b""
+
+
+class TestSilentDropTelemetry:
+    """Never-silently-drop diagnostics for the Anthropic render.
+
+    Drives the real async FSM directly so the state-level telemetry counters
+    are observable.
+    """
+
+    @staticmethod
+    def _run(fsm: AnthropicResponseRenderFSM, events: list[ModelResponseStreamEvent]) -> None:
+        loop = asyncio.new_event_loop()
+        try:
+            for event in events:
+                loop.run_until_complete(fsm.render(event))
+            loop.run_until_complete(fsm.close())
+        finally:
+            loop.close()
+
+    def test_only_noop_events_emits_no_content_warns(self, caplog: pytest.LogCaptureFixture) -> None:
+        """A render fed only no-op IR events (FinalResultEvent) produces no content
+        bytes — the render must WARN on close, never silently emit nothing."""
+        fsm = AnthropicResponseRenderFSM(model="claude")
+        events: list[ModelResponseStreamEvent] = [FinalResultEvent(tool_name=None, tool_call_id=None)]
+        with caplog.at_level("WARNING", logger="ccproxy.lightllm.graph.anthropic_render"):
+            self._run(fsm, events)
+        assert fsm.state.events_received >= 1
+        assert fsm.state.bytes_emitted == 0
+        assert "emitted NO content bytes" in caplog.text
+
+    def test_text_part_emits_no_warning(self, caplog: pytest.LogCaptureFixture) -> None:
+        fsm = AnthropicResponseRenderFSM(model="claude")
+        events: list[ModelResponseStreamEvent] = [PartStartEvent(index=0, part=TextPart(content="hello"))]
+        with caplog.at_level("WARNING", logger="ccproxy.lightllm.graph.anthropic_render"):
+            self._run(fsm, events)
+        assert fsm.state.bytes_emitted >= 1
+        assert "emitted NO content bytes" not in caplog.text

@@ -103,3 +103,53 @@ def test_dispatch_intake_openai_responses() -> None:
         request_params=ModelRequestParameters(),
     )
     assert isinstance(intake, OpenAIResponsesIntakeFSM)
+
+
+class TestDispatchTelemetry:
+    """Never-silently-drop diagnostics for the graph dispatchers.
+
+    Each dispatcher logs (DEBUG) the resolved FSM/adapter choice and WARNS
+    before raising on an unknown/unsupported provider or listener format.
+    """
+
+    def test_dispatch_intake_logs_resolution(self, caplog: pytest.LogCaptureFixture) -> None:
+        with caplog.at_level("DEBUG", logger="ccproxy.lightllm.graph"):
+            dispatch_intake(provider_type="anthropic", model="claude-3", request_params=ModelRequestParameters())
+        assert "AnthropicResponseIntakeFSM" in caplog.text
+
+    def test_dispatch_intake_warns_then_raises_on_unknown(self, caplog: pytest.LogCaptureFixture) -> None:
+        with (
+            caplog.at_level("WARNING", logger="ccproxy.lightllm.graph"),
+            pytest.raises(UnsupportedUpstreamError, match="no response intake"),
+        ):
+            dispatch_intake(provider_type="not-a-real-provider", model="x", request_params=ModelRequestParameters())
+        assert "no response intake" in caplog.text
+        assert any(r.levelname == "WARNING" for r in caplog.records)
+
+    def test_dispatch_render_logs_resolution(self, caplog: pytest.LogCaptureFixture) -> None:
+        from ccproxy.lightllm.graph import dispatch_render
+        from ccproxy.lightllm.parsed import InboundFormat
+
+        with caplog.at_level("DEBUG", logger="ccproxy.lightllm.graph"):
+            dispatch_render(inbound_format=InboundFormat.OPENAI_CHAT, model="gpt-4o")
+        assert "OpenAIResponseRenderFSM" in caplog.text
+
+    def test_dispatch_render_warns_then_raises_on_unknown(self, caplog: pytest.LogCaptureFixture) -> None:
+        from ccproxy.lightllm.graph import UnsupportedListenerError, dispatch_render
+        from ccproxy.lightllm.parsed import InboundFormat
+
+        with (
+            caplog.at_level("WARNING", logger="ccproxy.lightllm.graph"),
+            pytest.raises(UnsupportedListenerError, match="no response render"),
+        ):
+            dispatch_render(inbound_format=InboundFormat.UNKNOWN, model="x")
+        assert "no response render" in caplog.text
+
+    def test_dispatch_dump_sync_warns_then_raises_on_unknown(self, caplog: pytest.LogCaptureFixture) -> None:
+        parsed = _make_parsed()
+        with (
+            caplog.at_level("WARNING", logger="ccproxy.lightllm.graph"),
+            pytest.raises(UnsupportedUpstreamError, match="no outbound renderer"),
+        ):
+            dispatch_dump_sync(parsed, provider_type="not-a-real-provider")
+        assert "no outbound renderer" in caplog.text

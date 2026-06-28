@@ -176,6 +176,12 @@ class _OpenAIResponsesRenderState:
     out: bytearray = field(default_factory=bytearray)
     """Accumulated SSE wire bytes; drained by the terminal step."""
 
+    events_received: int = 0
+    """Telemetry: total IR events dispatched through the render FSM (across all render calls)."""
+
+    bytes_emitted: int = 0
+    """Telemetry: total SSE bytes emitted by render steps (excludes the close postlude)."""
+
 
 class _RenderDone:
     """Marker returned by the router when the events queue is exhausted."""
@@ -517,6 +523,7 @@ async def take_next_event(
     """Router source: pop the next event from the queue, or signal end via :class:`_RenderDone`."""
     if not ctx.state.pending_events:
         return _RenderDone()
+    ctx.state.events_received += 1
     return ctx.state.pending_events.popleft()
 
 
@@ -845,6 +852,7 @@ async def emit_done(
 ) -> bytes:
     """Terminal step — drain the accumulated wire bytes and reset for the next render call."""
     out = bytes(ctx.state.out)
+    ctx.state.bytes_emitted += len(out)
     ctx.state.out = bytearray()
     return out
 
@@ -894,6 +902,11 @@ class OpenAIResponsesRenderFSM:
             model=model,
         )
 
+    @property
+    def state(self) -> _OpenAIResponsesRenderState:
+        """Expose FSM state for tests and telemetry inspection."""
+        return self._state
+
     async def render(self, event: ModelResponseStreamEvent) -> bytes:
         """One IR event → zero-or-more bytes of OpenAI Responses SSE wire output."""
         self._state.pending_events.append(event)
@@ -901,8 +914,19 @@ class OpenAIResponsesRenderFSM:
         return result
 
     async def close(self) -> bytes:
-        """Close any still-open items, then emit ``response.completed``."""
+        """Close any still-open items, then emit ``response.completed``.
+
+        Emits a telemetry warning when IR events arrived but no content bytes
+        were rendered — a silent empty Responses turn must be explainable from
+        logs.
+        """
         state = self._state
+        if state.events_received and not state.bytes_emitted:
+            logger.warning(
+                "openai_responses render received %d IR event(s) but emitted NO content bytes "
+                "before close — every event mapped to a no-op wire surface",
+                state.events_received,
+            )
         out = bytearray()
 
         # Drain any items left open (the upstream FSM may not have emitted

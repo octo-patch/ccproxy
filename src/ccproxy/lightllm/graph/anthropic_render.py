@@ -228,6 +228,13 @@ class _AnthropicRenderState:
     pending_events: deque[ModelResponseStreamEvent] = field(default_factory=deque)
     out: bytearray = field(default_factory=bytearray)
 
+    # ── Telemetry (never-silently-drop diagnostics) ───────────────────────────
+    events_received: int = 0
+    """Total IR events dispatched through the render FSM (across all render calls)."""
+
+    bytes_emitted: int = 0
+    """Total SSE bytes emitted by render steps (excludes the close terminator)."""
+
 
 class _RenderDone:
     """Marker returned by the router when the events queue is exhausted."""
@@ -254,6 +261,7 @@ async def take_next_event(
     """Router source: pop the next event from the queue, or signal end via :class:`_RenderDone`."""
     if not ctx.state.pending_events:
         return _RenderDone()
+    ctx.state.events_received += 1
     return ctx.state.pending_events.popleft()
 
 
@@ -484,6 +492,7 @@ async def emit_done(
 ) -> bytes:
     """Terminal step — drain the accumulated wire bytes and reset for the next render call."""
     out = bytes(ctx.state.out)
+    ctx.state.bytes_emitted += len(out)
     ctx.state.out = bytearray()
     return out
 
@@ -539,6 +548,11 @@ class AnthropicResponseRenderFSM:
             model=model,
         )
 
+    @property
+    def state(self) -> _AnthropicRenderState:
+        """Expose FSM state for tests and telemetry inspection."""
+        return self._state
+
     async def render(self, event: ModelResponseStreamEvent) -> bytes:
         """One IR event → zero-or-more bytes of Anthropic SSE wire output."""
         self._state.pending_events.append(event)
@@ -549,9 +563,17 @@ class AnthropicResponseRenderFSM:
         """Flush any open block, then emit ``message_delta`` + ``message_stop``.
 
         Imperative (no FSM): the terminator sequence is a fixed three-step
-        emission with no per-event dispatch.
+        emission with no per-event dispatch. Emits a telemetry warning when IR
+        events arrived but no content bytes were rendered — a silent empty
+        Anthropic response must be explainable from logs.
         """
         state = self._state
+        if state.events_received and not state.bytes_emitted:
+            logger.warning(
+                "anthropic render received %d IR event(s) but emitted NO content bytes "
+                "before close — every event mapped to a no-op wire surface",
+                state.events_received,
+            )
         out = bytearray()
         if state.open_block_index is not None:
             out += _emit_content_block_stop(state.open_block_index)

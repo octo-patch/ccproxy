@@ -11,6 +11,7 @@ OpenAI, OpenAI Responses, Google, Perplexity) to the new :mod:`ccproxy.lightllm.
 :class:`ccproxy.pipeline.context.Context` satisfies it).
 """
 
+import logging
 from typing import TYPE_CHECKING
 
 from ccproxy.lightllm.graph.anthropic_intake import AnthropicResponseIntakeFSM
@@ -28,6 +29,8 @@ if TYPE_CHECKING:
     from pydantic_ai.models import ModelRequestParameters
 
     from ccproxy.lightllm.adapters import LLMRenderInput
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "AnyAsyncIntakeFSM",
@@ -93,17 +96,24 @@ def dispatch_intake(
     because an unknown upstream means we have no idea how to parse its SSE.
     """
     if provider_type in _ANTHROPIC_COMPATIBLE:
+        logger.debug("dispatch_intake: provider_type=%s → AnthropicResponseIntakeFSM", provider_type)
         return AnthropicResponseIntakeFSM(model=model, request_params=request_params)
     if provider_type == "openai":
+        logger.debug("dispatch_intake: provider_type=%s → OpenAIResponseIntakeFSM", provider_type)
         return OpenAIResponseIntakeFSM(model=model, request_params=request_params)
     if provider_type == "openai_responses":
+        logger.debug("dispatch_intake: provider_type=%s → OpenAIResponsesIntakeFSM", provider_type)
         return OpenAIResponsesIntakeFSM(model=model, request_params=request_params)
     if provider_type in _GOOGLE_COMPATIBLE:
+        logger.debug("dispatch_intake: provider_type=%s → GoogleResponseIntakeFSM", provider_type)
         return GoogleResponseIntakeFSM(model=model, request_params=request_params)
     if provider_type == "perplexity_pro":
+        logger.debug("dispatch_intake: provider_type=%s → PerplexityResponseIntakeFSM", provider_type)
         return PerplexityResponseIntakeFSM(model=model, request_params=request_params)
     if provider_type == "openai_conversations":
+        logger.debug("dispatch_intake: provider_type=%s → OpenAIConversationsIntakeFSM", provider_type)
         return OpenAIConversationsIntakeFSM(model=model, request_params=request_params)
+    logger.warning("dispatch_intake: no response intake for provider_type=%r — request will fail", provider_type)
     raise UnsupportedUpstreamError(f"no response intake for provider_type={provider_type!r}")
 
 
@@ -117,11 +127,15 @@ def dispatch_render(*, inbound_format: InboundFormat, model: str = "unknown") ->
     shape to produce.
     """
     if inbound_format is InboundFormat.ANTHROPIC_MESSAGES:
+        logger.debug("dispatch_render: inbound_format=%s → AnthropicResponseRenderFSM", inbound_format)
         return AnthropicResponseRenderFSM(model=model)
     if inbound_format is InboundFormat.OPENAI_CHAT:
+        logger.debug("dispatch_render: inbound_format=%s → OpenAIResponseRenderFSM", inbound_format)
         return OpenAIResponseRenderFSM(model=model)
     if inbound_format is InboundFormat.OPENAI_RESPONSES:
+        logger.debug("dispatch_render: inbound_format=%s → OpenAIResponsesRenderFSM", inbound_format)
         return OpenAIResponsesRenderFSM(model=model)
+    logger.warning("dispatch_render: no response render for inbound_format=%s — request will fail", inbound_format)
     raise UnsupportedListenerError(f"no response render for inbound_format={inbound_format}")
 
 
@@ -135,26 +149,33 @@ def dispatch_dump_sync(req: "LLMRenderInput", *, provider_type: str) -> bytes:
     if provider_type in _ANTHROPIC_COMPATIBLE:
         from ccproxy.lightllm.adapters.anthropic import AnthropicAdapter
 
+        logger.debug("dispatch_dump_sync: provider_type=%s → AnthropicAdapter", provider_type)
         return AnthropicAdapter.render(req)
     if provider_type == "openai":
         from ccproxy.lightllm.adapters.openai_chat import OpenAIChatAdapter
 
+        logger.debug("dispatch_dump_sync: provider_type=%s → OpenAIChatAdapter", provider_type)
         return OpenAIChatAdapter.render(req)
     if provider_type == "openai_responses":
         from ccproxy.lightllm.adapters.openai_responses import OpenAIResponsesAdapter
 
+        logger.debug("dispatch_dump_sync: provider_type=%s → OpenAIResponsesAdapter", provider_type)
         return OpenAIResponsesAdapter.render(req)
     if provider_type in _GOOGLE_COMPATIBLE:
         from ccproxy.lightllm.adapters.google import GoogleAdapter
 
+        logger.debug("dispatch_dump_sync: provider_type=%s → GoogleAdapter", provider_type)
         return GoogleAdapter.render(req)
     if provider_type == "perplexity_pro":
         from ccproxy.lightllm.adapters.perplexity import PerplexityAdapter
 
+        logger.debug("dispatch_dump_sync: provider_type=%s → PerplexityAdapter", provider_type)
         return PerplexityAdapter.render(req)
     if provider_type == "openai_conversations":
         from ccproxy.lightllm.adapters.openai_conversations import OpenAIConversationsAdapter
 
+        logger.debug("dispatch_dump_sync: provider_type=%s → OpenAIConversationsAdapter", provider_type)
         return OpenAIConversationsAdapter.render(req)
 
+    logger.warning("dispatch_dump_sync: no outbound renderer for provider_type=%r — request will fail", provider_type)
     raise UnsupportedUpstreamError(f"no outbound renderer for provider_type={provider_type!r}")

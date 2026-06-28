@@ -86,6 +86,8 @@ class SSEPipeline:
         self._buffered_render = buffered_render
         self._closed = False
         self._terminator_emitted = False
+        self._content_bytes_emitted = 0
+        """Telemetry: rendered content bytes emitted before EOS (excludes the terminator)."""
         self._loop = asyncio.new_event_loop()
         self._thread = threading.Thread(
             target=self._loop.run_forever,
@@ -126,6 +128,7 @@ class SSEPipeline:
         out = bytearray()
         for event in await self._intake.feed(data):
             out.extend(await self._render.render(event))
+        self._content_bytes_emitted += len(out)
         return bytes(out)
 
     def _flush_and_close(self) -> bytes | list[bytes]:
@@ -161,9 +164,18 @@ class SSEPipeline:
         out = bytearray()
         try:
             for event in await self._intake.close():
-                out.extend(await self._render.render(event))
+                rendered = await self._render.render(event)
+                self._content_bytes_emitted += len(rendered)
+                out.extend(rendered)
         except Exception:
             logger.exception("SSEPipeline intake.close failed; emitting render terminator only")
+        if not self._content_bytes_emitted:
+            logger.warning(
+                "SSEPipeline EOS produced NO content bytes for intake=%s render=%s "
+                "— only the SSE terminator will be sent (empty response to the client)",
+                getattr(self._intake, "name", type(self._intake).__name__),
+                getattr(self._render, "name", type(self._render).__name__),
+            )
         if not self._terminator_emitted:
             self._terminator_emitted = True
             try:
@@ -188,8 +200,15 @@ class SSEPipeline:
         if self._terminator_emitted:
             return b""
         self._terminator_emitted = True
+        parts = list(self._intake.parts_manager.get_parts())
+        if not parts:
+            logger.warning(
+                "SSEPipeline collect mode assembled NO parts for intake=%s — the buffered "
+                "object sent to the client carries no content (empty response)",
+                getattr(self._intake, "name", type(self._intake).__name__),
+            )
         try:
-            return self._buffered_render(list(self._intake.parts_manager.get_parts()))
+            return self._buffered_render(parts)
         except Exception:
             logger.exception("SSEPipeline buffered_render failed; emitting empty object")
             return b"{}"
