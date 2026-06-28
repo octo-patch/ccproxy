@@ -182,6 +182,13 @@ class _ConversationsIntakeState:
     final_channel: int | None = None
     """Channel carrying the assistant's visible final answer text."""
 
+    assistant_text_channels: dict[int, tuple[str, str]] = field(default_factory=dict)
+    """Channels that declared an assistant ``content_type == "text"`` message (ANY
+    status, not hidden) → ``(message_id, model_slug)``. Candidates for lazy adoption
+    as the final-answer channel when content arrives but no in-progress add anchored
+    it — e.g. a WebSocket catch-up replaying an already-``finished_successfully``
+    message."""
+
     message_id: str = ""
     """Assistant message id from the final-answer channel's initial add."""
 
@@ -389,27 +396,34 @@ async def handle_add(
     if not isinstance(msg, dict):
         return
 
+    role = msg.get("author", {}).get("role")
+    content_type = msg.get("content", {}).get("content_type")
+    hidden = msg.get("metadata", {}).get("is_visually_hidden_from_conversation")
+    msg_id = msg.get("id") if isinstance(msg.get("id"), str) else ""
+    slug = msg.get("metadata", {}).get("model_slug")
+    slug = slug if isinstance(slug, str) else ""
+
+    if role == "assistant" and content_type == "text" and not hidden:
+        # Candidate final-answer channel (regardless of status) for lazy adoption.
+        state.assistant_text_channels[env.channel] = (msg_id, slug)
+
     if _is_final_answer_message(msg) and state.final_channel is None:
         state.final_channel = env.channel
-        msg_id = msg.get("id")
-        if isinstance(msg_id, str):
+        if msg_id:
             state.message_id = msg_id
-        slug = msg.get("metadata", {}).get("model_slug")
-        if isinstance(slug, str):
+        if slug:
             state.model_slug = slug
-    elif msg.get("author", {}).get("role") == "assistant" and msg.get("content", {}).get("content_type") == "text":
-        # An assistant text message we did NOT adopt as the final-answer channel.
-        # The usual culprit on a WebSocket catch-up is a replayed message whose
-        # status is already ``finished_successfully`` — telemetry so a silent
-        # "no text emitted" turn is explainable from the logs alone.
+    elif role == "assistant" and content_type == "text":
+        # Not adopted eagerly (status already finished, e.g. a WebSocket catch-up
+        # replay). Recorded as a lazy-adoption candidate above; logged so a silent
+        # "no text emitted" turn stays explainable from the logs alone.
         state.assistant_msgs_skipped += 1
         logger.debug(
-            "oaic intake: assistant text message NOT tracked as final-answer "
-            "(channel=%s status=%s hidden=%s final_channel=%s)",
+            "oaic intake: assistant text message not eagerly adopted "
+            "(channel=%s status=%s hidden=%s) — candidate for lazy adoption",
             env.channel,
             msg.get("status"),
-            msg.get("metadata", {}).get("is_visually_hidden_from_conversation"),
-            state.final_channel,
+            hidden,
         )
 
 
@@ -437,10 +451,29 @@ async def handle_patch(
 
     relevant = state.final_channel is not None and state.current_channel == state.final_channel
     if not relevant:
-        if _has_content_patch(env.patches):
-            # Content text arrived but not on the tracked final-answer channel — the
-            # answer is on a channel we never identified. The leading cause of an
-            # empty/silent OAIC turn; logged so it never passes silently.
+        if (
+            state.final_channel is None
+            and state.current_channel in state.assistant_text_channels
+            and _has_content_patch(env.patches)
+        ):
+            # Lazy adoption: visible content arrived on a candidate assistant channel
+            # with no in-progress add to anchor it (e.g. a WebSocket catch-up replays
+            # the already-finished message). The answer is wherever content lands.
+            state.final_channel = state.current_channel
+            mid, slug = state.assistant_text_channels[state.current_channel]
+            if mid and not state.message_id:
+                state.message_id = mid
+            if slug and not state.model_slug:
+                state.model_slug = slug
+            logger.debug(
+                "oaic intake: lazily adopted channel=%s as final-answer (content arrived, no in-progress add)",
+                state.current_channel,
+            )
+            # fall through: final_channel now set, process the content patches below.
+        elif _has_content_patch(env.patches):
+            # Content text arrived on a channel that is not — and cannot become — the
+            # final-answer channel. Logged so an empty/silent OAIC turn never passes
+            # unobserved.
             state.content_patches_off_channel += 1
             logger.debug(
                 "oaic intake: content patch on channel=%s ignored (final_channel=%s); "
@@ -448,7 +481,9 @@ async def handle_patch(
                 state.current_channel,
                 state.final_channel,
             )
-        return
+            return
+        else:
+            return
 
     for path, op, value in env.patches:
         # A bare continuation delta ({"v": "str"} with no p/o) continues the last
