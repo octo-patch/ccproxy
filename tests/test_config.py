@@ -590,3 +590,39 @@ class TestGeminiCapacityConfig:
 
         with pytest.raises(pydantic.ValidationError):
             GeminiCapacityFallbackConfig(sticky_retry_max_delay_seconds=0)
+
+
+class TestOpenAIConversationsProviderDefault:
+    """The shipped default template includes a parseable openai_conversations provider."""
+
+    def _load_packaged_config(self) -> CCProxyConfig:
+        from importlib.resources import as_file, files
+
+        with as_file(files("ccproxy.templates").joinpath("ccproxy.yaml")) as template_path:
+            return CCProxyConfig.from_yaml(Path(template_path))
+
+    def test_packaged_template_routes_openai_conversations(self) -> None:
+        """The generated default template carries the openai_conversations provider."""
+        config = self._load_packaged_config()
+        provider = config.providers.get("openai_conversations")
+        assert provider is not None
+        assert provider.type == "openai_conversations"
+        assert provider.host == "chatgpt.com"
+        assert provider.path == "/backend-api/f/conversation"
+        assert provider.fingerprint_profile == "chrome136"
+
+    def test_packaged_template_auth_source(self) -> None:
+        """The provider's auth parses as an OpenAIConversationsAuthSource with default paths."""
+        from ccproxy.auth.sources import OpenAIConversationsAuthSource
+
+        provider = self._load_packaged_config().providers["openai_conversations"]
+        assert isinstance(provider.auth, OpenAIConversationsAuthSource)
+        assert provider.auth.type == "openai_conversations"
+        assert provider.auth.file_path == "~/.config/ccproxy/openai-conversations-credentials.json"
+        assert provider.auth.cookie_file == "~/.config/ccproxy/openai-conversations-cookies.txt"
+
+    def test_fingerprint_profile_is_a_valid_curl_cffi_profile(self) -> None:
+        """``chrome136`` must be a real curl-cffi impersonate profile, or egress fails fast."""
+        from ccproxy.transport import VALID_PROFILES
+
+        assert "chrome136" in VALID_PROFILES

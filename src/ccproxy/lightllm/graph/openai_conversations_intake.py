@@ -39,14 +39,15 @@ Finish synthesis:
 * ``data: [DONE]`` after content also synthesises a finish, preventing
   duplication via the ``state.final_emitted`` flag.
 
-Handoff detection (detection only — WS connection is CHATGPT-002):
+Handoff continuation (the answer arrives over WebSocket):
 
 When a typed side event with ``type`` in ``{resume_conversation_token,
-stream_handoff, server_ste_metadata}`` arrives **before any visible content
-has been accumulated**, ``state.continuation`` is populated and the FSM
-surfaces a :class:`_HandoffDetected` envelope. The ``feed()`` method then
-raises :class:`HandoffUnsupportedError`. When content is already flowing
-these events are informational and intake continues.
+stream_handoff, server_ste_metadata}`` arrives, ``state.continuation`` is
+populated for inspection and the FSM surfaces a :class:`_HandoffDetected`
+envelope, but no IR event is emitted and nothing is raised. The real answer
+arrives as bridged SSE-v1 frames the sidecar appends after the inline HTTP body
+(``transport/sidecar.py`` + ``openai_conversations/ws_handoff.py``); this same
+FSM parses those frames into the assistant final-answer channel.
 
 MIT attribution:
 
@@ -98,21 +99,6 @@ class ContinuationMetadata:
 
     turn_exchange_id: str = ""
     """Turn exchange id from a ``server_ste_metadata`` event."""
-
-
-class HandoffUnsupportedError(RuntimeError):
-    """Raised when a handoff side event arrives before content and WS continuation is not yet wired.
-
-    Carries the captured :class:`ContinuationMetadata` for inspection.
-    """
-
-    def __init__(self, meta: ContinuationMetadata) -> None:
-        self.meta = meta
-        super().__init__(
-            f"openai_conversations handoff detected (topic={meta.handoff_topic!r}) "
-            "but WS continuation is not yet implemented (CHATGPT-002); "
-            "cannot continue stream."
-        )
 
 
 # ── Internal dispatch envelopes ───────────────────────────────────────────────
@@ -597,8 +583,10 @@ class OpenAIConversationsIntakeFSM:
     async def feed(self, data: bytes) -> list[ModelResponseStreamEvent]:
         """Buffer bytes, frame SSE events, drive FSM, return emitted IR events.
 
-        Raises :class:`HandoffUnsupportedError` when a handoff side event
-        arrives before any visible content has been accumulated.
+        Handoff side events are consumed silently: ``state.continuation`` is
+        populated for inspection but no IR event is emitted and nothing is
+        raised. The real answer arrives as bridged SSE-v1 frames the sidecar
+        WebSocket handoff bridge appends, which this same FSM parses.
         """
         if not data:
             return []
@@ -608,11 +596,7 @@ class OpenAIConversationsIntakeFSM:
             self._state.events_queue.append(envelope)
         if not self._state.events_queue:
             return []
-        result = await _intake_graph.run(state=self._state)
-        # Post-run check: if a handoff was registered with no prior content, error.
-        if self._state.continuation and not self._state.content_begun:
-            raise HandoffUnsupportedError(self._state.continuation)
-        return result
+        return await _intake_graph.run(state=self._state)
 
     async def close(self) -> list[ModelResponseStreamEvent]:
         """End of stream — no trailing events beyond what handle_done already emitted."""

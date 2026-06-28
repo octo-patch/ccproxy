@@ -930,6 +930,44 @@ def _parts_to_anthropic_message(
     }
 
 
+def render_parts_to_listener(
+    *,
+    parts: list[ModelResponsePart],
+    inbound_format: InboundFormat,
+    model: str,
+    provider_response_id: str | None = None,
+    finish_reason: str | None = None,
+) -> bytes:
+    """Serialize IR parts into the listener's buffered JSON bytes by inbound format.
+
+    Shared by :func:`transform_buffered_response_sync` (the provider-buffered
+    path) and the streaming :class:`~ccproxy.lightllm.graph.sse_pipeline.SSEPipeline`'s
+    collect mode (force-streamed providers such as ``openai_conversations``
+    whose client asked for a single buffered object). ``provider_response_id``
+    and ``finish_reason`` are honored by the OpenAI Chat / Responses renderers
+    and ignored by the Anthropic renderer (which derives its own stop reason).
+    """
+    if inbound_format is InboundFormat.OPENAI_CHAT:
+        out_dict = _parts_to_openai_chat_completion(
+            parts=parts,
+            model=model,
+            provider_response_id=provider_response_id,
+            finish_reason=finish_reason,
+        )
+    elif inbound_format is InboundFormat.ANTHROPIC_MESSAGES:
+        out_dict = _parts_to_anthropic_message(parts=parts, model=model)
+    elif inbound_format is InboundFormat.OPENAI_RESPONSES:
+        out_dict = _parts_to_openai_responses(
+            parts=parts,
+            model=model,
+            provider_response_id=provider_response_id,
+            finish_reason=finish_reason,
+        )
+    else:
+        raise UnsupportedListenerError(f"no buffered renderer for inbound_format={inbound_format}")
+    return json.dumps(out_dict, separators=(",", ":")).encode()
+
+
 # ── Public sync entry point ────────────────────────────────────────────────
 
 
@@ -978,10 +1016,10 @@ def transform_buffered_response_sync(
         synthetic_sse = _synthesize_google_sse(body) if isinstance(body, dict) else b""
     elif provider_type == "perplexity_pro":
         synthetic_sse = raw_bytes
-    elif provider_type == "openai_conversations":
-        # The upstream body IS already concatenated SSE-v1 — feed directly.
-        synthetic_sse = raw_bytes
     else:
+        # openai_conversations is intentionally absent: it is always force-streamed
+        # through SSEPipeline (the egress sidecar reconstructs inline OR WS-bridged
+        # content), so it never reaches the buffered transform.
         raise UnsupportedUpstreamError(f"no buffered transform for provider_type={provider_type!r}")
 
     intake = dispatch_intake(
@@ -991,26 +1029,13 @@ def transform_buffered_response_sync(
     )
     parts = _run_intake_one_shot(intake=intake, raw=synthetic_sse)
 
-    if inbound_format is InboundFormat.OPENAI_CHAT:
-        out_dict = _parts_to_openai_chat_completion(
-            parts=parts,
-            model=model,
-            provider_response_id=_intake_provider_response_id(intake),
-            finish_reason=_intake_finish_reason(intake),
-        )
-    elif inbound_format is InboundFormat.ANTHROPIC_MESSAGES:
-        out_dict = _parts_to_anthropic_message(parts=parts, model=model)
-    elif inbound_format is InboundFormat.OPENAI_RESPONSES:
-        out_dict = _parts_to_openai_responses(
-            parts=parts,
-            model=model,
-            provider_response_id=_intake_provider_response_id(intake),
-            finish_reason=_intake_finish_reason(intake),
-        )
-    else:
-        raise UnsupportedListenerError(f"no buffered renderer for inbound_format={inbound_format}")
-
-    return json.dumps(out_dict, separators=(",", ":")).encode()
+    return render_parts_to_listener(
+        parts=parts,
+        inbound_format=inbound_format,
+        model=model,
+        provider_response_id=intake_provider_response_id(intake),
+        finish_reason=intake_finish_reason(intake),
+    )
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────
@@ -1031,12 +1056,12 @@ def _looks_like_sse(raw_bytes: bytes) -> bool:
     return stripped.startswith(b"data:") or stripped.startswith(b"event:")
 
 
-def _intake_provider_response_id(intake: AnyAsyncIntakeFSM) -> str | None:
+def intake_provider_response_id(intake: AnyAsyncIntakeFSM) -> str | None:
     """Pull the upstream response id from the intake if it tracks one (OpenAI only)."""
     return getattr(intake, "provider_response_id", None)
 
 
-def _intake_finish_reason(intake: AnyAsyncIntakeFSM) -> str | None:
+def intake_finish_reason(intake: AnyAsyncIntakeFSM) -> str | None:
     """Pull a finish-reason hint from the intake when available (OpenAI only)."""
     fr = getattr(intake, "finish_reason", None)
     if fr is None:

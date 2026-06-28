@@ -28,6 +28,12 @@ e2e-packaged-mflows:
     CCPROXY_CONFIG_DIR="$tmp" uv run ccproxy status --proxy; \
     CCPROXY_CONFIG_DIR="$tmp" CCPROXY_E2E_PACKAGED_SHAPES=1 CCPROXY_E2E_URL=http://127.0.0.1:4001 uv run pytest --no-cov -rs -m e2e tests/e2e/test_packaged_mflows_e2e.py
 
+e2e-openai-conversations:
+    # Credential-gated smoke for the openai_conversations provider. Requires a
+    # running ccproxy with providers.openai_conversations configured (creds +
+    # fresh cookies). The tests self-skip when creds/proxy are absent.
+    CCPROXY_E2E_URL=${CCPROXY_E2E_URL:-http://127.0.0.1:4001} uv run pytest --no-cov -rs -m e2e tests/e2e/test_openai_conversations_e2e.py
+
 e2e-namespace-observe:
     command -v slirp4netns >/dev/null
     command -v unshare >/dev/null

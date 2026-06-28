@@ -55,6 +55,22 @@
         type = "perplexity_pro";
         fingerprint_profile = "chrome131";
       };
+      # ChatGPT consumer web session (no API key): bearer JWT + Sentinel PoW +
+      # conduit prepare + browser TLS fingerprint. Opt-in like gemini — the
+      # sentinel key sk-ant-oat-ccproxy-openai_conversations routes here, but the
+      # provider only works once the user supplies the credential + cookie files
+      # (cf_clearance is re-exported per session; see docs).
+      openai_conversations = {
+        auth = {
+          type = "openai_conversations";
+          file_path = "~/.config/ccproxy/openai-conversations-credentials.json";
+          cookie_file = "~/.config/ccproxy/openai-conversations-cookies.txt";
+        };
+        host = "chatgpt.com";
+        path = "/backend-api/f/conversation";
+        type = "openai_conversations";
+        fingerprint_profile = "chrome136";
+      };
     };
     hooks = {
       inbound = [

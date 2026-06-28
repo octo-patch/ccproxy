@@ -42,7 +42,12 @@ from starlette.routing import Route
 
 from ccproxy import transport
 from ccproxy.inspector.fingerprint import CapturedFingerprint
-from ccproxy.openai_conversations.ws_handoff import HandoffState, detect_handoff, run_handoff_bridge
+from ccproxy.openai_conversations.ws_handoff import (
+    HandoffState,
+    detect_handoff,
+    run_handoff_bridge,
+    run_resume_bridge,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -170,12 +175,14 @@ async def _handle(request: Request) -> Response:
         finally:
             await upstream.aclose()
 
-        # Continuation: if a WS handoff topic was detected and no HTTP answer
-        # content arrived, bridge via the WS and stream the continuation.
-        if continuation_factory is not None and handoff_state is not None and handoff_state.should_bridge():
+        # Continuation: if the HTTP body handed off without inline content, run
+        # the matching continuation (WS bridge for stream_handoff, HTTP resume for
+        # resume_conversation_token) and stream its bytes onto the same response.
+        if continuation_factory is not None and handoff_state is not None and handoff_state.should_continue():
             async for extra_chunk in continuation_factory(
                 client=client,
                 handoff_state=handoff_state,
+                request_headers=fwd_headers,
             ):
                 yield extra_chunk
 
@@ -195,20 +202,38 @@ async def _openai_conversations_continuation(
     *,
     client: httpx.AsyncClient,
     handoff_state: HandoffState,
+    request_headers: dict[str, str],
 ) -> AsyncIterator[bytes]:
-    """Continuation factory for ``openai_conversations``.
+    """Continuation dispatcher for ``openai_conversations``.
 
-    Calls :func:`ccproxy.openai_conversations.ws_handoff.run_handoff_bridge`
-    with the authenticated client and topic id extracted from ``handoff_state``.
+    Routes by the SPA's two handoff signals: a ``stream_handoff`` WS topic →
+    :func:`run_handoff_bridge` (``/celsius/ws/user`` → wss); a
+    ``resume_conversation_token`` → :func:`run_resume_bridge`
+    (``POST /f/conversation/resume``). The WS path wins when both are present.
     """
-    async for chunk in run_handoff_bridge(client=client, topic_id=handoff_state.topic):
-        yield chunk
+    if handoff_state.should_bridge():
+        async for chunk in run_handoff_bridge(client=client, topic_id=handoff_state.topic):
+            yield chunk
+    elif handoff_state.should_resume():
+        async for chunk in run_resume_bridge(
+            client=client,
+            conversation_id=handoff_state.conversation_id,
+            resume_token=handoff_state.resume_token,
+            request_headers=request_headers,
+        ):
+            yield chunk
 
 
 class _ContinuationFactory(Protocol):
     """Callable protocol for continuation factories."""
 
-    def __call__(self, *, client: httpx.AsyncClient, handoff_state: HandoffState) -> AsyncIterator[bytes]: ...
+    def __call__(
+        self,
+        *,
+        client: httpx.AsyncClient,
+        handoff_state: HandoffState,
+        request_headers: dict[str, str],
+    ) -> AsyncIterator[bytes]: ...
 
 
 # Mapping from ``X-CCProxy-Continuation`` value to its async-generator factory.

@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 from mitmproxy import command, flow, http
@@ -33,12 +33,46 @@ from ccproxy.utils import (
 )
 
 if TYPE_CHECKING:
+    from pydantic_ai.messages import ModelResponsePart
+
     from ccproxy.inspector.telemetry import InspectorTracer
+    from ccproxy.lightllm.graph import AnyAsyncIntakeFSM
+    from ccproxy.lightllm.parsed import InboundFormat
 
 logger = logging.getLogger(__name__)
 
 Direction = Literal["inbound"]
 TrafficSource = Literal["reverse", "wireguard"]
+
+
+def _make_buffered_render(
+    *,
+    intake: AnyAsyncIntakeFSM,
+    inbound_format: InboundFormat,
+    model: str,
+) -> Callable[[list[ModelResponsePart]], bytes]:
+    """Build the collect-mode render callable for :class:`SSEPipeline`.
+
+    Captures ``intake`` (for its response id / finish reason), ``inbound_format``,
+    and ``model``; the returned callable assembles the drained IR parts into one
+    listener-format buffered JSON object.
+    """
+    from ccproxy.lightllm.graph.buffered import (
+        intake_finish_reason,
+        intake_provider_response_id,
+        render_parts_to_listener,
+    )
+
+    def _render(parts: list[ModelResponsePart]) -> bytes:
+        return render_parts_to_listener(
+            parts=parts,
+            inbound_format=inbound_format,
+            model=model,
+            provider_response_id=intake_provider_response_id(intake),
+            finish_reason=intake_finish_reason(intake),
+        )
+
+    return _render
 
 
 class InspectorAddon:
@@ -216,13 +250,19 @@ class InspectorAddon:
         record = metadata.record
         transform = getattr(record, "transform", None) if record else None
 
-        if transform is not None and transform.is_streaming and transform.mode == "transform":
-            self._install_streaming_transformer(flow, transform)
-        elif transform is not None and not transform.is_streaming and transform.mode == "transform":
-            # Non-streaming client + event-stream upstream (e.g. Perplexity always
-            # streams). Buffer so handle_transform_response can call
-            # transform_buffered_response_sync on the complete body.
-            flow.response.stream = False
+        if transform is not None and transform.mode == "transform":
+            if transform.provider_type == "openai_conversations" or transform.is_streaming:
+                # OpenAI Conversations is intrinsically streaming / dual-mode: the
+                # upstream returns inline SSE-v1 OR a WebSocket handoff whose answer
+                # arrives over wss. Always drive it through SSEPipeline, even when the
+                # client sent stream:false — the client's flag becomes a pure render
+                # choice (stream chunks vs collect one buffered object at EOS).
+                self._install_streaming_transformer(flow, transform)
+            else:
+                # Non-streaming client + event-stream upstream (e.g. Perplexity always
+                # streams). Buffer so handle_transform_response can call
+                # transform_buffered_response_sync on the complete body.
+                flow.response.stream = False
         else:
             flow.response.stream = True
 
@@ -240,6 +280,13 @@ class InspectorAddon:
         which transparently unwraps the cloudcode-pa ``{response: {...}}``
         envelope. :class:`~ccproxy.inspector.gemini_addon.GeminiAddon` backs
         off when this transformer is already installed.
+
+        When the client asked for a buffered response (``transform.is_streaming``
+        is ``False``) but the upstream is force-streamed (OpenAI Conversations),
+        the pipeline runs in collect mode: it accumulates IR and emits one
+        listener-format JSON object at EOS. The response is JSON, not SSE, so the
+        ``content-type`` is rewritten here — before mitmproxy flushes the
+        response headers downstream.
         """
         from ccproxy.lightllm.parsed import InboundFormat
 
@@ -264,8 +311,19 @@ class InspectorAddon:
                 model=transform.model,
                 request_params=transform.request_parameters,
             )
-            render = dispatch_render(inbound_format=inbound_format, model=transform.model)
-            pipeline = SSEPipeline(intake=intake, render=render)
+            if transform.is_streaming:
+                render = dispatch_render(inbound_format=inbound_format, model=transform.model)
+                pipeline = SSEPipeline(intake=intake, render=render)
+            else:
+                buffered_render = _make_buffered_render(
+                    intake=intake,
+                    inbound_format=inbound_format,
+                    model=transform.model,
+                )
+                pipeline = SSEPipeline(intake=intake, buffered_render=buffered_render)
+                response.headers["content-type"] = "application/json"
+                if "content-encoding" in response.headers:
+                    del response.headers["content-encoding"]
             response.stream = pipeline
             metadata_from_flow(flow).sse_transformer = pipeline
         except Exception:

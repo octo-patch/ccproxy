@@ -299,3 +299,98 @@ class TestErrorHandling:
             pipeline.close()
         # Intake silently drops unparseable frames; result is empty.
         assert result == [] or result == b""
+
+
+# ---------------------------------------------------------------------------
+# Collect mode (buffered client, force-streamed upstream)
+# ---------------------------------------------------------------------------
+
+
+def _make_collect_pipeline(*, provider_type: str, inbound_format: InboundFormat, model: str) -> SSEPipeline:
+    from ccproxy.lightllm.graph.buffered import (
+        intake_finish_reason,
+        intake_provider_response_id,
+        render_parts_to_listener,
+    )
+
+    intake = dispatch_intake(provider_type=provider_type, model=model, request_params=ModelRequestParameters())
+
+    def _buffered_render(parts: list[Any]) -> bytes:
+        return render_parts_to_listener(
+            parts=parts,
+            inbound_format=inbound_format,
+            model=model,
+            provider_response_id=intake_provider_response_id(intake),
+            finish_reason=intake_finish_reason(intake),
+        )
+
+    return SSEPipeline(intake=intake, buffered_render=_buffered_render)
+
+
+class TestCollectMode:
+    """Collect mode emits nothing per-chunk and assembles one buffered JSON object at EOS."""
+
+    def test_intermediate_chunks_emit_nothing(self) -> None:
+        """Each non-EOS chunk returns empty; the JSON object lands only at EOS."""
+        pipeline = _make_collect_pipeline(
+            provider_type="anthropic",
+            inbound_format=InboundFormat.OPENAI_CHAT,
+            model="claude-3-5-haiku-20241022",
+        )
+        upstream = _build_anthropic_text_sse("collected body")
+        try:
+            for start in range(0, len(upstream), 16):
+                res = pipeline(upstream[start : start + 16])
+                assert res == b"" or res == []
+            flushed = pipeline(b"")
+        finally:
+            pipeline.close()
+        assert isinstance(flushed, (bytes, bytearray))
+        out = json.loads(bytes(flushed))
+        assert out["object"] == "chat.completion"
+        assert out["choices"][0]["message"]["content"] == "collected body"
+
+    def test_anthropic_upstream_to_anthropic_listener(self) -> None:
+        """Collect mode renders by inbound_format — here a single Anthropic message."""
+        pipeline = _make_collect_pipeline(
+            provider_type="anthropic",
+            inbound_format=InboundFormat.ANTHROPIC_MESSAGES,
+            model="claude-3-5-haiku-20241022",
+        )
+        upstream = _build_anthropic_text_sse("anthropic buffered")
+        try:
+            for start in range(0, len(upstream), 16):
+                pipeline(upstream[start : start + 16])
+            flushed = pipeline(b"")
+        finally:
+            pipeline.close()
+        assert isinstance(flushed, (bytes, bytearray))
+        out = json.loads(bytes(flushed))
+        assert out["type"] == "message"
+        assert any(b.get("text") == "anthropic buffered" for b in out["content"] if b.get("type") == "text")
+
+    def test_no_done_terminator_in_collect_output(self) -> None:
+        """The buffered object must not carry an SSE terminator (no ``[DONE]``)."""
+        pipeline = _make_collect_pipeline(
+            provider_type="anthropic",
+            inbound_format=InboundFormat.OPENAI_CHAT,
+            model="claude-3-5-haiku-20241022",
+        )
+        upstream = _build_anthropic_text_sse("no terminator")
+        try:
+            pipeline(upstream)
+            flushed = pipeline(b"")
+        finally:
+            pipeline.close()
+        assert isinstance(flushed, (bytes, bytearray))
+        assert b"[DONE]" not in bytes(flushed)
+
+    def test_requires_exactly_one_render(self) -> None:
+        """Constructing with neither / both render args is a programming error."""
+        intake = dispatch_intake(
+            provider_type="anthropic",
+            model="claude-3-5-haiku-20241022",
+            request_params=ModelRequestParameters(),
+        )
+        with pytest.raises(ValueError, match="exactly one"):
+            SSEPipeline(intake=intake)

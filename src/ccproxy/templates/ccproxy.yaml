@@ -112,6 +112,15 @@ ccproxy:
       host: cloudcode-pa.googleapis.com
       path: /v1internal:{action}
       type: gemini
+    openai_conversations:
+      auth:
+        cookie_file: ~/.config/ccproxy/openai-conversations-cookies.txt
+        file_path: ~/.config/ccproxy/openai-conversations-credentials.json
+        type: openai_conversations
+      fingerprint_profile: chrome136
+      host: chatgpt.com
+      path: /backend-api/f/conversation
+      type: openai_conversations
     perplexity_pro:
       auth:
         file: ~/.opnix/secrets/perplexity-pro-api-key

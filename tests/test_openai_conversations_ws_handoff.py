@@ -26,9 +26,8 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import contextlib
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -43,10 +42,7 @@ from websockets.asyncio.server import serve as ws_serve
 from ccproxy.config import CCProxyConfig, Provider, set_config_instance
 from ccproxy.inspector.openai_conversations_addon import _refresh_sentinel
 from ccproxy.inspector.transport_override_addon import TransportOverrideAddon
-from ccproxy.lightllm.graph.openai_conversations_intake import (
-    HandoffUnsupportedError,
-    OpenAIConversationsIntakeFSM,
-)
+from ccproxy.lightllm.graph.openai_conversations_intake import OpenAIConversationsIntakeFSM
 from ccproxy.openai_conversations.ws_handoff import (
     HandoffState,
     _conversation_update_item,
@@ -57,6 +53,7 @@ from ccproxy.openai_conversations.ws_handoff import (
     _sse_items_from_frame,
     detect_handoff,
     run_handoff_bridge,
+    run_resume_bridge,
     stream_handoff_sse,
 )
 from ccproxy.transport import UnknownFingerprintProfileError
@@ -106,8 +103,8 @@ def _server_ste_nested_frame(turn_exchange_id: str) -> bytes:
     return _sse(json.dumps(payload))
 
 
-def _resume_token_frame(token: str = "tok123") -> bytes:  # noqa: S107
-    payload = {"type": "resume_conversation_token", "token": token}
+def _resume_token_frame(token: str = "tok123", conversation_id: str = "conv-resume") -> bytes:  # noqa: S107
+    payload = {"type": "resume_conversation_token", "token": token, "conversation_id": conversation_id}
     return _sse(json.dumps(payload))
 
 
@@ -130,22 +127,55 @@ class TestHandoffStateDetection:
         detect_handoff(state, _stream_handoff_frame("conversation-turn-abc123"))
         assert state.topic == "conversation-turn-abc123"
 
-    def test_server_ste_metadata_sets_topic_from_top_level(self) -> None:
+    def test_server_ste_metadata_is_not_a_handoff_topic(self) -> None:
+        # server_ste_metadata is telemetry, not a WS handoff (it rides every turn);
+        # it must not set a topic or trigger the WS bridge.
         state = HandoffState()
         detect_handoff(state, _server_ste_frame("xyz789"))
-        assert state.topic == "conversation-turn-xyz789"
-
-    def test_server_ste_metadata_sets_topic_from_nested(self) -> None:
-        state = HandoffState()
-        detect_handoff(state, _server_ste_nested_frame("nested999"))
-        assert state.topic == "conversation-turn-nested999"
-
-    def test_resume_conversation_token_sets_skip_ws(self) -> None:
-        state = HandoffState()
-        detect_handoff(state, _resume_token_frame())
-        assert state.skip_ws is True
         assert state.topic == ""
         assert not state.should_bridge()
+
+    def test_server_ste_metadata_nested_is_not_a_handoff_topic(self) -> None:
+        state = HandoffState()
+        detect_handoff(state, _server_ste_nested_frame("nested999"))
+        assert state.topic == ""
+        assert not state.should_bridge()
+
+    def test_server_ste_with_resume_token_routes_to_resume(self) -> None:
+        # The real shape: every turn carries server_ste_metadata + resume token.
+        # No stream_handoff → no WS bridge → HTTP resume is the continuation.
+        state = HandoffState()
+        detect_handoff(state, _resume_token_frame(token="tokR", conversation_id="conv-R"))  # noqa: S106
+        detect_handoff(state, _server_ste_frame("xyz789"))
+        assert state.topic == ""
+        assert state.should_bridge() is False
+        assert state.should_resume() is True
+
+    def test_resume_conversation_token_sets_resume_signal(self) -> None:
+        state = HandoffState()
+        detect_handoff(state, _resume_token_frame(token="tokR", conversation_id="conv-R"))  # noqa: S106
+        assert state.resume_token == "tokR"  # noqa: S105
+        assert state.conversation_id == "conv-R"
+        assert state.topic == ""
+        assert not state.should_bridge()
+        assert state.should_resume() is True
+        assert state.should_continue() is True
+
+    def test_resume_not_triggered_without_conversation_id(self) -> None:
+        state = HandoffState()
+        # A resume token with no conversation id cannot build the resume body.
+        detect_handoff(state, _sse(json.dumps({"type": "resume_conversation_token", "token": "t"})))
+        assert state.resume_token == "t"  # noqa: S105
+        assert state.conversation_id == ""
+        assert state.should_resume() is False
+
+    def test_resume_not_triggered_when_http_content_seen(self) -> None:
+        state = HandoffState()
+        detect_handoff(state, _resume_token_frame(token="tokR", conversation_id="conv-R"))  # noqa: S106
+        detect_handoff(state, _content_append_frame(0, "inline answer"))
+        assert state.http_content_seen is True
+        assert state.should_resume() is False
+        assert state.should_continue() is False
 
     def test_should_bridge_true_when_topic_and_no_http_content(self) -> None:
         state = HandoffState()
@@ -160,12 +190,15 @@ class TestHandoffStateDetection:
         assert state.http_content_seen is True
         assert state.should_bridge() is False
 
-    def test_should_bridge_false_when_resume_token_with_topic(self) -> None:
+    def test_stream_handoff_wins_when_both_signals_present(self) -> None:
         state = HandoffState()
-        # resume_conversation_token + stream_handoff together → skip_ws wins.
-        detect_handoff(state, _resume_token_frame())
+        # resume_conversation_token + stream_handoff together → the WS path wins
+        # (the SPA's stream_handoff is the active-stream handler).
+        detect_handoff(state, _resume_token_frame(token="tokR", conversation_id="conv-R"))  # noqa: S106
         detect_handoff(state, _stream_handoff_frame("conversation-turn-2"))
-        assert state.should_bridge() is False
+        assert state.should_bridge() is True
+        assert state.should_resume() is False
+        assert state.should_continue() is True
 
     def test_feed_handles_split_chunks(self) -> None:
         state = HandoffState()
@@ -234,16 +267,16 @@ _HANDOFF_EXTRACTION_CASES: list[HandoffExtractionCase] = [
         expected_bridge=True,
     ),
     HandoffExtractionCase(
-        name="server_ste_top_level",
+        name="server_ste_top_level_is_telemetry",
         frame_bytes=_server_ste_frame("top-level-id"),
-        expected_topic="conversation-turn-top-level-id",
-        expected_bridge=True,
+        expected_topic="",
+        expected_bridge=False,
     ),
     HandoffExtractionCase(
-        name="server_ste_nested",
+        name="server_ste_nested_is_telemetry",
         frame_bytes=_server_ste_nested_frame("nested-id"),
-        expected_topic="conversation-turn-nested-id",
-        expected_bridge=True,
+        expected_topic="",
+        expected_bridge=False,
     ),
     HandoffExtractionCase(
         name="resume_token_no_bridge",
@@ -565,6 +598,158 @@ class TestStreamHandoffSseWithFakeServer:
         assert chunks == []
 
 
+# ── run_resume_bridge (HTTP resume continuation) ──────────────────────────────
+
+
+_CONTENT_SSE = 'data: {"p": "/message/content/parts/0", "o": "append", "v": "ANSWER"}\n\ndata: [DONE]\n\n'
+"""A resume body that carries assistant content (yielded to the intake)."""
+
+
+def _resume_token_sse(token: str, conversation_id: str) -> str:
+    """A resume body that re-hands-off to a fresh conduit (no content)."""
+    ev = json.dumps({"type": "resume_conversation_token", "token": token, "conversation_id": conversation_id})
+    return f'event: delta_encoding\ndata: "v1"\n\ndata: {ev}\n\ndata: [DONE]\n\n'
+
+
+class TestRunResumeBridge:
+    """``run_resume_bridge`` — POST /f/conversation/resume, offset retry + re-handoff
+    chain following.
+
+    Uses a real ``httpx.MockTransport`` adapter (not patching) so the resume
+    request shape (URL, ``x-conduit-token``, body, dropped sentinel headers) is
+    asserted against actual httpx request objects.
+    """
+
+    async def _drive(
+        self, handler: Callable[[httpx.Request], httpx.Response], **kwargs: Any
+    ) -> tuple[list[bytes], list[httpx.Request]]:
+        seen: list[httpx.Request] = []
+
+        def _wrap(request: httpx.Request) -> httpx.Response:
+            seen.append(request)
+            return handler(request)
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(_wrap)) as client:
+            chunks = [chunk async for chunk in run_resume_bridge(client=client, **kwargs)]
+        return chunks, seen
+
+    async def test_content_body_yielded(self) -> None:
+        chunks, seen = await self._drive(
+            lambda _r: httpx.Response(200, text=_CONTENT_SSE),
+            conversation_id="conv-1",
+            resume_token="tokZ",  # noqa: S106
+            request_headers={"authorization": "Bearer x", "user-agent": "UA"},
+        )
+        assert b"ANSWER" in b"".join(chunks)
+        assert len(seen) == 1
+        assert str(seen[0].url) == "https://chatgpt.com/backend-api/f/conversation/resume"
+        assert seen[0].headers["x-conduit-token"] == "tokZ"
+        assert json.loads(seen[0].content) == {"conversation_id": "conv-1", "offset": 0}
+
+    async def test_404_advances_offset_until_content(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            offset = json.loads(request.content)["offset"]
+            if offset < 2:
+                return httpx.Response(404)
+            return httpx.Response(200, text=_CONTENT_SSE)
+
+        chunks, seen = await self._drive(
+            handler,
+            conversation_id="c",
+            resume_token="t",  # noqa: S106
+            request_headers={},
+        )
+        assert [json.loads(r.content)["offset"] for r in seen] == [0, 1, 2]
+        assert b"ANSWER" in b"".join(chunks)
+
+    async def test_follows_rehandoff_chain_until_content(self) -> None:
+        # First two resume responses re-hand-off to a fresh conduit (no content);
+        # the third carries the answer. The bridge must follow the chain.
+        responses = [
+            _resume_token_sse(token="tok2", conversation_id="conv-1"),  # noqa: S106
+            _resume_token_sse(token="tok3", conversation_id="conv-1"),  # noqa: S106
+            _CONTENT_SSE,
+        ]
+        calls = {"n": 0}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            # Each hop POSTs offset 0 first (content/re-handoff arrive at offset 0).
+            body = responses[min(calls["n"], len(responses) - 1)]
+            calls["n"] += 1
+            return httpx.Response(200, text=body)
+
+        chunks, seen = await self._drive(
+            handler,
+            conversation_id="conv-1",
+            resume_token="tok1",  # noqa: S106
+            request_headers={},
+        )
+        assert b"ANSWER" in b"".join(chunks)
+        # 3 hops; each hop's conduit token chains tok1 → tok2 → tok3.
+        tokens = [r.headers["x-conduit-token"] for r in seen]
+        assert tokens == ["tok1", "tok2", "tok3"]
+
+    async def test_rehandoff_without_new_token_stops(self) -> None:
+        # A re-handoff body with no content and no fresh resume token ends the chain.
+        chunks, seen = await self._drive(
+            lambda _r: httpx.Response(200, text='data: {"type":"message_stream_complete"}\n\ndata: [DONE]\n\n'),
+            conversation_id="c",
+            resume_token="t",  # noqa: S106
+            request_headers={},
+        )
+        assert chunks == []
+        assert len(seen) == 1
+
+    async def test_all_404_yields_nothing(self) -> None:
+        chunks, seen = await self._drive(
+            lambda _r: httpx.Response(404),
+            conversation_id="c",
+            resume_token="t",  # noqa: S106
+            request_headers={},
+        )
+        assert chunks == []
+        assert len(seen) == 3  # tried all offsets
+
+    async def test_empty_body_not_yielded(self) -> None:
+        chunks, _ = await self._drive(
+            lambda _r: httpx.Response(200, text="   \n\n"),
+            conversation_id="c",
+            resume_token="t",  # noqa: S106
+            request_headers={},
+        )
+        assert chunks == []
+
+    async def test_non_404_error_stops_immediately(self) -> None:
+        chunks, seen = await self._drive(
+            lambda _r: httpx.Response(500),
+            conversation_id="c",
+            resume_token="t",  # noqa: S106
+            request_headers={},
+        )
+        assert chunks == []
+        assert len(seen) == 1  # 500 → give up, no further offsets
+
+    async def test_sentinel_headers_dropped_bearer_kept(self) -> None:
+        _, seen = await self._drive(
+            lambda _r: httpx.Response(200, text=_CONTENT_SSE),
+            conversation_id="c",
+            resume_token="tok",  # noqa: S106
+            request_headers={
+                "authorization": "Bearer keep",
+                "openai-sentinel-chat-requirements-token": "DROP",
+                "openai-sentinel-proof-token": "DROP",
+                "x-openai-target-path": "/backend-api/f/conversation",
+            },
+        )
+        h = seen[0].headers
+        assert h["authorization"] == "Bearer keep"
+        assert "openai-sentinel-chat-requirements-token" not in h
+        assert "openai-sentinel-proof-token" not in h
+        assert h["x-conduit-token"] == "tok"
+        assert h["x-openai-target-path"] == "/backend-api/f/conversation/resume"
+        assert h["accept"] == "text/event-stream"
+
+
 # ── End-to-end: HTTP SSE + WS frames → intake FSM → text ─────────────────────
 
 
@@ -663,11 +848,10 @@ class TestEndToEndHandoffToIntake:
             ws_chunks: list[bytes] = await _collect_ws_sse(ws_url=ws_url, topic_id=topic)
 
         # 3. Feed HTTP body + WS continuation through the intake FSM.
-        # The HTTP handoff SSE raises HandoffUnsupportedError — suppress it and
-        # continue feeding the WS chunks to the same FSM.
+        # The HTTP handoff side event is consumed silently (continuation metadata
+        # set, no IR event, no raise); the WS chunks carry the real answer.
         fsm = _make_fsm()
-        with contextlib.suppress(HandoffUnsupportedError):
-            await fsm.feed(http_body)
+        await fsm.feed(http_body)
 
         # Feed WS continuation bytes.
         for chunk in ws_chunks:

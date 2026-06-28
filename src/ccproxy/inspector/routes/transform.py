@@ -466,6 +466,12 @@ def register_transform_routes(router: InspectorRouter) -> None:
             return
         if meta.is_streaming:
             return
+        if meta.provider_type == "openai_conversations":
+            # OpenAI Conversations is always force-streamed through SSEPipeline
+            # (collect mode for non-streaming clients), which has already produced
+            # the buffered JSON in flow.response.content. Re-running the buffered
+            # transform here would double-transform it.
+            return
 
         try:
             # deferred: heavy FSM intake/render machinery

@@ -31,10 +31,13 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
+from collections.abc import Callable
 from concurrent.futures import Future
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from pydantic_ai.messages import ModelResponsePart
+
     from ccproxy.lightllm.graph import AnyAsyncIntakeFSM, AnyAsyncRenderFSM
 
 logger = logging.getLogger(__name__)
@@ -57,16 +60,30 @@ class SSEPipeline:
     * :attr:`raw_body` alias of :attr:`upstream_raw_bytes` (old
       ``SSETransformer`` callsites — e.g. :class:`PerplexityAddon`).
     * :meth:`close` explicit cleanup. Idempotent.
+
+    **Streaming vs collect mode.** Pass ``render`` for the streaming default:
+    each IR event is rendered to a listener SSE chunk as it arrives, and EOS
+    emits the render's terminator. Pass ``buffered_render`` instead for a
+    client that asked for a single buffered object while the upstream is still
+    intrinsically streamed (e.g. ``openai_conversations``, where the answer may
+    arrive over a WebSocket handoff): every chunk feeds the intake but emits
+    nothing, and EOS assembles the complete IR parts into one listener-format
+    JSON object via the supplied callable. Exactly one of ``render`` /
+    ``buffered_render`` must be set.
     """
 
     def __init__(
         self,
         *,
         intake: AnyAsyncIntakeFSM,
-        render: AnyAsyncRenderFSM,
+        render: AnyAsyncRenderFSM | None = None,
+        buffered_render: Callable[[list[ModelResponsePart]], bytes] | None = None,
     ) -> None:
+        if (render is None) == (buffered_render is None):
+            raise ValueError("SSEPipeline requires exactly one of render / buffered_render")
         self._intake = intake
         self._render = render
+        self._buffered_render = buffered_render
         self._closed = False
         self._terminator_emitted = False
         self._loop = asyncio.new_event_loop()
@@ -96,22 +113,32 @@ class SSEPipeline:
         return out if out else []
 
     async def _process_chunk(self, data: bytes) -> bytes:
-        """Drive one chunk through intake → render. Runs on the persistent loop."""
+        """Drive one chunk through the intake. Runs on the persistent loop.
+
+        Streaming mode renders each IR event to a listener SSE chunk. Collect
+        mode only accumulates IR into the intake's parts manager and emits
+        nothing until EOS.
+        """
+        if self._buffered_render is not None:
+            await self._intake.feed(data)
+            return b""
+        assert self._render is not None  # guarded by __init__
         out = bytearray()
         for event in await self._intake.feed(data):
             out.extend(await self._render.render(event))
         return bytes(out)
 
     def _flush_and_close(self) -> bytes | list[bytes]:
-        """Drain trailing IR events, emit the render terminator, tear down the loop."""
+        """Drain the intake, emit the terminator (or buffered object), tear down the loop."""
         if self._closed:
             return []
 
         out = bytearray()
 
         if self._loop.is_running():
+            drain = self._drain_and_collect if self._buffered_render is not None else self._drain_and_terminate
             try:
-                future: Future[bytes] = asyncio.run_coroutine_threadsafe(self._drain_and_terminate(), self._loop)
+                future: Future[bytes] = asyncio.run_coroutine_threadsafe(drain(), self._loop)
                 out.extend(future.result())
             except Exception:
                 logger.exception("SSEPipeline.close failed mid-drain; emitting render terminator only")
@@ -130,6 +157,7 @@ class SSEPipeline:
 
     async def _drain_and_terminate(self) -> bytes:
         """Async tail: ``intake.close()`` → render each trailing event → ``render.close()``."""
+        assert self._render is not None  # guarded by __init__ (streaming mode)
         out = bytearray()
         try:
             for event in await self._intake.close():
@@ -143,6 +171,28 @@ class SSEPipeline:
             except Exception:
                 logger.exception("SSEPipeline render.close failed; no terminator emitted")
         return bytes(out)
+
+    async def _drain_and_collect(self) -> bytes:
+        """Collect-mode tail: ``intake.close()`` flushes trailing parts, then the
+        complete IR parts are assembled into one listener-format buffered object.
+
+        Never calls ``render.close()`` — a buffered object carries no SSE
+        terminator, so emitting ``[DONE]`` / ``message_stop`` here would corrupt
+        the single JSON body.
+        """
+        assert self._buffered_render is not None  # guarded by __init__ (collect mode)
+        try:
+            await self._intake.close()
+        except Exception:
+            logger.exception("SSEPipeline intake.close failed in collect mode; rendering parts seen so far")
+        if self._terminator_emitted:
+            return b""
+        self._terminator_emitted = True
+        try:
+            return self._buffered_render(list(self._intake.parts_manager.get_parts()))
+        except Exception:
+            logger.exception("SSEPipeline buffered_render failed; emitting empty object")
+            return b"{}"
 
     def close(self) -> None:
         """Explicit cleanup. Idempotent. Tears down the persistent loop.

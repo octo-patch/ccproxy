@@ -9,11 +9,14 @@ Covers:
 - Finish is synthesised exactly once (``/message/status`` and ``[DONE]``
   together do not duplicate).
 - ``resume_conversation_token``, ``stream_handoff``, and ``server_ste_metadata``
-  before any content → :class:`HandoffUnsupportedError`.
-- Handoff typed events after content begin → ``state.continuation`` is set,
-  ``content_begun`` remains ``True``, no error raised.
-- Buffered OpenAI Conversations SSE → one OpenAI Chat ``chat.completion`` JSON
-  body via ``transform_buffered_response_sync``.
+  (before or after content) → ``state.continuation`` is set, nothing is raised,
+  no IR event is emitted; the answer arrives as bridged frames the sidecar
+  appends and this same FSM parses.
+- Collect-mode ``SSEPipeline`` (force-streamed openai_conversations whose client
+  asked for a buffered object) → one OpenAI Chat ``chat.completion`` /
+  Anthropic ``message`` JSON body.
+- A handoff before content followed by bridged content renders clean listener
+  chunks only — no raw SSE-v1 leak.
 """
 
 from __future__ import annotations
@@ -27,11 +30,7 @@ import pytest
 from pydantic_ai.messages import ModelResponseStreamEvent, TextPart
 from pydantic_ai.models import ModelRequestParameters
 
-from ccproxy.lightllm.graph.buffered import transform_buffered_response_sync
-from ccproxy.lightllm.graph.openai_conversations_intake import (
-    HandoffUnsupportedError,
-    OpenAIConversationsIntakeFSM,
-)
+from ccproxy.lightllm.graph.openai_conversations_intake import OpenAIConversationsIntakeFSM
 from ccproxy.lightllm.parsed import InboundFormat
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -67,6 +66,47 @@ def _close_sync(fsm: OpenAIConversationsIntakeFSM) -> list[ModelResponseStreamEv
 def _collected_text(fsm: OpenAIConversationsIntakeFSM) -> str:
     parts = list(fsm.parts_manager.get_parts())
     return "".join(p.content for p in parts if isinstance(p, TextPart))
+
+
+def _drive_collect(raw_sse: bytes, *, inbound_format: InboundFormat, model: str = "gpt-5") -> dict[str, Any]:
+    """Drive a collect-mode ``SSEPipeline`` over ``raw_sse`` and return the one
+    buffered JSON object it assembles at EOS (mirrors the force-streamed
+    openai_conversations path for a stream:false client)."""
+    from ccproxy.lightllm.graph import dispatch_intake
+    from ccproxy.lightllm.graph.buffered import (
+        intake_finish_reason,
+        intake_provider_response_id,
+        render_parts_to_listener,
+    )
+    from ccproxy.lightllm.graph.sse_pipeline import SSEPipeline
+
+    intake = dispatch_intake(
+        provider_type="openai_conversations",
+        model=model,
+        request_params=ModelRequestParameters(),
+    )
+
+    def _buffered_render(parts: list[Any]) -> bytes:
+        return render_parts_to_listener(
+            parts=parts,
+            inbound_format=inbound_format,
+            model=model,
+            provider_response_id=intake_provider_response_id(intake),
+            finish_reason=intake_finish_reason(intake),
+        )
+
+    pipeline = SSEPipeline(intake=intake, buffered_render=_buffered_render)
+    out = bytearray()
+    for i in range(0, len(raw_sse), 16):
+        res = pipeline(raw_sse[i : i + 16])
+        if isinstance(res, (bytes, bytearray)):
+            out.extend(res)
+    flushed = pipeline(b"")
+    if isinstance(flushed, (bytes, bytearray)):
+        out.extend(flushed)
+    pipeline.close()
+    parsed: dict[str, Any] = json.loads(bytes(out))
+    return parsed
 
 
 def _make_add_frame(
@@ -405,35 +445,41 @@ class TestMultiChunkSplit:
 
 
 class TestHandoffDetection:
-    def test_stream_handoff_before_content_raises(self) -> None:
-        """``stream_handoff`` before any content raises :class:`HandoffUnsupportedError`."""
+    def test_stream_handoff_before_content_sets_continuation_no_raise(self) -> None:
+        """``stream_handoff`` before content sets continuation, emits nothing, never raises."""
         fsm = _make_fsm()
         _feed_sync(fsm, _make_add_frame(channel=0, msg_id="asst"))
         data = _make_typed_event(
             "stream_handoff",
             options=[{"type": "subscribe_ws_topic", "topic_id": "conversation-turn-abc"}],
         )
-        with pytest.raises(HandoffUnsupportedError) as exc_info:
-            _feed_sync(fsm, data)
-        assert exc_info.value.meta.handoff_topic == "conversation-turn-abc"
+        events = _feed_sync(fsm, data)
+        assert events == []
+        assert fsm.state.content_begun is False
+        assert fsm.continuation is not None
+        assert fsm.continuation.handoff_topic == "conversation-turn-abc"
 
-    def test_resume_conversation_token_before_content_raises(self) -> None:
-        """``resume_conversation_token`` before content raises :class:`HandoffUnsupportedError`."""
+    def test_resume_conversation_token_before_content_sets_continuation_no_raise(self) -> None:
+        """``resume_conversation_token`` before content sets continuation, never raises."""
         fsm = _make_fsm()
         _feed_sync(fsm, _make_add_frame(channel=0, msg_id="asst"))
         data = _make_typed_event("resume_conversation_token", token="tok999")  # noqa: S106
-        with pytest.raises(HandoffUnsupportedError) as exc_info:
-            _feed_sync(fsm, data)
-        assert exc_info.value.meta.resume_token == "tok999"  # noqa: S105
+        events = _feed_sync(fsm, data)
+        assert events == []
+        assert fsm.state.content_begun is False
+        assert fsm.continuation is not None
+        assert fsm.continuation.resume_token == "tok999"  # noqa: S105
 
-    def test_server_ste_metadata_before_content_raises(self) -> None:
-        """``server_ste_metadata`` before content raises :class:`HandoffUnsupportedError`."""
+    def test_server_ste_metadata_before_content_sets_continuation_no_raise(self) -> None:
+        """``server_ste_metadata`` before content sets continuation, never raises."""
         fsm = _make_fsm()
         _feed_sync(fsm, _make_add_frame(channel=0, msg_id="asst"))
         data = _make_typed_event("server_ste_metadata", turn_exchange_id="turn-xyz")
-        with pytest.raises(HandoffUnsupportedError) as exc_info:
-            _feed_sync(fsm, data)
-        meta = exc_info.value.meta
+        events = _feed_sync(fsm, data)
+        assert events == []
+        assert fsm.state.content_begun is False
+        meta = fsm.continuation
+        assert meta is not None
         assert meta.handoff_topic == "conversation-turn-turn-xyz"
         assert meta.turn_exchange_id == "turn-xyz"
 
@@ -475,12 +521,12 @@ class TestHandoffDetection:
         assert fsm.continuation.conversation_id == "my-conv"
 
 
-# ── Buffered path ─────────────────────────────────────────────────────────────
+# ── Collect mode (force-streamed buffered client) ─────────────────────────────
 
 
-class TestBufferedPath:
+class TestCollectMode:
     def test_sse_body_to_openai_chat_completion(self) -> None:
-        """Concatenated OpenAI Conversations SSE → OpenAI ``chat.completion`` JSON."""
+        """Force-streamed SSE → one OpenAI ``chat.completion`` JSON at EOS."""
         raw_sse = (
             _make_encoding_banner()
             + _make_add_frame(channel=0, msg_id="asst")
@@ -497,50 +543,42 @@ class TestBufferedPath:
             )
             + _make_done()
         )
-        out_bytes = transform_buffered_response_sync(
-            raw_bytes=raw_sse,
-            provider_type="openai_conversations",
-            inbound_format=InboundFormat.OPENAI_CHAT,
-            model="gpt-5",
-            request_params=ModelRequestParameters(),
-        )
-        out = json.loads(out_bytes)
+        out = _drive_collect(raw_sse, inbound_format=InboundFormat.OPENAI_CHAT)
         assert out["object"] == "chat.completion"
         assert out["choices"][0]["message"]["content"] == "hello world"
         assert out["choices"][0]["finish_reason"] == "stop"
 
     def test_sse_body_to_anthropic_message(self) -> None:
-        """Concatenated SSE → Anthropic ``BetaMessage`` JSON."""
+        """Force-streamed SSE → one Anthropic ``message`` JSON at EOS."""
         raw_sse = (
             _make_add_frame(channel=0, msg_id="asst")
             + _make_shorthand_batch([{"p": "/message/content/parts/0", "o": "append", "v": "Hi there"}])
             + _make_done()
         )
-        out_bytes = transform_buffered_response_sync(
-            raw_bytes=raw_sse,
-            provider_type="openai_conversations",
-            inbound_format=InboundFormat.ANTHROPIC_MESSAGES,
-            model="gpt-5",
-            request_params=ModelRequestParameters(),
-        )
-        out = json.loads(out_bytes)
+        out = _drive_collect(raw_sse, inbound_format=InboundFormat.ANTHROPIC_MESSAGES)
         assert out["type"] == "message"
         assert out["role"] == "assistant"
         assert any(b.get("text") == "Hi there" for b in out["content"] if b.get("type") == "text")
 
     def test_empty_body_returns_valid_empty_response(self) -> None:
-        """Empty/no-content SSE → valid but empty response object."""
-        raw_sse = _make_done()
-        out_bytes = transform_buffered_response_sync(
-            raw_bytes=raw_sse,
-            provider_type="openai_conversations",
-            inbound_format=InboundFormat.OPENAI_CHAT,
-            model="gpt-5",
-            request_params=ModelRequestParameters(),
-        )
-        out = json.loads(out_bytes)
+        """No-content SSE → valid but empty ``chat.completion`` object."""
+        out = _drive_collect(_make_done(), inbound_format=InboundFormat.OPENAI_CHAT)
         assert out["object"] == "chat.completion"
         assert out["choices"][0]["message"]["content"] is None
+
+    def test_buffered_transform_rejects_openai_conversations(self) -> None:
+        """openai_conversations is always force-streamed; the buffered transform rejects it."""
+        from ccproxy.lightllm.graph import UnsupportedUpstreamError
+        from ccproxy.lightllm.graph.buffered import transform_buffered_response_sync
+
+        with pytest.raises(UnsupportedUpstreamError):
+            transform_buffered_response_sync(
+                raw_bytes=_make_done(),
+                provider_type="openai_conversations",
+                inbound_format=InboundFormat.OPENAI_CHAT,
+                model="gpt-5",
+                request_params=ModelRequestParameters(),
+            )
 
 
 # ── SSE Pipeline integration ──────────────────────────────────────────────────
@@ -632,3 +670,58 @@ class TestSSEPipeline:
             texts.append(text)
 
         assert texts[0] == texts[1] == texts[2] == "chunk-safe"
+
+    def test_handoff_before_content_no_raw_sse_leak(self) -> None:
+        """A handoff before content must not leak raw SSE-v1; the bridged content
+        frames (as the sidecar WS bridge appends them) render as clean OpenAI
+        chunks only. Regression for the ``event: delta`` leak."""
+        from ccproxy.lightllm.graph import dispatch_intake, dispatch_render
+        from ccproxy.lightllm.graph.sse_pipeline import SSEPipeline
+
+        intake = dispatch_intake(
+            provider_type="openai_conversations",
+            model="gpt-5",
+            request_params=ModelRequestParameters(),
+        )
+        render = dispatch_render(inbound_format=InboundFormat.OPENAI_CHAT, model="gpt-5")
+        pipeline = SSEPipeline(intake=intake, render=render)
+
+        # Inline phase: assistant channel declared, then a handoff marker BEFORE content.
+        inline = _make_add_frame(channel=0, msg_id="asst") + _make_typed_event(
+            "stream_handoff",
+            options=[{"type": "subscribe_ws_topic", "topic_id": "conversation-turn-bridge"}],
+        )
+        # Bridged phase: the real answer arrives as SSE-v1 patches.
+        bridged = (
+            _make_shorthand_batch([{"p": "/message/content/parts/0", "o": "append", "v": "bridged "}])
+            + _make_shorthand_batch([{"p": "/message/content/parts/0", "o": "append", "v": "answer"}])
+            + _make_done()
+        )
+
+        out = bytearray()
+        for chunk in (inline, bridged):
+            res = pipeline(chunk)
+            if isinstance(res, (bytes, bytearray)):
+                out.extend(res)
+        flushed = pipeline(b"")
+        if isinstance(flushed, (bytes, bytearray)):
+            out.extend(flushed)
+        pipeline.close()
+
+        wire = out.decode()
+        # No raw upstream SSE-v1 leaked through the transform.
+        assert "stream_handoff" not in wire
+        assert "conversation-turn-bridge" not in wire
+        assert "/message/content/parts/0" not in wire
+        # The bridged answer rendered as clean OpenAI chunks.
+        text = ""
+        for line in wire.splitlines():
+            if line.startswith("data:") and "[DONE]" not in line:
+                try:
+                    obj = json.loads(line[5:].strip())
+                    for choice in obj.get("choices", []):
+                        text += choice.get("delta", {}).get("content", "") or ""
+                except (json.JSONDecodeError, KeyError):
+                    pass
+        assert text == "bridged answer"
+        assert "[DONE]" in wire

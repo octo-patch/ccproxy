@@ -520,6 +520,73 @@ class TestResponseHeadersEdgeCases:
 
         assert flow.response.stream is True
 
+    @pytest.mark.asyncio
+    async def test_responseheaders_openai_conversations_stream_false_collects(self) -> None:
+        """A stream:false openai_conversations client is force-streamed in collect mode:
+        a SSEPipeline is installed and the response content-type becomes JSON."""
+        from pydantic_ai.models import ModelRequestParameters
+
+        from ccproxy.lightllm.graph.sse_pipeline import SSEPipeline
+
+        addon = InspectorAddon()
+        meta = TransformMeta(
+            provider_type="openai_conversations",
+            model="gpt-5-5-pro",
+            request_data={"messages": []},
+            is_streaming=False,  # client asked for a buffered object
+            mode="transform",
+            inbound_format="openai_chat",
+            request_parameters=ModelRequestParameters(),
+        )
+        record = FlowRecord(direction="inbound", transform=meta)
+        flow = MagicMock()
+        flow.response.headers = {"content-type": "text/event-stream", "content-encoding": "gzip"}
+        flow.metadata = {InspectorMeta.RECORD: record}
+
+        await addon.responseheaders(flow)
+
+        pipeline = flow.response.stream
+        try:
+            assert isinstance(pipeline, SSEPipeline)
+            assert flow.response.headers["content-type"] == "application/json"
+            assert "content-encoding" not in flow.response.headers
+        finally:
+            if isinstance(pipeline, SSEPipeline):
+                pipeline.close()
+
+    @pytest.mark.asyncio
+    async def test_responseheaders_openai_conversations_stream_true_streams(self) -> None:
+        """A stream:true openai_conversations client installs a streaming pipeline and
+        leaves the event-stream content-type intact."""
+        from pydantic_ai.models import ModelRequestParameters
+
+        from ccproxy.lightllm.graph.sse_pipeline import SSEPipeline
+
+        addon = InspectorAddon()
+        meta = TransformMeta(
+            provider_type="openai_conversations",
+            model="gpt-5-5-pro",
+            request_data={"messages": []},
+            is_streaming=True,
+            mode="transform",
+            inbound_format="openai_chat",
+            request_parameters=ModelRequestParameters(),
+        )
+        record = FlowRecord(direction="inbound", transform=meta)
+        flow = MagicMock()
+        flow.response.headers = {"content-type": "text/event-stream"}
+        flow.metadata = {InspectorMeta.RECORD: record}
+
+        await addon.responseheaders(flow)
+
+        pipeline = flow.response.stream
+        try:
+            assert isinstance(pipeline, SSEPipeline)
+            assert flow.response.headers["content-type"] == "text/event-stream"
+        finally:
+            if isinstance(pipeline, SSEPipeline):
+                pipeline.close()
+
 
 class TestRequestWithTracer:
     @pytest.mark.asyncio
