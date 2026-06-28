@@ -169,6 +169,33 @@ def _make_typed_event(kind: str, **kwargs: Any) -> bytes:
     return f"data: {json.dumps(frame)}\n\n".encode()
 
 
+def _make_text_add_frame(
+    *,
+    channel: int,
+    msg_id: str,
+    role: str = "assistant",
+    content_type: str = "text",
+    status: str = "in_progress",
+    conv_id: str = "conv-1",
+) -> bytes:
+    """Assistant ``add`` whose content uses the string ``text`` field (recon §2)
+    rather than a ``parts`` array — the ``/message/content/text`` channel shape."""
+    msg: dict[str, Any] = {
+        "id": msg_id,
+        "author": {"role": role},
+        "content": {"content_type": content_type, "text": ""},
+        "status": status,
+        "metadata": {"model_slug": "gpt-5", "is_visually_hidden_from_conversation": False},
+    }
+    frame = {"p": "", "o": "add", "v": {"message": msg, "conversation_id": conv_id}, "c": channel}
+    return f"data: {json.dumps(frame)}\n\n".encode()
+
+
+def _make_bare_delta(value: str) -> bytes:
+    """Bare ``{"v": "<token>"}`` continuation delta (no ``p``/``o``)."""
+    return f"data: {json.dumps({'v': value})}\n\n".encode()
+
+
 # ── Standard happy-path fixture ───────────────────────────────────────────────
 
 _STANDARD_STREAM = (
@@ -519,6 +546,53 @@ class TestHandoffDetection:
         _feed_sync(fsm, data)
         assert fsm.continuation is not None
         assert fsm.continuation.conversation_id == "my-conv"
+
+
+# ── /message/content/text path + bare continuation deltas (recon §2) ──────────
+
+# The "Paris" split-token example from the recon doc: an explicit append on the
+# string `text` content path followed by a bare {"v": ...} continuation delta.
+_TEXT_PATH_STREAM = (
+    _make_encoding_banner()
+    + _make_text_add_frame(channel=0, msg_id="asst")
+    + _make_single_patch("/message/content/text", "append", "Par", channel=0)
+    + _make_bare_delta("is")
+    + _make_single_patch("/message/status", "replace", "finished_successfully", channel=0)
+    + _make_done()
+)
+
+
+class TestTextContentPath:
+    def test_text_path_with_bare_continuation_assembles(self) -> None:
+        """`/message/content/text` append + bare `{v}` continuation → "Paris"."""
+        fsm = _make_fsm()
+        _feed_sync(fsm, _TEXT_PATH_STREAM)
+        assert _collected_text(fsm) == "Paris"
+        assert fsm.finish_reason == "stop"
+
+    def test_text_path_split_mid_frame(self) -> None:
+        """Same stream fed in 4-byte slices assembles identically (no drop/dup)."""
+        fsm = _make_fsm()
+        for i in range(0, len(_TEXT_PATH_STREAM), 4):
+            _feed_sync(fsm, _TEXT_PATH_STREAM[i : i + 4])
+        _close_sync(fsm)
+        assert _collected_text(fsm) == "Paris"
+
+    def test_bare_delta_before_any_content_path_is_noop(self) -> None:
+        """A bare `{v}` with no prior content path is dropped (no emit, no state corruption)."""
+        fsm = _make_fsm()
+        _feed_sync(fsm, _make_text_add_frame(channel=0, msg_id="asst"))
+        _feed_sync(fsm, _make_bare_delta("orphan"))
+        assert _collected_text(fsm) == ""
+        assert fsm.state.content_begun is False
+        assert fsm.state.last_path == ""
+
+    def test_text_path_collect_mode(self) -> None:
+        """Force-streamed `/message/content/text` stream → one chat.completion "Paris"."""
+        out = _drive_collect(_TEXT_PATH_STREAM, inbound_format=InboundFormat.OPENAI_CHAT)
+        assert out["object"] == "chat.completion"
+        assert out["choices"][0]["message"]["content"] == "Paris"
+        assert out["choices"][0]["finish_reason"] == "stop"
 
 
 # ── Collect mode (force-streamed buffered client) ─────────────────────────────

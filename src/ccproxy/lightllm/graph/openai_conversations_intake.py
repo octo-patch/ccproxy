@@ -25,12 +25,17 @@ Wire shapes decoded:
 * ``data: {v: [{p,o,v}, ...]}`` (no ``o``/``p``) — shorthand batch, same
   semantics.
 * ``data: {p, o, v}`` — single patch on the current channel.
+* ``data: {v: "<token>"}`` (bare string ``v``, no ``o``/``p``) — continuation delta:
+  continues the last content path with an implied ``append`` (recon §2 — the
+  majority of the stream once content begins).
 * ``data: [DONE]`` — stream end.
 
-Patch semantics on ``/message/content/parts/0``:
+Patch semantics on a text-content path (``/message/content/parts/0`` array shape
+or ``/message/content/text`` string shape):
 
 * ``o: "append"`` — emit the full value as a text delta.
 * ``o: "replace"`` — compute the suffix not yet accumulated and emit only that.
+* bare ``{v}`` — continue the last content path with an implied ``append``.
 
 Finish synthesis:
 
@@ -150,6 +155,11 @@ class _HandoffDetected:
 _ANSWER_VENDOR_ID = "oaicv-answer"
 """Stable vendor_part_id for the assistant final-answer ``TextPart``."""
 
+_TEXT_CONTENT_PATHS = frozenset({"/message/content/parts/0", "/message/content/text"})
+"""Content paths carrying the assistant's visible answer text. ``parts/0`` is the
+multimodal/array shape; ``text`` is the single-string shape (recon §2). Both stream
+identically — ``append`` + suffix-``replace`` + bare continuation deltas."""
+
 
 @dataclass
 class _ConversationsIntakeState:
@@ -184,6 +194,10 @@ class _ConversationsIntakeState:
     # ── Accumulator ───────────────────────────────────────────────────────────
     accumulated_text: str = ""
     """Full text emitted for the final-answer channel; used for suffix diffing."""
+
+    last_path: str = ""
+    """Most-recent explicit content patch path on the final-answer channel; a bare
+    ``{"v": ...}`` delta continues this target with an implied ``append`` (recon §2)."""
 
     content_begun: bool = False
     """True once at least one text delta has been emitted."""
@@ -369,8 +383,11 @@ async def handle_patch(
     Updates ``state.current_channel`` when the envelope declares one.
     Only patches targeting the final-answer channel produce output:
 
-    - ``append`` on ``/message/content/parts/0`` → text delta.
-    - ``replace`` on ``/message/content/parts/0`` → suffix-only text delta.
+    - ``append`` on a text-content path (``/message/content/parts/0`` array shape
+      or ``/message/content/text`` string shape) → text delta.
+    - ``replace`` on a text-content path → suffix-only text delta.
+    - bare ``{"v": "str"}`` (no ``p``/``o``) → continues the last content path with
+      an implied ``append`` (recon §2 — the SSE-v1 majority shape).
     - ``replace`` on ``/message/status`` = ``finished_successfully`` → finish.
     """
     state = ctx.state
@@ -384,7 +401,14 @@ async def handle_patch(
         return
 
     for path, op, value in env.patches:
-        if path == "/message/content/parts/0":
+        # A bare continuation delta ({"v": "str"} with no p/o) continues the last
+        # content path with an implied "append". When no content path is live yet
+        # (last_path empty) it resolves to a non-content path and is dropped.
+        if not path and not op and isinstance(value, str):
+            path, op = state.last_path, "append"
+
+        if path in _TEXT_CONTENT_PATHS:
+            state.last_path = path
             if op == "append" and isinstance(value, str) and value:
                 state.accumulated_text += value
                 state.out_events.extend(
