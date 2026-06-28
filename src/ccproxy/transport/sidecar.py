@@ -212,7 +212,9 @@ async def _openai_conversations_continuation(
     (``POST /f/conversation/resume``). The WS path wins when both are present.
     """
     if handoff_state.should_bridge():
-        async for chunk in run_handoff_bridge(client=client, topic_id=handoff_state.topic):
+        async for chunk in run_handoff_bridge(
+            client=client, topic_id=handoff_state.topic, request_headers=request_headers
+        ):
             yield chunk
     elif handoff_state.should_resume():
         async for chunk in run_resume_bridge(

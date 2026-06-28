@@ -26,6 +26,7 @@ Python idioms are original.
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 from collections.abc import AsyncIterator
@@ -50,6 +51,9 @@ _HANDOFF_SIDE_EVENTS = frozenset({"stream_handoff"})
 
 # Read timeout on the WS (aurora uses 120s).
 _WS_READ_TIMEOUT = 120.0
+# Give up if no answer item arrives on the handoff topic within this window, so a
+# topic that never streams doesn't hold the client for the full read timeout.
+_WS_FIRST_ITEM_TIMEOUT = 30.0
 # Ping interval (aurora: 25s).
 _WS_PING_INTERVAL = 25.0
 # Browser-shape User-Agent string for the WS dial and /celsius/ws/user GET.
@@ -128,6 +132,12 @@ class HandoffState:
                 tok = parsed.get("token")
                 if isinstance(tok, str) and tok:
                     self.resume_token = tok
+                    # The JWT carries turn_topic_id (conversation-turn-<id>) — the
+                    # WS topic for the conduit stream. Prefer it as the topic source.
+                    if not self.topic:
+                        jwt_topic = _topic_from_resume_jwt(tok)
+                        if jwt_topic:
+                            self.topic = jwt_topic
             elif kind in _HANDOFF_SIDE_EVENTS and not self.topic:
                 topic = _extract_handoff_topic(parsed)
                 if topic:
@@ -189,6 +199,30 @@ def detect_handoff(state: HandoffState, chunk: bytes) -> None:
     state.feed(chunk)
 
 
+def _topic_from_resume_jwt(token: str) -> str:
+    """Decode the ``resume_conversation_token`` JWT and return its ``turn_topic_id``
+    claim — the ``conversation-turn-<id>`` WebSocket topic carrying the conduit
+    answer stream. Empty string on any decode failure or missing claim.
+
+    The JWT payload also carries ``conduit_uuid`` / ``conduit_location`` (an
+    internal IP, not directly reachable) / ``cluster``; the public route to the
+    stream is ``/celsius/ws/user`` → wss, subscribed to ``turn_topic_id``.
+    """
+    parts = token.split(".")
+    if len(parts) < 2 or not parts[1]:
+        return ""
+    payload = parts[1]
+    payload += "=" * (-len(payload) % 4)
+    try:
+        claims = json.loads(base64.urlsafe_b64decode(payload))
+    except (ValueError, json.JSONDecodeError):
+        return ""
+    if not isinstance(claims, dict):
+        return ""
+    topic = claims.get("turn_topic_id")
+    return topic if isinstance(topic, str) else ""
+
+
 def _extract_handoff_topic(raw: dict[str, Any]) -> str:
     """Extract the WS topic id from a ``stream_handoff`` event.
 
@@ -211,19 +245,50 @@ def _extract_handoff_topic(raw: dict[str, Any]) -> str:
 # ── WS URL fetch ──────────────────────────────────────────────────────────────
 
 
+_WS_GET_DROP_HEADERS = frozenset(
+    {
+        "x-openai-target-path",
+        "x-openai-target-route",
+        "x-conduit-token",
+        "content-length",
+        "content-type",
+        "accept",
+        "host",
+    }
+)
+"""Original /f/conversation headers the WS-url GET replaces (everything else —
+bearer, browser shape, sentinel tokens — is reused so the GET is authenticated)."""
+
+
+def _ws_get_headers(request_headers: dict[str, str]) -> dict[str, str]:
+    """Build the ``/celsius/ws/user`` GET headers by reusing the original
+    browser-shape + bearer + sentinel headers (aurora sends the full
+    conversation header set; the minimal 3-header GET 403s)."""
+    headers = {k: v for k, v in request_headers.items() if k.lower() not in _WS_GET_DROP_HEADERS}
+    headers["accept"] = "*/*"
+    headers["x-openai-target-path"] = _WS_USER_PATH
+    headers["x-openai-target-route"] = _WS_USER_PATH
+    return headers
+
+
 async def fetch_ws_url(
     client: httpx.AsyncClient,
     *,
+    request_headers: dict[str, str] | None = None,
     extra_headers: dict[str, str] | None = None,
     timeout: float = 15.0,
 ) -> str:
     """GET /backend-api/celsius/ws/user and return the ``websocket_url`` value.
 
-    Mirrors aurora ``getChatWebsocketURL`` (request.go:632-659, MIT-licensed).
+    Mirrors aurora ``getChatWebsocketURL`` (request.go:632-659, MIT-licensed),
+    which sends the full conversation header set (bearer + sentinel + browser);
+    a minimal-header GET is rejected with HTTP 403.
 
     Args:
         client: Cached httpx.AsyncClient (curl-cffi backed, authenticated).
-        extra_headers: Optional headers to stamp on the GET (e.g. target-path).
+        request_headers: The original forwarded ``/f/conversation`` headers,
+            reused for the bearer + browser + sentinel block.
+        extra_headers: Optional additional headers to stamp on the GET.
         timeout: Request timeout in seconds.
 
     Returns:
@@ -233,11 +298,7 @@ async def fetch_ws_url(
         RuntimeError: On non-200 response or missing ``websocket_url`` field.
     """
     url = f"{_WS_BASE_URL}{_WS_USER_PATH}"
-    headers: dict[str, str] = {
-        "x-openai-target-path": _WS_USER_PATH,
-        "x-openai-target-route": _WS_USER_PATH,
-        "accept": "*/*",
-    }
+    headers = _ws_get_headers(request_headers or {})
     if extra_headers:
         headers.update(extra_headers)
 
@@ -472,10 +533,20 @@ async def _stream_handoff_sse_impl(
                         return
 
             ping_task = asyncio.create_task(_ping_loop(), name="ccproxy-ws-handoff-ping")
+            logger.debug("ws_handoff: dialed wss, subscribed topic=%s", topic_id)
+            yielded = 0
+            # If no answer item arrives on the topic within this window, give up
+            # rather than hold the client for the full per-message read timeout.
+            first_item_deadline = asyncio.get_running_loop().time() + _WS_FIRST_ITEM_TIMEOUT
 
             try:
                 async for raw_msg in _ws_read_loop(ws=ws, read_timeout=read_timeout):
                     frames = _parse_ws_frames(raw_msg if isinstance(raw_msg, bytes) else raw_msg.encode())
+                    logger.debug(
+                        "ws_handoff: WS msg frames=%s topics=%s",
+                        [f.get("type") for f in frames],
+                        [f.get("topic_id") or (f.get("reply") or {}).get("topic_id") for f in frames],
+                    )
                     done = False
                     for frame in frames:
                         frame_type = frame.get("type")
@@ -487,6 +558,7 @@ async def _stream_handoff_sse_impl(
                         else:
                             continue
 
+                        yielded += len(items)
                         for item in items:
                             if not item.endswith("\n"):
                                 item += "\n"
@@ -496,9 +568,18 @@ async def _stream_handoff_sse_impl(
                                 item += "\n"
                             yield item.encode()
                         if done:
+                            logger.debug("ws_handoff: WS done, yielded=%d items (topic=%s)", yielded, topic_id)
                             return
+                    if yielded == 0 and asyncio.get_running_loop().time() > first_item_deadline:
+                        logger.warning(
+                            "ws_handoff: no answer on topic=%s within %.0fs; giving up",
+                            topic_id,
+                            _WS_FIRST_ITEM_TIMEOUT,
+                        )
+                        return
             finally:
                 ping_task.cancel()
+                logger.debug("ws_handoff: WS closed, yielded=%d items (topic=%s)", yielded, topic_id)
     except Exception as exc:
         logger.error("ws_handoff: WS bridge error (topic=%s): %s", topic_id, exc)
 
@@ -528,6 +609,7 @@ async def run_handoff_bridge(
     *,
     client: httpx.AsyncClient,
     topic_id: str,
+    request_headers: dict[str, str] | None = None,
     extra_headers: dict[str, str] | None = None,
 ) -> AsyncIterator[bytes]:
     """Fetch WS URL, dial, stream topic, yield SSE bytes.
@@ -537,11 +619,15 @@ async def run_handoff_bridge(
 
     Args:
         client: Authenticated httpx.AsyncClient for the ``/celsius/ws/user`` GET.
-        topic_id: WS topic id from the HTTP handoff side event.
+        topic_id: WS topic id (from a ``stream_handoff`` option or the
+            ``resume_conversation_token`` JWT's ``turn_topic_id``).
+        request_headers: The original forwarded ``/f/conversation`` headers, reused
+            so the ``/celsius/ws/user`` GET is authenticated (bearer + sentinel +
+            browser); a minimal-header GET 403s.
         extra_headers: Optional additional headers for the ``/celsius/ws/user`` GET.
     """
     try:
-        ws_url = await fetch_ws_url(client=client, extra_headers=extra_headers)
+        ws_url = await fetch_ws_url(client=client, request_headers=request_headers, extra_headers=extra_headers)
     except Exception as exc:
         logger.error("ws_handoff: failed to fetch WS URL (topic=%s): %s", topic_id, exc)
         return

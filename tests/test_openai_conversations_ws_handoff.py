@@ -108,6 +108,25 @@ def _resume_token_frame(token: str = "tok123", conversation_id: str = "conv-resu
     return _sse(json.dumps(payload))
 
 
+def _make_resume_jwt(turn_topic_id: str) -> str:
+    """Build a resume_conversation_token JWT whose payload carries turn_topic_id
+    (the conversation-turn-<id> WS topic) — mirrors the real conduit token."""
+    header = base64.urlsafe_b64encode(b'{"alg":"ES256","typ":"JWT"}').rstrip(b"=").decode()
+    claims = {"conduit_uuid": "u", "conduit_location": "10.0.0.1:8307", "turn_topic_id": turn_topic_id}
+    payload = base64.urlsafe_b64encode(json.dumps(claims).encode()).rstrip(b"=").decode()
+    return f"{header}.{payload}.sig"
+
+
+def _resume_jwt_frame(turn_topic_id: str, conversation_id: str = "conv-jwt") -> bytes:
+    payload = {
+        "type": "resume_conversation_token",
+        "kind": "topic",
+        "token": _make_resume_jwt(turn_topic_id),
+        "conversation_id": conversation_id,
+    }
+    return _sse(json.dumps(payload))
+
+
 def _content_append_frame(channel: int, text: str) -> bytes:
     patch = {"p": "/message/content/parts/0", "o": "append", "v": text, "c": channel}
     return _sse(json.dumps(patch))
@@ -150,6 +169,17 @@ class TestHandoffStateDetection:
         assert state.topic == ""
         assert state.should_bridge() is False
         assert state.should_resume() is True
+
+    def test_resume_jwt_turn_topic_id_drives_ws_bridge(self) -> None:
+        # The conduit answer is on the WS; the resume_conversation_token JWT carries
+        # turn_topic_id (conversation-turn-<id>) — the topic to subscribe to.
+        state = HandoffState()
+        detect_handoff(state, _resume_jwt_frame("conversation-turn-abc", conversation_id="c1"))
+        assert state.topic == "conversation-turn-abc"
+        assert state.resume_token != ""
+        assert state.conversation_id == "c1"
+        assert state.should_bridge() is True  # JWT topic → WS path
+        assert state.should_resume() is False  # topic present, WS wins
 
     def test_resume_conversation_token_sets_resume_signal(self) -> None:
         state = HandoffState()
@@ -984,7 +1014,9 @@ class TestSidecarContinuationSeam:
 
         mock_client = httpx.AsyncClient(transport=_HandoffBodyTransport())
 
-        async def _fake_bridge(*, client: object, topic_id: str) -> AsyncIterator[bytes]:
+        async def _fake_bridge(
+            *, client: object, topic_id: str, request_headers: dict[str, str] | None = None
+        ) -> AsyncIterator[bytes]:
             assert topic_id == topic
             yield ws_chunk
 
