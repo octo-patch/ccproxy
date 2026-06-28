@@ -44,14 +44,16 @@ from ccproxy.config import CCProxyConfig, Provider, set_config_instance
 from ccproxy.inspector.openai_conversations_addon import _refresh_sentinel
 from ccproxy.inspector.transport_override_addon import TransportOverrideAddon
 from ccproxy.lightllm.graph.openai_conversations_intake import OpenAIConversationsIntakeFSM
+from ccproxy.openai_conversations.ws_capture import get_ws_capture
 from ccproxy.openai_conversations.ws_handoff import (
     HandoffState,
-    _conversation_update_item,
-    _encoded_item,
+    _as_sse_bytes,
+    _decode_encoded_item,
     _is_done_item,
+    _message_signals_done,
     _parse_ws_frames,
-    _process_reply_frame,
-    _sse_items_from_frame,
+    _topic_matches,
+    _walk_sse_items,
     detect_handoff,
     run_handoff_bridge,
     stream_handoff_sse,
@@ -334,78 +336,116 @@ class TestParseWsFrames:
         assert result == [{"type": "reply"}]
 
 
-# ── _encoded_item and _conversation_update_item ───────────────────────────────
+# ── _walk_sse_items (envelope-agnostic structural extraction) ─────────────────
 
 
-class TestSseItemExtraction:
-    def test_encoded_item_extracted(self) -> None:
+class TestWalkSseItems:
+    def test_message_two_level_nesting(self) -> None:
+        # message envelope: payload.payload.encoded_item
         topic = "conversation-turn-abc"
+        frame = {"type": "message", "topic_id": topic, "payload": {"payload": {"encoded_item": "data: hi\n\n"}}}
+        assert _walk_sse_items(frame) == [(topic, "data: hi\n\n")]
+
+    def test_stream_item_one_level_nesting(self) -> None:
+        # SPA shape: conversation-turn-stream / stream-item / payload.encoded_item
+        topic = "conversation-turn-spa"
         frame = {
+            "type": "conversation-turn-stream",
             "topic_id": topic,
-            "payload": {"payload": {"encoded_item": "data: hello\n\n"}},
+            "payload": {"type": "stream-item", "stream_item_id": "s1", "encoded_item": "data: spa\n\n"},
         }
-        result = _encoded_item(frame, topic)
-        assert result == "data: hello\n\n"
+        assert _walk_sse_items(frame) == [(topic, "data: spa\n\n")]
 
-    def test_encoded_item_wrong_topic_returns_empty(self) -> None:
+    def test_reply_catchups_extracted_with_nearest_topic(self) -> None:
+        topic = "conversation-turn-reply"
         frame = {
-            "topic_id": "other-topic",
-            "payload": {"payload": {"encoded_item": "data: hello\n\n"}},
-        }
-        result = _encoded_item(frame, "my-topic")
-        assert result == ""
-
-    def test_encoded_item_no_topic_in_frame_accepts_any_topic(self) -> None:
-        # When ``topic_id`` is absent in the frame, any topic matches.
-        frame = {"payload": {"payload": {"encoded_item": "data: ok\n"}}}
-        result = _encoded_item(frame, "any-topic")
-        assert result == "data: ok\n"
-
-    def test_conversation_update_item_extracted(self) -> None:
-        topic = "conversation-turn-x"
-        frame = {
-            "topic_id": topic,
-            "payload": {"type": "conversation-update", "status": "done"},
-        }
-        result = _conversation_update_item(frame, topic)
-        assert result.startswith("data: ")
-        assert "conversation-update" in result
-
-    def test_conversation_update_nested_payload(self) -> None:
-        topic = "conversation-turn-y"
-        frame = {
-            "topic_id": topic,
-            "payload": {"payload": {"type": "conversation-update", "id": "123"}},
-        }
-        result = _conversation_update_item(frame, topic)
-        assert result.startswith("data: ")
-        assert "conversation-update" in result
-
-    def test_sse_items_from_frame_uses_encoded_first(self) -> None:
-        topic = "t1"
-        frame = {
-            "topic_id": topic,
-            "payload": {
-                "payload": {"encoded_item": "data: encoded\n\n"},
-                "type": "conversation-update",
+            "type": "reply",
+            "reply": {
+                "topic_id": topic,
+                "catchups": [
+                    {"topic_id": topic, "payload": {"payload": {"encoded_item": "data: c1\n\n"}}},
+                    {"topic_id": topic, "payload": {"payload": {"encoded_item": "data: [DONE]\n\n"}}},
+                ],
             },
         }
-        items = _sse_items_from_frame(frame, topic)
-        assert len(items) == 1
-        assert items[0] == "data: encoded\n\n"
+        items = _walk_sse_items(frame)
+        assert items == [(topic, "data: c1\n\n"), (topic, "data: [DONE]\n\n")]
 
-    def test_sse_items_from_frame_falls_back_to_update(self) -> None:
-        topic = "t2"
+    def test_no_topic_anywhere_yields_none_topic(self) -> None:
+        frame = {"payload": {"payload": {"encoded_item": "data: ok\n"}}}
+        assert _walk_sse_items(frame) == [(None, "data: ok\n")]
+
+    def test_nearest_enclosing_topic_wins(self) -> None:
+        # An inner topic_id overrides an outer one for its subtree.
         frame = {
-            "topic_id": topic,
-            "payload": {"type": "conversation-update", "msg": "hi"},
+            "topic_id": "outer",
+            "payload": {"topic_id": "inner", "encoded_item": "data: x\n\n"},
         }
-        items = _sse_items_from_frame(frame, topic)
-        assert len(items) == 1
-        assert "conversation-update" in items[0]
+        assert _walk_sse_items(frame) == [("inner", "data: x\n\n")]
+
+    def test_multiple_items_in_document_order(self) -> None:
+        frame = {
+            "topic_id": "t",
+            "items": [
+                {"encoded_item": "data: a\n\n"},
+                {"encoded_item": "data: b\n\n"},
+            ],
+        }
+        assert _walk_sse_items(frame) == [("t", "data: a\n\n"), ("t", "data: b\n\n")]
+
+    def test_empty_or_non_string_encoded_item_skipped(self) -> None:
+        frame = {"topic_id": "t", "payload": {"encoded_item": ""}, "other": {"encoded_item": 42}}
+        assert _walk_sse_items(frame) == []
 
 
-# ── _is_done_item ─────────────────────────────────────────────────────────────
+class TestDecodeEncodedItem:
+    def test_plaintext_sse_passthrough(self) -> None:
+        assert _decode_encoded_item("data: hello\n\n") == "data: hello\n\n"
+
+    def test_event_prefixed_passthrough(self) -> None:
+        assert _decode_encoded_item("event: delta\ndata: {}\n\n") == "event: delta\ndata: {}\n\n"
+
+    def test_base64_of_sse_decoded(self) -> None:
+        raw = "data: decoded\n\n"
+        encoded = base64.b64encode(raw.encode()).decode()
+        assert _decode_encoded_item(encoded) == raw
+
+    def test_base64_of_non_sse_passthrough(self) -> None:
+        # base64 that decodes to non-SSE text is returned verbatim (intake drops it;
+        # the raw frame is preserved by the capture sink for inspection).
+        encoded = base64.b64encode(b'{"foo": 1}').decode()
+        assert _decode_encoded_item(encoded) == encoded
+
+
+class TestTopicMatches:
+    def test_turn_topic_matches(self) -> None:
+        assert _topic_matches("conversation-turn-1", "conversation-turn-1") is True
+
+    def test_conversations_matches(self) -> None:
+        assert _topic_matches("conversations", "conversation-turn-1") is True
+
+    def test_untagged_matches(self) -> None:
+        assert _topic_matches(None, "conversation-turn-1") is True
+
+    def test_other_topic_excluded(self) -> None:
+        assert _topic_matches("app_notifications", "conversation-turn-1") is False
+
+
+class TestMessageSignalsDone:
+    def test_done_marker_on_turn_topic(self) -> None:
+        frame = {"topic_id": "t", "payload": {"type": "done"}}
+        assert _message_signals_done(frame, turn_topic="t") is True
+
+    def test_done_marker_on_other_topic_ignored(self) -> None:
+        frame = {"topic_id": "app_notifications", "payload": {"type": "done"}}
+        assert _message_signals_done(frame, turn_topic="t") is False
+
+    def test_no_done_marker(self) -> None:
+        frame = {"topic_id": "t", "payload": {"type": "stream-item", "encoded_item": "data: x\n\n"}}
+        assert _message_signals_done(frame, turn_topic="t") is False
+
+
+# ── _is_done_item / _as_sse_bytes ─────────────────────────────────────────────
 
 
 class TestIsDoneItem:
@@ -419,51 +459,40 @@ class TestIsDoneItem:
         assert _is_done_item("data: {}\n\n") is False
 
 
-# ── _process_reply_frame ──────────────────────────────────────────────────────
+class TestAsSseBytes:
+    def test_adds_double_newline(self) -> None:
+        assert _as_sse_bytes("data: x") == b"data: x\n\n"
+
+    def test_single_newline_completed(self) -> None:
+        assert _as_sse_bytes("data: x\n") == b"data: x\n\n"
+
+    def test_already_terminated_unchanged(self) -> None:
+        assert _as_sse_bytes("data: x\n\n") == b"data: x\n\n"
 
 
-class TestProcessReplyFrame:
-    def test_reply_with_matching_topic_catchup_extracted(self) -> None:
-        topic = "conversation-turn-reply"
-        catchup = {
-            "topic_id": topic,
-            "payload": {"payload": {"encoded_item": "data: hello reply\n\n"}},
-        }
-        frame = {
-            "type": "reply",
-            "reply": {"topic_id": topic, "catchups": [catchup]},
-        }
-        items, done = _process_reply_frame(frame, topic)
-        assert "data: hello reply\n\n" in items
-        assert done is False
+class TestWsFrameCapture:
+    def test_record_dump_clear(self) -> None:
+        cap = get_ws_capture()
+        cap.clear()
+        cap.record(topic="t1", raw='{"a": 1}', forwarded=2)
+        cap.record(topic="t1", raw='{"b": 2}', forwarded=0)
+        records = cap.dump()
+        assert [r.raw for r in records] == ['{"a": 1}', '{"b": 2}']
+        assert [r.forwarded for r in records] == [2, 0]
+        assert all(r.topic == "t1" for r in records)
+        cap.clear()
+        assert cap.dump() == []
 
-    def test_reply_with_done_in_catchup_signals_done(self) -> None:
-        topic = "conversation-turn-done"
-        catchup = {
-            "topic_id": topic,
-            "payload": {"payload": {"encoded_item": "data: [DONE]\n\n"}},
-        }
-        frame = {"type": "reply", "reply": {"topic_id": topic, "catchups": [catchup]}}
-        _, done = _process_reply_frame(frame, topic)
-        assert done is True
+    def test_singleton_identity(self) -> None:
+        assert get_ws_capture() is get_ws_capture()
 
-    def test_reply_with_wrong_topic_returns_empty(self) -> None:
-        frame = {
-            "type": "reply",
-            "reply": {
-                "topic_id": "wrong-topic",
-                "catchups": [{"payload": {"payload": {"encoded_item": "data: x\n\n"}}}],
-            },
-        }
-        items, done = _process_reply_frame(frame, "my-topic")
-        assert items == []
-        assert done is False
+    def test_bounded_ring_evicts_oldest(self) -> None:
+        from ccproxy.openai_conversations.ws_capture import WSFrameCapture
 
-    def test_reply_with_no_reply_key_returns_empty(self) -> None:
-        frame = {"type": "reply"}
-        items, done = _process_reply_frame(frame, "any-topic")
-        assert items == []
-        assert done is False
+        cap = WSFrameCapture(max_frames=3)
+        for i in range(5):
+            cap.record(topic="t", raw=str(i), forwarded=0)
+        assert [r.raw for r in cap.dump()] == ["2", "3", "4"]
 
 
 # ── stream_handoff_sse — fake WS server ───────────────────────────────────────
@@ -560,6 +589,36 @@ class TestStreamHandoffSseWithFakeServer:
         joined = b"".join(chunks)
         assert b"filtered" not in joined
         assert b"correct" in joined
+
+    async def test_captures_every_frame_including_non_turn(self) -> None:
+        """Non-turn frames are excluded from the answer but never dropped — every
+        inbound WS message is recorded in the capture sink."""
+        topic = "conversation-turn-cap"
+
+        async def _handler(ws: ServerConnection) -> None:
+            await ws.recv()
+            await ws.recv()
+            # A non-turn frame (app_notifications) — excluded from the answer, captured.
+            await ws.send(json.dumps([_make_encoded_sse_frame("app_notifications", '{"notif": true}')]))
+            await ws.send(json.dumps([_make_encoded_sse_frame(topic, '{"answer": true}')]))
+            await ws.send(json.dumps([_make_done_frame(topic)]))
+
+        get_ws_capture().clear()
+        async with ws_serve(_handler, "127.0.0.1", 0, ping_interval=None) as server:
+            port = server.sockets[0].getsockname()[1]
+            ws_url = f"ws://127.0.0.1:{port}"
+            chunks = await _collect_ws_sse(ws_url=ws_url, topic_id=topic)
+
+        joined = b"".join(chunks)
+        assert b"notif" not in joined  # non-turn content kept out of the answer
+        assert b"answer" in joined
+
+        captured = get_ws_capture().dump()
+        raws = "".join(r.raw for r in captured)
+        assert "notif" in raws  # but it WAS captured — never silently dropped
+        assert "answer" in raws
+        notif_recs = [r for r in captured if "notif" in r.raw]
+        assert notif_recs and all(r.forwarded == 0 for r in notif_recs)
 
     async def test_reply_frame_with_catchups_processed(self) -> None:
         topic = "conversation-turn-ws4"

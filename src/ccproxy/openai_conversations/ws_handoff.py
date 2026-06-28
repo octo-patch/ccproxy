@@ -14,9 +14,16 @@ WebSocket handoff signal — exactly as the chatgpt.com SPA handles it:
 exposes :meth:`HandoffState.should_bridge` so the sidecar runs the WS
 continuation, which yields SSE-v1 bytes the same intake FSM parses.
 
-MIT attribution: WS topic extraction + frame parsing adapted from aurora
-(``internal/chatgpt/request.go``). All state-machine structure and Python idioms
-are original.
+The WS reader is **envelope-agnostic**: each inbound message is walked
+structurally (:func:`_walk_sse_items`) to pull every ``encoded_item`` SSE payload
+at any depth, regardless of transport envelope type, rather than switching on a
+frame ``type``. Every raw message is captured (:mod:`ccproxy.openai_conversations.ws_capture`)
+so nothing is silently dropped, and the turn ends on the structural ``[DONE]``/
+``done`` signal.
+
+MIT attribution: the WS dial + init/subscribe handshake is adapted from aurora
+(``internal/chatgpt/request.go``); the structural extraction, capture, and
+state-machine structure are original.
 """
 
 from __future__ import annotations
@@ -32,6 +39,8 @@ from typing import Any
 import httpx
 from websockets.asyncio.client import connect as ws_connect
 
+from ccproxy.openai_conversations.ws_capture import get_ws_capture
+
 logger = logging.getLogger(__name__)
 
 _WS_USER_PATH = "/backend-api/celsius/ws/user"
@@ -45,7 +54,12 @@ _WS_BASE_URL = "https://chatgpt.com"
 # is ``resume_conversation_token`` (HTTP resume).
 _HANDOFF_SIDE_EVENTS = frozenset({"stream_handoff"})
 
-# Read timeout on the WS (aurora uses 120s).
+# Idle backstop on the WS read: the maximum wait for the NEXT frame before the
+# turn-response gives up. This is a TEMPORARY safety valve, not the functional
+# terminator — the real end-of-turn is the structural [DONE]/done signal. To be
+# removed once live conduit turns prove structural EOS is consistently delivered.
+# The socket itself is never torn down on this timer (a future session manager
+# keeps it open across turns within the websocket_url window).
 _WS_READ_TIMEOUT = 120.0
 # Ping interval (aurora: 25s).
 _WS_PING_INTERVAL = 25.0
@@ -307,115 +321,93 @@ def _parse_ws_frames(raw: bytes) -> list[dict[str, Any]]:
         return []
 
 
-def _sse_items_from_frame(frame: dict[str, Any], topic_id: str) -> list[str]:
-    """Extract SSE data strings from one WS frame.
+def _decode_encoded_item(encoded: str) -> str:
+    """Return the SSE text carried by an ``encoded_item``.
 
-    Mirrors aurora ``chatWebsocketSSEItems`` (request.go:758-798, MIT-licensed):
-    tries ``chatWebsocketEncodedItem`` first, then
-    ``chatWebsocketConversationUpdateItem``.
+    In captured fixtures the value is already a plaintext SSE line
+    (``data: {...}``). The live wire may base64-encode it (the SPA decodes via
+    ``_Nn``); both are tolerated. The exact on-wire encoding is pending live
+    confirmation — every raw frame is preserved verbatim by the capture sink, so
+    a wrong guess here never loses data.
     """
-    items: list[str] = []
-    encoded = _encoded_item(frame, topic_id)
-    if encoded:
-        items.append(encoded)
-        return items
-    update = _conversation_update_item(frame, topic_id)
-    if update:
-        items.append(update)
-    return items
-
-
-def _encoded_item(frame: dict[str, Any], topic_id: str) -> str:
-    """Extract ``payload.payload.encoded_item`` from a frame matching ``topic_id``.
-
-    Mirrors aurora ``chatWebsocketEncodedItem`` (request.go:739-756,
-    MIT-licensed).
-    """
-    frame_topic = frame.get("topic_id")
-    if isinstance(frame_topic, str) and frame_topic and frame_topic != topic_id:
-        return ""
-    payload = frame.get("payload")
-    if not isinstance(payload, dict):
-        return ""
-    nested = payload.get("payload")
-    if not isinstance(nested, dict):
-        return ""
-    encoded = nested.get("encoded_item")
-    if not isinstance(encoded, str) or not encoded:
-        return ""
-    return encoded
-
-
-def _conversation_update_item(frame: dict[str, Any], topic_id: str) -> str:
-    """Extract a ``conversation-update`` payload as an SSE data line.
-
-    Mirrors aurora ``chatWebsocketConversationUpdateItem``
-    (request.go:768-797, MIT-licensed).
-    """
-    frame_topic = frame.get("topic_id")
-    if isinstance(frame_topic, str) and frame_topic and frame_topic != topic_id and frame_topic != "conversations":
-        return ""
-    payload = frame.get("payload")
-    if not isinstance(payload, dict):
-        return ""
-
-    # Unwrap nested payload if needed.
-    if payload.get("type") != "conversation-update":
-        nested = payload.get("payload")
-        if isinstance(nested, dict) and nested.get("type") == "conversation-update":
-            payload = nested
-
-    if payload.get("type") != "conversation-update":
-        return ""
-
+    if encoded.lstrip().startswith(("data:", "event:")):
+        return encoded
     try:
-        body = json.dumps(payload)
-    except (TypeError, ValueError):
-        return ""
-    return "data: " + body + "\n"
+        decoded = base64.b64decode(encoded, validate=True).decode("utf-8")
+    except (ValueError, UnicodeDecodeError):
+        return encoded
+    return decoded if decoded.lstrip().startswith(("data:", "event:")) else encoded
+
+
+def _walk_sse_items(obj: Any, topic: str | None = None) -> list[tuple[str | None, str]]:
+    """Recursively extract every SSE payload from a parsed WS message.
+
+    The conduit answer is carried by ``encoded_item`` strings nested at varying
+    depths inside transport envelopes (``message`` → ``payload.payload``,
+    ``conversation-turn-stream`` → ``payload`` (``stream-item``), ``reply`` →
+    ``catchups[]…``). Rather than enumerate envelope types — and silently drop any
+    shape not anticipated — this walks the whole structure and pulls out every
+    ``encoded_item`` it finds, tagging each with the nearest enclosing
+    ``topic_id`` so the caller can route it. Returns ``(topic, sse_data)`` pairs
+    in document order.
+    """
+    found: list[tuple[str | None, str]] = []
+    if isinstance(obj, dict):
+        frame_topic = obj.get("topic_id")
+        if isinstance(frame_topic, str) and frame_topic:
+            topic = frame_topic
+        encoded = obj.get("encoded_item")
+        if isinstance(encoded, str) and encoded:
+            found.append((topic, _decode_encoded_item(encoded)))
+        for value in obj.values():
+            found.extend(_walk_sse_items(value, topic))
+    elif isinstance(obj, list):
+        for value in obj:
+            found.extend(_walk_sse_items(value, topic))
+    return found
 
 
 def _is_done_item(item: str) -> bool:
-    """True when ``item`` contains the ``[DONE]`` sentinel.
-
-    Mirrors aurora ``chatWebsocketWriteEncodedItem`` done check
-    (request.go:807, MIT-licensed).
-    """
+    """True when ``item`` contains the ``[DONE]`` sentinel."""
     return "data: [DONE]" in item or "data:[DONE]" in item
 
 
-# ── Reply-type frame processing ───────────────────────────────────────────────
+def _topic_matches(item_topic: str | None, turn_topic: str) -> bool:
+    """Whether an extracted item routes to the answer stream.
 
-
-def _process_reply_frame(frame: dict[str, Any], topic_id: str) -> tuple[list[str], bool]:
-    """Process a ``type==reply`` frame, yielding SSE items and done signal.
-
-    A reply frame carries ``reply.topic_id`` and ``reply.catchups[]``.
-    Only replies whose ``topic_id`` matches are processed.
-    Mirrors aurora ``chatWebsocketStreamReader`` reply branch
-    (request.go:841-857, MIT-licensed).
-
-    Returns:
-        (items, done) — list of SSE data strings and whether stream is terminal.
+    Accepts the turn's own topic, the general ``conversations`` topic (which can
+    carry turn frames), and untagged items (no ``topic_id`` anywhere in the
+    frame). Frames for other topics (``app_notifications``, ``calpico-chatgpt``,
+    a different turn) are not merged into the answer — but are still captured.
     """
-    reply = frame.get("reply")
-    if not isinstance(reply, dict):
-        return [], False
-    reply_topic = reply.get("topic_id")
-    if reply_topic != topic_id:
-        return [], False
-    catchups = reply.get("catchups")
-    if not isinstance(catchups, list):
-        return [], False
-    all_items: list[str] = []
-    for catchup in catchups:
-        if not isinstance(catchup, dict):
-            continue
-        for item in _sse_items_from_frame(catchup, topic_id):
-            all_items.append(item)
-            if _is_done_item(item):
-                return all_items, True
-    return all_items, False
+    return item_topic is None or item_topic == turn_topic or item_topic == "conversations"
+
+
+def _message_signals_done(obj: Any, *, turn_topic: str, topic: str | None = None) -> bool:
+    """True when a frame structurally signals end-of-stream for our turn.
+
+    Independent of envelope type: a ``{"type": "done"}`` marker (e.g.
+    ``payload.type == "done"``) anywhere whose nearest enclosing topic routes to
+    our turn (per :func:`_topic_matches`). Complements the ``[DONE]`` item check.
+    """
+    if isinstance(obj, dict):
+        frame_topic = obj.get("topic_id")
+        if isinstance(frame_topic, str) and frame_topic:
+            topic = frame_topic
+        if obj.get("type") == "done" and _topic_matches(topic, turn_topic):
+            return True
+        return any(_message_signals_done(v, turn_topic=turn_topic, topic=topic) for v in obj.values())
+    if isinstance(obj, list):
+        return any(_message_signals_done(v, turn_topic=turn_topic, topic=topic) for v in obj)
+    return False
+
+
+def _as_sse_bytes(sse: str) -> bytes:
+    """Normalise an SSE data string to end with the ``\\n\\n`` frame separator."""
+    out = sse if sse.endswith("\n") else sse + "\n"
+    if not out.endswith("\n\n"):
+        out += "\n"
+    return out.encode()
 
 
 # ── WS SSE streaming ─────────────────────────────────────────────────────────
@@ -434,12 +426,14 @@ async def stream_handoff_sse(
     The wss URL is already auth-bearing (from ``/celsius/ws/user``); no TLS
     fingerprint impersonation is needed — a plain ``websockets`` dial suffices.
 
-    Each yielded ``bytes`` value is a complete SSE line of the form
-    ``b"data: {...}\\n\\n"``.  The generator stops cleanly on ``[DONE]`` or any
+    Each inbound WS message is walked structurally (:func:`_walk_sse_items`):
+    every ``encoded_item`` SSE payload routed to this turn is yielded as
+    ``b"data: {...}\\n\\n"``; every raw message is captured (never dropped). The
+    generator stops on the structural ``[DONE]``/``done`` end-of-stream or any
     error; it never raises into the caller.
 
-    Mirrors aurora ``chatWebsocketStreamReader`` (request.go:810-884,
-    MIT-licensed) and ``DialChatWebsocket`` (request.go:661-708).
+    WS dial + init/subscribe handshake adapted from aurora ``DialChatWebsocket``
+    (request.go:661-708, MIT-licensed).
     """
     return _stream_handoff_sse_impl(
         ws_url=ws_url,
@@ -499,38 +493,35 @@ async def _stream_handoff_sse_impl(
 
             ping_task = asyncio.create_task(_ping_loop(), name="ccproxy-ws-handoff-ping")
             logger.debug("ws_handoff: dialed wss, subscribed topic=%s", topic_id)
+            capture = get_ws_capture()
             yielded = 0
 
             try:
                 async for raw_msg in _ws_read_loop(ws=ws, read_timeout=read_timeout):
-                    frames = _parse_ws_frames(raw_msg if isinstance(raw_msg, bytes) else raw_msg.encode())
-                    logger.debug(
-                        "ws_handoff: WS msg frames=%s topics=%s",
-                        [f.get("type") for f in frames],
-                        [f.get("topic_id") or (f.get("reply") or {}).get("topic_id") for f in frames],
-                    )
+                    raw_text = raw_msg if isinstance(raw_msg, str) else raw_msg.decode("utf-8", errors="replace")
+                    frames = _parse_ws_frames(raw_text.encode())
+                    forwarded_here = 0
+                    done = False
                     for frame in frames:
-                        frame_type = frame.get("type")
-                        if frame_type == "reply":
-                            items, done = _process_reply_frame(frame, topic_id)
-                        elif frame_type == "message":
-                            items = _sse_items_from_frame(frame, topic_id)
-                            done = any(_is_done_item(i) for i in items)
-                        else:
-                            continue
-
-                        yielded += len(items)
-                        for item in items:
-                            if not item.endswith("\n"):
-                                item += "\n"
-                            # Ensure the SSE data line ends with the double newline
-                            # separator expected by the intake FSM.
-                            if not item.endswith("\n\n"):
-                                item += "\n"
-                            yield item.encode()
-                        if done:
-                            logger.debug("ws_handoff: WS done, yielded=%d items (topic=%s)", yielded, topic_id)
-                            return
+                        # Envelope-agnostic: forward every SSE payload for our turn,
+                        # regardless of envelope type or nesting depth.
+                        for item_topic, sse in _walk_sse_items(frame):
+                            if not _topic_matches(item_topic, topic_id):
+                                continue
+                            forwarded_here += 1
+                            yielded += 1
+                            yield _as_sse_bytes(sse)
+                            if _is_done_item(sse):
+                                done = True
+                        if not done and _message_signals_done(frame, turn_topic=topic_id):
+                            done = True
+                    # NEVER drop: every inbound frame is captured (forwarded or not),
+                    # so non-turn / unhandled events stay inspectable.
+                    capture.record(topic=topic_id, raw=raw_text, forwarded=forwarded_here)
+                    logger.debug("ws_handoff: WS msg: %d frame(s), forwarded=%d", len(frames), forwarded_here)
+                    if done:
+                        logger.debug("ws_handoff: WS done, yielded=%d items (topic=%s)", yielded, topic_id)
+                        return
             finally:
                 ping_task.cancel()
                 logger.debug("ws_handoff: WS closed, yielded=%d items (topic=%s)", yielded, topic_id)
@@ -543,12 +534,16 @@ async def _ws_read_loop(
     ws: Any,
     read_timeout: float,
 ) -> AsyncIterator[str | bytes]:
-    """Yield raw WebSocket messages with per-message read deadline."""
+    """Yield raw WebSocket messages until the socket closes or goes idle.
+
+    ``read_timeout`` is the temporary idle backstop (see :data:`_WS_READ_TIMEOUT`)
+    — the maximum wait for the next frame, not a per-message delay.
+    """
     while True:
         try:
             msg = await asyncio.wait_for(ws.recv(), timeout=read_timeout)
         except TimeoutError:
-            logger.warning("ws_handoff: read timeout after %.0fs", read_timeout)
+            logger.warning("ws_handoff: idle backstop hit after %.0fs (no [DONE] seen)", read_timeout)
             return
         except Exception as exc:
             logger.debug("ws_handoff: WS closed: %s", exc)
