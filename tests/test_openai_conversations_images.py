@@ -465,12 +465,50 @@ class TestPollConversation:
         _run(client.aclose())
         assert pointers == [ImagePointer(file_id="file_a", is_sediment=True)]
 
-    def test_async_status_4_raises(self) -> None:
+    def test_async_status_4_with_pointer_returns(self) -> None:
+        # async_status == 4 is the DONE signal — the image_asset_pointer is present
+        # at that point (live-verified). The asset must be returned, not discarded.
+        convo = {
+            "async_status": 4,
+            "mapping": {
+                "n": {
+                    "message": {
+                        "author": {"role": "tool"},
+                        "metadata": {"async_task_type": "image_gen"},
+                        "content": {
+                            "content_type": "multimodal_text",
+                            "parts": [{"asset_pointer": "sediment://file_done"}],
+                        },
+                    }
+                }
+            },
+        }
+
+        def handler(_request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json=convo)
+
+        client = _client(handler)
+        pointers = _run(
+            poll_conversation_for_pointers(
+                client=client,
+                base_url="https://chatgpt.com",
+                conversation_id="c1",
+                access_token="t",  # noqa: S106
+                device_id="d",
+                interval_seconds=0,
+                max_attempts=3,
+                timeout=5.0,
+            )
+        )
+        _run(client.aclose())
+        assert pointers == [ImagePointer(file_id="file_done", is_sediment=True)]
+
+    def test_async_status_4_without_pointer_raises(self) -> None:
         def handler(_request: httpx.Request) -> httpx.Response:
             return httpx.Response(200, json={"async_status": 4, "mapping": {}})
 
         client = _client(handler)
-        with pytest.raises(ImageGenerationError, match="without assets"):
+        with pytest.raises(ImageGenerationError, match="without an asset"):
             _run(
                 poll_conversation_for_pointers(
                     client=client,

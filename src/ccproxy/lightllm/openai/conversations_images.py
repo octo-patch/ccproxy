@@ -451,9 +451,16 @@ async def poll_conversation_for_pointers(
 ) -> list[ImagePointer]:
     """Poll ``GET /backend-api/conversation/{id}`` until image pointers appear.
 
+    ChatGPT's image turn is async: the conversation reports ``async_status: 3``
+    while generating, then ``async_status: 4`` once done — and the
+    ``image_asset_pointer`` is present in the conversation at that point
+    (live-verified). So the asset is recovered by extracting pointers each poll;
+    ``async_status == 4`` is the DONE signal, not a no-asset signal — a status-4
+    conversation that still lacks a pointer is a genuine failure.
+
     Raises:
-        ImageGenerationError: ``async_status == 4`` (finished without assets) or
-            the deadline (``interval_seconds`` times ``max_attempts``) elapses.
+        ImageGenerationError: ``async_status == 4`` with no asset pointer, or the
+            deadline (``interval_seconds`` times ``max_attempts``) elapses.
     """
     # GET /backend-api/conversation/{id} → the same full browser shape + Bearer the
     # main turn uses (the browser sends accept: */*; no Sentinel needed on a fetch).
@@ -465,11 +472,11 @@ async def poll_conversation_for_pointers(
         if resp.status_code == 200:
             conversation = resp.json()
             if isinstance(conversation, dict):
-                if conversation.get("async_status") == 4:
-                    raise ImageGenerationError("image generation finished without assets (async_status=4)")
                 pointers = extract_pointers_from_conversation(conversation)
                 if pointers:
                     return pointers
+                if conversation.get("async_status") == 4:
+                    raise ImageGenerationError("image generation finished (async_status=4) without an asset pointer")
         if attempt < max_attempts - 1:
             await asyncio.sleep(interval_seconds)
 
