@@ -123,6 +123,48 @@ def get_browser_headers(
     return headers
 
 
+def get_api_headers(
+    *,
+    access_token: str,
+    device_id: str,
+    session_id: str = "",
+    conversation_id: str = "",
+    final: bool = False,
+) -> dict[str, str]:
+    """Canonical authenticated ``chatgpt.com`` ``/backend-api`` request headers.
+
+    The full browser identity shape (:func:`get_browser_headers`) **plus** the
+    ``Authorization: Bearer`` token — the one coherent identity that EVERY
+    chatgpt.com backend-api request must present: the main ``/f/conversation``
+    turn, the Sentinel refresh, the conduit prepare, and the image side-trips
+    (file upload, conversation poll, download-metadata). Using this everywhere is
+    what keeps a side-trip from silently sending a different header shape than the
+    session — which Cloudflare/the WAF rejects with a 403.
+
+    The Sentinel chat-requirements / proof tokens are conversation-submit-only and
+    are added by the caller (not here). Presigned blob upload/download URLs send
+    NONE of these — no browser headers, no Bearer — because the URL carries its
+    own ``sig=`` and a Bearer there is itself a 403.
+
+    Args:
+        access_token: ChatGPT web bearer JWT (omitted from the result when empty).
+        device_id: OAI-Device-Id UUID.
+        session_id: OAI-Session-Id UUID; defaults to ``device_id`` when empty.
+        conversation_id: ChatGPT conversation id for the Referer.
+        final: Include the final-only ``Oai-Echo-Logs`` / ``Oai-Telemetry`` headers
+            (the ``POST /f/conversation`` submit only).
+    """
+    headers = get_browser_headers(
+        device_id=device_id,
+        session_id=session_id or device_id,
+        conversation_id=conversation_id,
+        final=final,
+    )
+    if access_token:
+        headers["authorization"] = f"Bearer {access_token}"
+    return headers
+
+
 def headers_to_clear() -> frozenset[str]:
     """Header names (lowercase) that must be cleared before stamping browser headers."""
     return _HEADERS_TO_CLEAR

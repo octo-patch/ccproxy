@@ -68,7 +68,7 @@ from ccproxy.openai_conversations.credentials import (
 )
 from ccproxy.openai_conversations.pow import PowExhaustedError, solve_pow
 from ccproxy.openai_conversations.prepare_p import build_requirements_token
-from ccproxy.openai_conversations.profile import get_browser_headers
+from ccproxy.openai_conversations.profile import get_api_headers
 from ccproxy.openai_conversations.sentinel import (
     SentinelResult,
     build_finalize_body,
@@ -220,8 +220,7 @@ async def _refresh_sentinel(
     the result to the credential file. Raises on any non-200 response.
     """
     headers = {
-        **get_browser_headers(device_id=device_id, session_id=device_id, conversation_id="", final=False),
-        "authorization": f"Bearer {access_token}",
+        **get_api_headers(access_token=access_token, device_id=device_id, conversation_id="", final=False),
         "content-type": "application/json",
         "accept": "*/*",
     }
@@ -335,8 +334,7 @@ async def _conduit_prepare_call(
 
     prepare_body = build_conversation_prepare_body(final_body=final_body, state=state)
     headers = {
-        **get_browser_headers(device_id=device_id, session_id=device_id, conversation_id="", final=False),
-        "authorization": f"Bearer {access_token}",
+        **get_api_headers(access_token=access_token, device_id=device_id, conversation_id="", final=False),
         "content-type": "application/json",
         "accept": "*/*",
         "x-oai-turn-trace-id": turn_trace_id,
@@ -621,13 +619,12 @@ class OpenAIConversationsAddon:
         target_path = flow.request.path
 
         final_headers: dict[str, str] = {
-            **get_browser_headers(
+            **get_api_headers(
+                access_token=access_token,
                 device_id=device_id,
-                session_id=device_id,
                 conversation_id=conversation_id,
                 final=True,
             ),
-            "authorization": f"Bearer {access_token}",
             "content-type": "application/json",
             "accept": "text/event-stream",
             # Sentinel goes as two separate headers (gproxy channel.rs:485-489),

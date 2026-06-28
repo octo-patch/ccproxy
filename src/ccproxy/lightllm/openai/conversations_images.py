@@ -42,6 +42,7 @@ from pydantic_ai.messages import ModelMessage, ModelRequest, UserPromptPart
 
 from ccproxy.lightllm.adapters.openai_conversations import MessageContent, build_conversation_body
 from ccproxy.lightllm.openai.conversations_image_parse import ParsedImageEdit
+from ccproxy.openai_conversations.profile import get_api_headers
 
 __all__ = [
     "ImageGenerationError",
@@ -360,15 +361,6 @@ def _dedup_pointers(raws: list[str]) -> list[ImagePointer]:
 # ---------------------------------------------------------------------------
 
 
-def _auth_headers(*, access_token: str, device_id: str) -> dict[str, str]:
-    headers: dict[str, str] = {}
-    if access_token:
-        headers["authorization"] = f"Bearer {access_token}"
-    if device_id:
-        headers["oai-device-id"] = device_id
-    return headers
-
-
 async def upload_image(
     *,
     client: httpx.AsyncClient,
@@ -389,7 +381,13 @@ async def upload_image(
     Raises:
         ImageGenerationError: Any step fails or returns no upload target.
     """
-    json_headers = {**_auth_headers(access_token=access_token, device_id=device_id), "content-type": "application/json"}
+    # File upload + activation are chatgpt.com /backend-api calls → full browser
+    # shape + Bearer (the canonical authenticated identity). The blob PUT below is
+    # NOT — it goes to a presigned storage URL and must carry no chatgpt headers.
+    json_headers = {
+        **get_api_headers(access_token=access_token, device_id=device_id),
+        "content-type": "application/json",
+    }
 
     create = await client.post(
         f"{base_url}/backend-api/files",
@@ -457,7 +455,9 @@ async def poll_conversation_for_pointers(
         ImageGenerationError: ``async_status == 4`` (finished without assets) or
             the deadline (``interval_seconds`` times ``max_attempts``) elapses.
     """
-    headers = {**_auth_headers(access_token=access_token, device_id=device_id), "accept": "application/json"}
+    # GET /backend-api/conversation/{id} → the same full browser shape + Bearer the
+    # main turn uses (the browser sends accept: */*; no Sentinel needed on a fetch).
+    headers = get_api_headers(access_token=access_token, device_id=device_id, conversation_id=conversation_id)
     url = f"{base_url}/backend-api/conversation/{conversation_id}"
 
     for attempt in range(max_attempts):
@@ -495,10 +495,10 @@ async def download_image(
         ImageGenerationError: The metadata URL cannot be resolved or the
             presigned download fails.
     """
-    metadata_headers = {
-        **_auth_headers(access_token=access_token, device_id=device_id),
-        "accept": "application/json",
-    }
+    # Step 1 (resolve the download URL) is a chatgpt.com /backend-api call → full
+    # browser shape + Bearer. Step 2 (the presigned GET below) is NOT — it carries
+    # its own sig and a Bearer there is itself a 403.
+    metadata_headers = get_api_headers(access_token=access_token, device_id=device_id, conversation_id=conversation_id)
     download_url = await _fetch_download_url(
         client=client,
         pointer=pointer,
