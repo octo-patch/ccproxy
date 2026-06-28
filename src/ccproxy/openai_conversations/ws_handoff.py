@@ -1,26 +1,22 @@
-"""Handoff/resume continuation bridges for OpenAI Conversations.
+"""WebSocket handoff continuation bridge for OpenAI Conversations.
 
-When ChatGPT does not finish a turn inline, it ends the HTTP SSE early with one
-of two continuation signals — exactly as the chatgpt.com SPA handles them:
+When ChatGPT does not finish a turn inline, it ends the HTTP SSE early with a
+WebSocket handoff signal — exactly as the chatgpt.com SPA handles it:
 
 * ``stream_handoff`` (carrying a ``subscribe_ws_topic``) → **WebSocket** handoff:
   ``GET /backend-api/celsius/ws/user`` → ``wss`` → subscribe to the topic
   (``run_handoff_bridge``). The SPA's ``celsius/ws/user`` path.
-* ``resume_conversation_token`` (carrying a conduit JWT + conversation id) →
-  **HTTP resume**: ``POST /backend-api/f/conversation/resume`` with
-  ``x-conduit-token: <token>`` over offsets 0/1/2 (``run_resume_bridge``). The
-  SPA's ``/f/conversation/resume`` path.
+* ``resume_conversation_token`` (a conduit JWT) → the answer also streams over
+  the WebSocket; the JWT's ``turn_topic_id`` claim is the topic to subscribe to
+  (``_topic_from_resume_jwt``), so these turns route to the same WS bridge.
 
 :class:`HandoffState` scans the streaming SSE bytes (``detect_handoff``) and
-exposes :meth:`HandoffState.should_bridge` / :meth:`HandoffState.should_resume`
-so the sidecar picks the right continuation; both yield SSE-v1 bytes that the
-same intake FSM parses. The WS path wins when both signals appear.
+exposes :meth:`HandoffState.should_bridge` so the sidecar runs the WS
+continuation, which yields SSE-v1 bytes the same intake FSM parses.
 
 MIT attribution: WS topic extraction + frame parsing adapted from aurora
-(``internal/chatgpt/request.go``); the HTTP-resume offset/``x-conduit-token``
-flow mirrors the chatgpt.com SPA (``sdk.js``) and pro-cli
-(``src/transport.ts`` ``resumeHandoffStream``). All state-machine structure and
-Python idioms are original.
+(``internal/chatgpt/request.go``). All state-machine structure and Python idioms
+are original.
 """
 
 from __future__ import annotations
@@ -51,9 +47,6 @@ _HANDOFF_SIDE_EVENTS = frozenset({"stream_handoff"})
 
 # Read timeout on the WS (aurora uses 120s).
 _WS_READ_TIMEOUT = 120.0
-# Give up if no answer item arrives on the handoff topic within this window, so a
-# topic that never streams doesn't hold the client for the full read timeout.
-_WS_FIRST_ITEM_TIMEOUT = 30.0
 # Ping interval (aurora: 25s).
 _WS_PING_INTERVAL = 25.0
 # Browser-shape User-Agent string for the WS dial and /celsius/ws/user GET.
@@ -74,15 +67,8 @@ class HandoffState:
     """
 
     topic: str = ""
-    """WS topic id from a ``stream_handoff`` or ``server_ste_metadata`` event."""
-
-    resume_token: str = ""
-    """Conduit resume credential from a ``resume_conversation_token`` event; sent
-    as ``x-conduit-token`` on ``POST /f/conversation/resume``."""
-
-    conversation_id: str = ""
-    """Conversation id for the HTTP-resume body (from the resume / handoff /
-    ordinary message events, all of which carry it)."""
+    """WS topic id from a ``stream_handoff`` event or a ``resume_conversation_token``
+    JWT's ``turn_topic_id`` claim."""
 
     http_content_seen: bool = False
     """True once an ``append``/``replace`` on ``/message/content/parts/0`` arrives."""
@@ -130,24 +116,16 @@ class HandoffState:
         if isinstance(kind, str):
             if kind == "resume_conversation_token":
                 tok = parsed.get("token")
-                if isinstance(tok, str) and tok:
-                    self.resume_token = tok
+                if isinstance(tok, str) and tok and not self.topic:
                     # The JWT carries turn_topic_id (conversation-turn-<id>) — the
-                    # WS topic for the conduit stream. Prefer it as the topic source.
-                    if not self.topic:
-                        jwt_topic = _topic_from_resume_jwt(tok)
-                        if jwt_topic:
-                            self.topic = jwt_topic
+                    # WS topic for the conduit stream. Use it as the topic source.
+                    jwt_topic = _topic_from_resume_jwt(tok)
+                    if jwt_topic:
+                        self.topic = jwt_topic
             elif kind in _HANDOFF_SIDE_EVENTS and not self.topic:
                 topic = _extract_handoff_topic(parsed)
                 if topic:
                     self.topic = topic
-
-        # conversation_id rides on the resume / handoff / message events alike;
-        # capture the first non-empty one for the HTTP-resume body.
-        cid = parsed.get("conversation_id")
-        if isinstance(cid, str) and cid and not self.conversation_id:
-            self.conversation_id = cid
 
         # Detect HTTP text content (aurora ``shouldUseWebsocketHandoff`` rule).
         # Check ``o`` field for "append"/"replace" on the text path.
@@ -171,27 +149,14 @@ class HandoffState:
                     self.http_content_seen = True
 
     def should_bridge(self) -> bool:
-        """True when a ``stream_handoff`` WS topic was found and no HTTP text arrived.
+        """True when a WS topic was found and no inline HTTP text arrived.
 
-        The WebSocket path (``stream_handoff`` → ``/celsius/ws/user`` → wss) is the
-        SPA's handler for that signal. A bare ``resume_conversation_token`` carries
-        no WS topic and routes to :meth:`should_resume` instead.
+        The WebSocket path (``stream_handoff`` or a ``resume_conversation_token``
+        JWT's ``turn_topic_id`` → ``/celsius/ws/user`` → wss) is the SPA's handler
+        for a deferred turn. When inline content already streamed there is nothing
+        to continue.
         """
         return bool(self.topic) and not self.http_content_seen
-
-    def should_resume(self) -> bool:
-        """True when a ``resume_conversation_token`` (with conversation id) arrived,
-        no inline content was seen, and no WS topic took precedence.
-
-        Routes to the SPA's HTTP-resume path: ``POST /f/conversation/resume`` with
-        ``x-conduit-token``. When both signals are present, the WS handoff wins
-        (``should_bridge`` is checked first).
-        """
-        return bool(self.resume_token) and bool(self.conversation_id) and not self.http_content_seen and not self.topic
-
-    def should_continue(self) -> bool:
-        """True when either continuation path (WS bridge or HTTP resume) applies."""
-        return self.should_bridge() or self.should_resume()
 
 
 def detect_handoff(state: HandoffState, chunk: bytes) -> None:
@@ -535,9 +500,6 @@ async def _stream_handoff_sse_impl(
             ping_task = asyncio.create_task(_ping_loop(), name="ccproxy-ws-handoff-ping")
             logger.debug("ws_handoff: dialed wss, subscribed topic=%s", topic_id)
             yielded = 0
-            # If no answer item arrives on the topic within this window, give up
-            # rather than hold the client for the full per-message read timeout.
-            first_item_deadline = asyncio.get_running_loop().time() + _WS_FIRST_ITEM_TIMEOUT
 
             try:
                 async for raw_msg in _ws_read_loop(ws=ws, read_timeout=read_timeout):
@@ -547,7 +509,6 @@ async def _stream_handoff_sse_impl(
                         [f.get("type") for f in frames],
                         [f.get("topic_id") or (f.get("reply") or {}).get("topic_id") for f in frames],
                     )
-                    done = False
                     for frame in frames:
                         frame_type = frame.get("type")
                         if frame_type == "reply":
@@ -570,13 +531,6 @@ async def _stream_handoff_sse_impl(
                         if done:
                             logger.debug("ws_handoff: WS done, yielded=%d items (topic=%s)", yielded, topic_id)
                             return
-                    if yielded == 0 and asyncio.get_running_loop().time() > first_item_deadline:
-                        logger.warning(
-                            "ws_handoff: no answer on topic=%s within %.0fs; giving up",
-                            topic_id,
-                            _WS_FIRST_ITEM_TIMEOUT,
-                        )
-                        return
             finally:
                 ping_task.cancel()
                 logger.debug("ws_handoff: WS closed, yielded=%d items (topic=%s)", yielded, topic_id)
@@ -645,160 +599,3 @@ async def run_handoff_bridge(
             yield chunk
     except Exception as exc:
         logger.error("ws_handoff: bridge stream error (topic=%s): %s", topic_id, exc)
-
-
-# ── HTTP-resume continuation (resume_conversation_token) ──────────────────────
-
-_RESUME_PATH = "/backend-api/f/conversation/resume"
-_RESUME_OFFSETS = (0, 1, 2)
-"""Offsets the ChatGPT SPA + pro-cli try in order; HTTP 404 means "next offset"."""
-
-_RESUME_MAX_HOPS = 6
-"""Max ``resume_conversation_token`` re-handoffs to follow before giving up."""
-
-_RESUME_POLL_DELAY = 0.4
-"""Delay between resume re-handoff hops while the conduit answer is generating."""
-
-_RESUME_DROP_HEADERS = frozenset(
-    {
-        "openai-sentinel-chat-requirements-token",
-        "openai-sentinel-proof-token",
-        "x-openai-target-path",
-        "x-openai-target-route",
-        "x-conduit-token",
-        "accept",
-        "content-type",
-        "content-length",
-        "host",
-    }
-)
-"""Original /f/conversation headers the resume call replaces or must not carry —
-the sentinel chat-requirements tokens are conversation-submit-only."""
-
-
-def _resume_headers(request_headers: dict[str, str], resume_token: str) -> dict[str, str]:
-    """Build ``/f/conversation/resume`` headers by reusing the original browser-shape
-    + bearer headers, swapping in the conduit token + resume target path."""
-    headers = {k: v for k, v in request_headers.items() if k.lower() not in _RESUME_DROP_HEADERS}
-    headers["accept"] = "text/event-stream"
-    headers["content-type"] = "application/json"
-    headers["x-conduit-token"] = resume_token
-    headers["x-openai-target-path"] = _RESUME_PATH
-    return headers
-
-
-_CONTENT_PATCH_MARKER = b"/message/content/parts/0"
-"""Substring present iff a resume body carries assistant content patches."""
-
-
-def _resume_body_has_content(body: bytes) -> bool:
-    return _CONTENT_PATCH_MARKER in body
-
-
-def _read_resume_token(body: bytes) -> tuple[str, str]:
-    """Extract ``(token, conversation_id)`` from a ``resume_conversation_token``
-    event inside a resume body. Empty strings when absent."""
-    for frame in body.split(b"\n\n"):
-        for line in frame.split(b"\n"):
-            if not line.startswith(b"data:"):
-                continue
-            data = line[5:].strip()
-            if not data or data == b"[DONE]":
-                continue
-            try:
-                obj = json.loads(data)
-            except (json.JSONDecodeError, ValueError):
-                continue
-            if isinstance(obj, dict) and obj.get("type") == "resume_conversation_token":
-                tok = obj.get("token")
-                cid = obj.get("conversation_id")
-                return (tok if isinstance(tok, str) else ""), (cid if isinstance(cid, str) else "")
-    return "", ""
-
-
-async def _resume_post_once(
-    *,
-    client: httpx.AsyncClient,
-    headers: dict[str, str],
-    conversation_id: str,
-    token: str,
-    timeout: float,
-) -> bytes | None:
-    """One resume POST trying offsets 0/1/2 (404 → next offset). Returns the 200
-    body, or ``None`` on a non-200/404 status or transport error."""
-    headers = {**headers, "x-conduit-token": token}
-    for offset in _RESUME_OFFSETS:
-        payload = json.dumps({"conversation_id": conversation_id, "offset": offset}).encode()
-        try:
-            resp = await client.post(
-                url=f"{_WS_BASE_URL}{_RESUME_PATH}",
-                headers=headers,
-                content=payload,
-                timeout=timeout,
-            )
-        except Exception as exc:
-            logger.error("ws_handoff: resume POST failed (offset=%d): %s", offset, exc)
-            return None
-        if resp.status_code == 404:
-            continue
-        if resp.status_code != 200:
-            logger.warning("ws_handoff: resume offset=%d → HTTP %d; giving up", offset, resp.status_code)
-            return None
-        try:
-            return await resp.aread()
-        except Exception as exc:
-            logger.error("ws_handoff: resume body read failed (offset=%d): %s", offset, exc)
-            return None
-    return None
-
-
-async def run_resume_bridge(
-    *,
-    client: httpx.AsyncClient,
-    conversation_id: str,
-    resume_token: str,
-    request_headers: dict[str, str] | None = None,
-    timeout: float = _WS_READ_TIMEOUT,
-) -> AsyncIterator[bytes]:
-    """HTTP-resume continuation for a ``resume_conversation_token`` turn.
-
-    ``POST /backend-api/f/conversation/resume`` with ``x-conduit-token: <token>``
-    and body ``{conversation_id, offset}`` (offsets 0/1/2, 404 → next), mirroring
-    the ChatGPT SPA (``sdk.js`` ``RMn``/``nNn``) + pro-cli ``resumeHandoffStream``.
-
-    The resume endpoint can answer one of two ways: a body carrying assistant
-    content patches (the answer — yielded for the intake), or another
-    ``resume_conversation_token`` re-pointing at a freshly-issued conduit (the
-    answer isn't ready yet). In the latter case this follows the re-handoff chain
-    up to :data:`_RESUME_MAX_HOPS` times, polling with a short delay, until content
-    appears or the chain stalls. On ANY error this logs and returns — never raises
-    into the ``body_stream`` caller.
-
-    Args:
-        client: Authenticated curl-cffi-backed AsyncClient (shares the cookie jar
-            with the original ``/f/conversation`` request).
-        conversation_id: Conversation id from the ``resume_conversation_token`` event.
-        resume_token: The conduit resume credential (sent as ``x-conduit-token``).
-        request_headers: The original forwarded ``/f/conversation`` headers, reused
-            for the browser-shape + bearer block.
-        timeout: Per-request timeout in seconds.
-    """
-    headers = _resume_headers(request_headers or {}, resume_token)
-    cid, token = conversation_id, resume_token
-    for hop in range(_RESUME_MAX_HOPS):
-        body = await _resume_post_once(
-            client=client, headers=headers, conversation_id=cid, token=token, timeout=timeout
-        )
-        if not body or not body.strip():
-            return
-        if _resume_body_has_content(body):
-            logger.debug("ws_handoff: resume recovered content at hop=%d (%dB)", hop, len(body))
-            yield body
-            return
-        next_token, next_cid = _read_resume_token(body)
-        if not next_token or next_token == token:
-            logger.debug("ws_handoff: resume hop=%d re-handoff carried no new conduit token; stopping", hop)
-            return
-        token, cid = next_token, (next_cid or cid)
-        await asyncio.sleep(_RESUME_POLL_DELAY)
-    logger.warning("ws_handoff: resume exhausted %d hops without content", _RESUME_MAX_HOPS)

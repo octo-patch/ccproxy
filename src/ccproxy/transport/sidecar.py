@@ -46,7 +46,6 @@ from ccproxy.openai_conversations.ws_handoff import (
     HandoffState,
     detect_handoff,
     run_handoff_bridge,
-    run_resume_bridge,
 )
 
 logger = logging.getLogger(__name__)
@@ -176,9 +175,9 @@ async def _handle(request: Request) -> Response:
             await upstream.aclose()
 
         # Continuation: if the HTTP body handed off without inline content, run
-        # the matching continuation (WS bridge for stream_handoff, HTTP resume for
-        # resume_conversation_token) and stream its bytes onto the same response.
-        if continuation_factory is not None and handoff_state is not None and handoff_state.should_continue():
+        # the WS bridge (the answer streams over the WebSocket) and stream its
+        # bytes onto the same response.
+        if continuation_factory is not None and handoff_state is not None and handoff_state.should_bridge():
             async for extra_chunk in continuation_factory(
                 client=client,
                 handoff_state=handoff_state,
@@ -206,22 +205,13 @@ async def _openai_conversations_continuation(
 ) -> AsyncIterator[bytes]:
     """Continuation dispatcher for ``openai_conversations``.
 
-    Routes by the SPA's two handoff signals: a ``stream_handoff`` WS topic →
-    :func:`run_handoff_bridge` (``/celsius/ws/user`` → wss); a
-    ``resume_conversation_token`` → :func:`run_resume_bridge`
-    (``POST /f/conversation/resume``). The WS path wins when both are present.
+    Routes the SPA's WebSocket handoff: a ``stream_handoff`` topic or a
+    ``resume_conversation_token`` JWT's ``turn_topic_id`` →
+    :func:`run_handoff_bridge` (``/celsius/ws/user`` → wss → subscribe).
     """
     if handoff_state.should_bridge():
         async for chunk in run_handoff_bridge(
             client=client, topic_id=handoff_state.topic, request_headers=request_headers
-        ):
-            yield chunk
-    elif handoff_state.should_resume():
-        async for chunk in run_resume_bridge(
-            client=client,
-            conversation_id=handoff_state.conversation_id,
-            resume_token=handoff_state.resume_token,
-            request_headers=request_headers,
         ):
             yield chunk
 
