@@ -208,6 +208,20 @@ class _ConversationsIntakeState:
     finish_reason: str | None = None
     """Finish reason string (``"stop"``, ``"length"``, etc.) when known."""
 
+    # ── Telemetry (never-silently-drop diagnostics) ───────────────────────────
+    frames_seen: int = 0
+    """Total dispatch envelopes processed (add / patch / side-event / done)."""
+
+    content_patches_off_channel: int = 0
+    """Content patches (text path or bare delta) seen while the current channel is
+    NOT the tracked final-answer channel — the answer may be on a channel we never
+    identified. The leading signal for a silent 'no text emitted' failure."""
+
+    assistant_msgs_skipped: int = 0
+    """Assistant ``content_type == "text"`` messages NOT adopted as the final-answer
+    channel (e.g. ``status == "finished_successfully"`` on a catch-up replay, or a
+    hidden message). Surfaces why no channel was tracked."""
+
     # ── Handoff ───────────────────────────────────────────────────────────────
     continuation: ContinuationMetadata | None = None
     """Populated when a handoff side event is received."""
@@ -310,6 +324,17 @@ def _parse_patch_list(items: list[Any]) -> list[tuple[str, str, Any]]:
     return result
 
 
+def _has_content_patch(patches: list[tuple[str, str, Any]]) -> bool:
+    """True when any patch carries assistant answer text — an explicit text-content
+    path, or a bare ``{"v": "str"}`` continuation delta (no path/op)."""
+    for path, op, value in patches:
+        if path in _TEXT_CONTENT_PATHS:
+            return True
+        if not path and not op and isinstance(value, str) and value:
+            return True
+    return False
+
+
 def _channel_from_frame(frame_obj: dict[str, Any]) -> int | None:
     c = frame_obj.get("c")
     if c is None:
@@ -372,6 +397,20 @@ async def handle_add(
         slug = msg.get("metadata", {}).get("model_slug")
         if isinstance(slug, str):
             state.model_slug = slug
+    elif msg.get("author", {}).get("role") == "assistant" and msg.get("content", {}).get("content_type") == "text":
+        # An assistant text message we did NOT adopt as the final-answer channel.
+        # The usual culprit on a WebSocket catch-up is a replayed message whose
+        # status is already ``finished_successfully`` — telemetry so a silent
+        # "no text emitted" turn is explainable from the logs alone.
+        state.assistant_msgs_skipped += 1
+        logger.debug(
+            "oaic intake: assistant text message NOT tracked as final-answer "
+            "(channel=%s status=%s hidden=%s final_channel=%s)",
+            env.channel,
+            msg.get("status"),
+            msg.get("metadata", {}).get("is_visually_hidden_from_conversation"),
+            state.final_channel,
+        )
 
 
 @_g.step
@@ -398,6 +437,17 @@ async def handle_patch(
 
     relevant = state.final_channel is not None and state.current_channel == state.final_channel
     if not relevant:
+        if _has_content_patch(env.patches):
+            # Content text arrived but not on the tracked final-answer channel — the
+            # answer is on a channel we never identified. The leading cause of an
+            # empty/silent OAIC turn; logged so it never passes silently.
+            state.content_patches_off_channel += 1
+            logger.debug(
+                "oaic intake: content patch on channel=%s ignored (final_channel=%s); "
+                "answer may be on an untracked channel",
+                state.current_channel,
+                state.final_channel,
+            )
         return
 
     for path, op, value in env.patches:
@@ -618,12 +668,27 @@ class OpenAIConversationsIntakeFSM:
         self._sse_buffer.extend(data)
         for envelope in self._drain_sse_frames():
             self._state.events_queue.append(envelope)
+            self._state.frames_seen += 1
         if not self._state.events_queue:
             return []
         return await _intake_graph.run(state=self._state)
 
     async def close(self) -> list[ModelResponseStreamEvent]:
-        """End of stream — no trailing events beyond what handle_done already emitted."""
+        """End of stream. Emit a telemetry warning when the stream produced no
+        visible text despite carrying answer content — so a silent OAIC turn is
+        always explainable from the logs (never an unobservable empty response)."""
+        s = self._state
+        if not s.content_begun and (s.content_patches_off_channel or s.assistant_msgs_skipped):
+            logger.warning(
+                "oaic intake produced NO text after %d frame(s): "
+                "content_patches_off_channel=%d assistant_msgs_skipped=%d final_channel=%s conv=%s "
+                "— the visible answer was not on the tracked channel",
+                s.frames_seen,
+                s.content_patches_off_channel,
+                s.assistant_msgs_skipped,
+                s.final_channel,
+                s.conversation_id[:8] or "?",
+            )
         return []
 
     def _drain_sse_frames(self) -> Iterator[Any]:
@@ -679,9 +744,13 @@ def _parse_frame(frame: bytes) -> Any:
     try:
         parsed = json.loads(data)
     except (json.JSONDecodeError, ValueError):
+        # Non-empty, non-[DONE] data we cannot parse — log so an unexpected wire
+        # encoding (e.g. a non-SSE encoded_item) is never dropped unobserved.
+        logger.debug("oaic intake: dropped unparseable SSE data frame (%d bytes): %.160r", len(data), data)
         return None
 
     if not isinstance(parsed, dict):
+        logger.debug("oaic intake: dropped non-object SSE data frame: %.160r", data)
         return None
 
     # Typed side event: ``{type, ...}`` without ``p`` or ``v`` fields.

@@ -595,6 +595,43 @@ class TestTextContentPath:
         assert out["choices"][0]["finish_reason"] == "stop"
 
 
+# ── Silent-drop telemetry (never an unobservable empty turn) ──────────────────
+
+
+class TestSilentDropTelemetry:
+    def test_finished_status_add_skipped_content_off_channel_warns(self, caplog: pytest.LogCaptureFixture) -> None:
+        """The WS catch-up failure mode: the assistant message is replayed already
+        ``finished_successfully`` → not adopted as final channel → its content
+        patches are ignored. The intake must emit ZERO text but make it observable
+        (counters + a WARNING), never a silent empty turn."""
+        import logging
+
+        fsm = _make_fsm()
+        stream = (
+            _make_add_frame(channel=0, msg_id="asst", status="finished_successfully")
+            + _make_single_patch("/message/content/parts/0", "append", "Paris", channel=0)
+            + _make_done()
+        )
+        with caplog.at_level(logging.WARNING, logger="ccproxy.lightllm.graph.openai_conversations_intake"):
+            _feed_sync(fsm, stream)
+            _close_sync(fsm)
+
+        assert _collected_text(fsm) == ""  # the bug: nothing emitted …
+        assert fsm.state.assistant_msgs_skipped >= 1  # … but now counted …
+        assert fsm.state.content_patches_off_channel >= 1
+        assert "produced NO text" in caplog.text  # … and surfaced in the logs.
+
+    def test_clean_stream_emits_no_warning(self, caplog: pytest.LogCaptureFixture) -> None:
+        import logging
+
+        fsm = _make_fsm()
+        with caplog.at_level(logging.WARNING, logger="ccproxy.lightllm.graph.openai_conversations_intake"):
+            _feed_sync(fsm, _STANDARD_STREAM)
+            _close_sync(fsm)
+        assert _collected_text(fsm) == "hello world"
+        assert "produced NO text" not in caplog.text
+
+
 # ── Collect mode (force-streamed buffered client) ─────────────────────────────
 
 

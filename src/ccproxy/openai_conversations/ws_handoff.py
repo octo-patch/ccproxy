@@ -322,58 +322,20 @@ def _parse_ws_frames(raw: bytes) -> list[dict[str, Any]]:
 
 
 def _decode_encoded_item(encoded: str) -> str:
-    """Return the SSE text carried by an ``encoded_item``.
+    """Return the SSE text carried by a WS ``encoded_item``.
 
-    Tolerates every shape we've seen or expect, falling back to the original
-    string so nothing is lost (the capture sink preserves the raw frame anyway):
+    Ground truth: chatgpt.com ``sdk.js`` ``_Nn`` parses ``encoded_item`` *as an SSE
+    stream* (line parser over ``data:``/``event:``), and aurora checks ``data:
+    [DONE]`` literally inside it — so ``encoded_item`` is already a plaintext SSE
+    event string. It is returned unchanged for the intake to parse.
 
-    * plaintext SSE line (``data: {...}`` / ``event: …``) — captured fixtures;
-    * base64 of an SSE line;
-    * the SPA ``_Nn`` shape — a JSON ``{event, data}`` object (raw or
-      base64-wrapped) that re-wraps the SSE-v1 payload in its ``data`` field;
-      reconstructed into an ``event:``/``data:`` SSE line.
+    A payload that is NOT SSE-shaped is unexpected; it is still forwarded (the
+    intake's unparseable-frame telemetry then surfaces it) — never silently
+    transformed on a guess.
     """
-    if encoded.lstrip().startswith(("data:", "event:")):
-        return encoded
-
-    try:
-        candidate = base64.b64decode(encoded, validate=True).decode("utf-8")
-    except (ValueError, UnicodeDecodeError):
-        candidate = encoded
-
-    if candidate.lstrip().startswith(("data:", "event:")):
-        return candidate
-
-    sse = _sse_from_event_data(candidate)
-    return sse if sse is not None else encoded
-
-
-def _sse_from_event_data(text: str) -> str | None:
-    """Reconstruct an SSE line from a JSON ``{event, data}`` object.
-
-    Mirrors the chatgpt.com SPA ``_Nn`` decode → ``{event, data}`` → the SSE-v1
-    patch is ``data``. Returns ``None`` when ``text`` is not such an object.
-    """
-    if not text.lstrip().startswith("{"):
-        return None
-    try:
-        obj = json.loads(text)
-    except (json.JSONDecodeError, ValueError):
-        return None
-    if not isinstance(obj, dict) or "data" not in obj:
-        return None
-    data = obj["data"]
-    if not isinstance(data, str):
-        try:
-            data = json.dumps(data)
-        except (TypeError, ValueError):
-            return None
-    event = obj.get("event")
-    lines = []
-    if isinstance(event, str) and event:
-        lines.append(f"event: {event}")
-    lines.append(f"data: {data}")
-    return "\n".join(lines) + "\n\n"
+    if not encoded.lstrip().startswith(("data:", "event:")):
+        logger.debug("ws_handoff: encoded_item is not SSE-shaped (%d bytes): %.120r", len(encoded), encoded)
+    return encoded
 
 
 def _walk_sse_items(obj: Any, topic: str | None = None) -> list[tuple[str | None, str]]:
