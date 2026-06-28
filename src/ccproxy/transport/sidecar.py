@@ -42,10 +42,10 @@ from starlette.routing import Route
 
 from ccproxy import transport
 from ccproxy.inspector.fingerprint import CapturedFingerprint
+from ccproxy.openai_conversations.session_ws import get_session_ws_manager
 from ccproxy.openai_conversations.ws_handoff import (
     HandoffState,
     detect_handoff,
-    run_handoff_bridge,
 )
 
 logger = logging.getLogger(__name__)
@@ -206,12 +206,15 @@ async def _openai_conversations_continuation(
     """Continuation dispatcher for ``openai_conversations``.
 
     Routes the SPA's WebSocket handoff: a ``stream_handoff`` topic or a
-    ``resume_conversation_token`` JWT's ``turn_topic_id`` →
-    :func:`run_handoff_bridge` (``/celsius/ws/user`` → wss → subscribe).
+    ``resume_conversation_token`` JWT's ``turn_topic_id`` through the persistent
+    :class:`~ccproxy.openai_conversations.session_ws.SessionWSManager`, which
+    keeps one ``/celsius/ws/user`` wss connection open per session and
+    multiplexes each turn's frames onto it (falling back to the per-turn
+    ``run_handoff_bridge`` on any failure of the persistent path).
     """
     if handoff_state.should_bridge():
-        async for chunk in run_handoff_bridge(
-            client=client, topic_id=handoff_state.topic, request_headers=request_headers
+        async for chunk in get_session_ws_manager().stream_turn(
+            topic_id=handoff_state.topic, client=client, request_headers=request_headers
         ):
             yield chunk
 
@@ -313,6 +316,12 @@ class Sidecar:
         logger.info("sidecar listening on 127.0.0.1:%d", self._port)
 
     async def stop(self) -> None:
+        # Tear down every persistent session WebSocket before the loop stops, so
+        # no read-loop task is left dangling across a sidecar restart.
+        try:
+            await get_session_ws_manager().shutdown()
+        except Exception as exc:
+            logger.warning("sidecar: session WS shutdown error: %s", exc)
         if self._server is None or self._task is None:
             return
         self._server.should_exit = True

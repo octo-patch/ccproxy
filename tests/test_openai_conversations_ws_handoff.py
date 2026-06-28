@@ -874,7 +874,8 @@ class TestSidecarContinuationSeam:
 
     async def test_continuation_bridges_after_http_body(self) -> None:
         """When CONTINUATION_HEADER is set and a handoff topic is found, the
-        sidecar calls the continuation factory and appends its output."""
+        sidecar routes through the session WS manager, which (with no session
+        credential in these headers) falls back to the per-turn bridge."""
         topic = "conversation-turn-sidecar-test"
         ws_chunk = b'data: {"delta": "WS answer"}\n\n'
 
@@ -905,7 +906,7 @@ class TestSidecarContinuationSeam:
         sidecar = Sidecar()
         with (
             patch("ccproxy.transport.sidecar.transport") as m,
-            patch("ccproxy.transport.sidecar.run_handoff_bridge", _fake_bridge),
+            patch("ccproxy.openai_conversations.session_ws.run_handoff_bridge", _fake_bridge),
         ):
             m.get_client = AsyncMock(return_value=mock_client)
             m.UnknownFingerprintProfileError = UnknownFingerprintProfileError
