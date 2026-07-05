@@ -155,7 +155,7 @@ This does NOT affect the main request/response forwarding path (mitmproxy handle
 
 ### providers
 
-`providers` maps a sentinel suffix to a `Provider` entry: an auth source, a single destination (`host` + `path`), and an adapter-family `type` identifier that names the wire format the destination speaks (one of `anthropic`, `openai`, `google` / `gemini` / `vertex_ai` / `vertex_ai_beta`, `perplexity_pro`; Anthropic-compatible forks like `deepseek` and `zai` use `type: anthropic`). When ccproxy sees a sentinel key matching `sk-ant-oat-ccproxy-{name}`, the matching `Provider` drives both auth injection (`inject_auth`) and routing (auto-redirect or cross-format `transform` via lightllm).
+`providers` maps a sentinel suffix to a `Provider` entry: an auth source, a single destination (`host` + `path`), and an adapter-family `type` identifier that names the wire format the destination speaks (one of `anthropic`, `openai`, `google` / `gemini` / `vertex_ai` / `vertex_ai_beta`, `perplexity_pro`; Anthropic-compatible forks like `deepseek`, `zai`, and `minimax` use `type: anthropic`). When ccproxy sees a sentinel key matching `sk-ant-oat-ccproxy-{name}`, the matching `Provider` drives both auth injection (`inject_auth`) and routing (auto-redirect or cross-format `transform` via lightllm).
 
 **Simple form** — auth dispatched as a bare shell command:
 
@@ -198,6 +198,15 @@ ccproxy:
       host: api.deepseek.com
       path: /anthropic/v1/messages
       type: anthropic          # DeepSeek's anthropic-compat endpoint speaks the anthropic format
+
+    minimax:
+      auth:
+        type: command
+        command: "printenv MINIMAX_API_KEY"
+        header: x-api-key      # send token as `x-api-key: <token>` (not `Authorization: Bearer …`)
+      host: api.minimax.io
+      path: /anthropic/v1/messages
+      type: anthropic          # MiniMax-M3 (1M context) via the anthropic-compat endpoint
 ```
 
 **Provider entry fields:**

@@ -108,7 +108,7 @@ class TestAnthropicBufferedToOpenAI:
     def test_alias_providers(self) -> None:
         """The Anthropic synthesizer applies to ``deepseek`` and ``zai`` too."""
         raw = _make_anthropic_text_body("via deepseek", model="deepseek-chat")
-        for alias in ("deepseek", "zai"):
+        for alias in ("deepseek", "zai", "minimax"):
             out_bytes = transform_buffered_response_sync(
                 raw_bytes=raw,
                 provider_type=alias,

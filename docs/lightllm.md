@@ -459,13 +459,13 @@ wire_bytes: bytes = dispatch_dump_sync(ctx, provider_type="anthropic")
 ```
 
 `dispatch_dump_sync` routes by upstream provider:
-* `anthropic` / `deepseek` / `zai` → `AnthropicAdapter.render(req)`
+* `anthropic` / `deepseek` / `zai` / `minimax` → `AnthropicAdapter.render(req)`
 * `openai` → `OpenAIChatAdapter.render(req)`
 * `google` / `gemini` / `vertex_ai` / `vertex_ai_beta` → `GoogleAdapter.render(req)`
 * `perplexity_pro` → `PerplexityAdapter.render(req)`
 * anything else → `UnsupportedUpstreamError`
 
-The Anthropic-compatible forks (`deepseek`, `zai`) deliberately share the
+The Anthropic-compatible forks (`deepseek`, `zai`, `minimax`) deliberately share the
 Anthropic adapter — their wire format is identical, only the upstream URL
 and auth differ (and those are handled by the `Provider` config).
 

@@ -52,6 +52,9 @@ STATIC_MODEL_CATALOG: dict[str, list[str]] = {
     "deepseek": [
         "deepseek-v4",
     ],
+    "minimax": [
+        "MiniMax-M3",
+    ],
     "perplexity": _perplexity_model_ids(),
 }
 """Provider → model IDs floor list. Updated alongside provider releases."""
