@@ -282,7 +282,7 @@
               export UV_PYTHON="${python}"
               uv sync --extra sdk --quiet 2>/dev/null || true
               export VIRTUAL_ENV="$PWD/.venv"
-              export PATH="$PWD/result/bin:$PWD/.venv/bin:$PATH"
+              export PATH="$PWD/.venv/bin:$PWD/result/bin:$PATH"
             '';
           };
         };
