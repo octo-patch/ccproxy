@@ -248,7 +248,6 @@
               python313
               uv
               ruff
-              mypy
               pyright
               pre-commit
               jq
@@ -260,6 +259,13 @@
             ++ releaseTestDeps;
 
             shellHook = ''
+              # Nix's python setup hook aggregates every python package in the
+              # shell (pre-commit, release-test python3, ...) into PYTHONPATH —
+              # a python 3.14 closure that shadows the project's 3.13 venv and
+              # breaks ABI-sensitive imports (mypy/librt). The uv venv owns the
+              # Python environment; nix supplies self-contained tool wrappers.
+              # mypy itself is a uv dev dependency, invoked via `uv run mypy`.
+              unset PYTHONPATH
               ${devConfig.shellHook}
               ${syncCcproxyTemplate}/bin/sync-ccproxy-template
               if git rev-parse --git-dir >/dev/null 2>&1; then
