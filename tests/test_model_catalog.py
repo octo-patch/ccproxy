@@ -43,6 +43,10 @@ def test_static_floor_contains_known_gemini_models() -> None:
     assert "gemini-2.5-flash" in ids
 
 
+def test_static_floor_contains_minimax_models() -> None:
+    assert {"MiniMax-M3", "MiniMax-M2.7"} <= set(STATIC_MODEL_CATALOG["minimax"])
+
+
 def test_owned_by_matches_provider_keys() -> None:
     """Each entry's ``owned_by`` is one of the provider keys in STATIC_MODEL_CATALOG."""
     catalog = build_catalog()

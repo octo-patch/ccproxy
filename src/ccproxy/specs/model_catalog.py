@@ -54,6 +54,7 @@ STATIC_MODEL_CATALOG: dict[str, list[str]] = {
     ],
     "minimax": [
         "MiniMax-M3",
+        "MiniMax-M2.7",
     ],
     "perplexity": _perplexity_model_ids(),
 }

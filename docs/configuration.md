@@ -206,8 +206,18 @@ ccproxy:
         header: x-api-key      # send token as `x-api-key: <token>` (not `Authorization: Bearer …`)
       host: api.minimax.io
       path: /anthropic/v1/messages
-      type: anthropic          # MiniMax-M3 (1M context) via the anthropic-compat endpoint
+      type: anthropic          # MiniMax-M3 and MiniMax-M2.7 via the compatible endpoint
 ```
+
+The packaged template selects the global `anthropic` endpoint. A provider has one destination, so use the
+corresponding values below when selecting another MiniMax endpoint:
+
+| `type` | Region | `host` | `path` | `auth.header` |
+|---|---|---|---|---|
+| `anthropic` | Global | `api.minimax.io` | `/anthropic/v1/messages` | `x-api-key` |
+| `anthropic` | China | `api.minimaxi.com` | `/anthropic/v1/messages` | `x-api-key` |
+| `openai` | Global | `api.minimax.io` | `/v1/chat/completions` | Omit to use the default Bearer header |
+| `openai` | China | `api.minimaxi.com` | `/v1/chat/completions` | Omit to use the default Bearer header |
 
 **Provider entry fields:**
 
