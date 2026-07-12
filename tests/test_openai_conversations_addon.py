@@ -57,11 +57,14 @@ def _make_flow(
 ) -> MagicMock:
     flow = MagicMock()
     flow.id = "test-flow-id"
-    flow.metadata = {
+    # mitmproxy's Flow.metadata is heterogeneous (dict[str, Any]); mirror that
+    # so boolean ccproxy flags type-check alongside the string provider name.
+    metadata: dict[str, object] = {
         "ccproxy.auth_provider": provider,
     }
     if auth_injected:
-        flow.metadata["ccproxy.auth_injected"] = True
+        metadata["ccproxy.auth_injected"] = True
+    flow.metadata = metadata
     flow.request.method = method
     flow.request.path = path
     flow.request.pretty_url = f"https://{host}{path}"

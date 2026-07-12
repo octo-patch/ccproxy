@@ -30,9 +30,9 @@ from __future__ import annotations
 import json
 import logging
 import uuid
-from collections import deque
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, cast
 
 from pydantic_ai.messages import (
     FinalResultEvent,
@@ -53,6 +53,11 @@ from pydantic_ai.messages import (
 from pydantic_graph import GraphBuilder, StepContext, TypeExpression
 
 import ccproxy.lightllm.graph._subgraph_patch  # noqa: F401  -- installs GraphBuilder.add_subgraph
+from ccproxy.lightllm.graph import _usage
+from ccproxy.lightllm.graph._base import RenderState, ResponseRenderFSM
+
+if TYPE_CHECKING:
+    from pydantic_ai.usage import RequestUsage
 
 logger = logging.getLogger(__name__)
 
@@ -64,7 +69,7 @@ def _emit(event_name: str, body: Mapping[str, object]) -> bytes:
     return f"event: {event_name}\ndata: {json.dumps(body, separators=(',', ':'))}\n\n".encode()
 
 
-def _emit_message_start(message_id: str, model: str) -> bytes:
+def _emit_message_start(message_id: str, model: str, usage: Mapping[str, object] | None = None) -> bytes:
     return _emit(
         "message_start",
         {
@@ -77,7 +82,7 @@ def _emit_message_start(message_id: str, model: str) -> bytes:
                 "content": [],
                 "stop_reason": None,
                 "stop_sequence": None,
-                "usage": {"input_tokens": 0, "output_tokens": 0},
+                "usage": dict(usage) if usage is not None else {"input_tokens": 0, "output_tokens": 0},
             },
         },
     )
@@ -187,13 +192,13 @@ def _emit_content_block_stop(idx: int) -> bytes:
     return _emit("content_block_stop", {"type": "content_block_stop", "index": idx})
 
 
-def _emit_message_delta() -> bytes:
+def _emit_message_delta(usage: Mapping[str, object] | None = None) -> bytes:
     return _emit(
         "message_delta",
         {
             "type": "message_delta",
             "delta": {"stop_reason": "end_turn", "stop_sequence": None},
-            "usage": {"output_tokens": 0},
+            "usage": dict(usage) if usage is not None else {"output_tokens": 0},
         },
     )
 
@@ -206,34 +211,20 @@ def _emit_message_stop() -> bytes:
 
 
 @dataclass
-class _AnthropicRenderState:
+class _AnthropicRenderState(RenderState):
     """FSM state for one Anthropic render graph run.
 
-    The ``pending_events`` queue holds the single :class:`ModelResponseStreamEvent`
-    pushed by :meth:`AnthropicResponseRenderFSM.render` before each graph run; the
-    FSM router pops from it. ``out`` accumulates the SSE wire bytes emitted by
-    handler steps; the terminal step returns ``bytes(out)`` and resets the buffer
-    so the same state can drive the next render call. ``message_id``, ``model``,
-    ``started``, and ``open_block_index`` persist across render calls so the
-    stream-level lifecycle stays consistent. ``current_ir_index`` is a transient
-    scratch field written by the inner-subgraph open steps.
+    Shared queue/output/telemetry slots come from :class:`RenderState`.
+    ``message_id``, ``started``, and ``open_block_index`` persist across render
+    calls so the stream-level lifecycle stays consistent. ``current_ir_index``
+    is a transient scratch field written by the inner-subgraph open steps.
     """
 
     message_id: str
-    model: str
     started: bool = False
     open_block_index: int | None = None
     current_ir_index: int = 0
     """Transient: the IR part/delta index, stashed by the inner-subgraph open step."""
-    pending_events: deque[ModelResponseStreamEvent] = field(default_factory=deque)
-    out: bytearray = field(default_factory=bytearray)
-
-    # ── Telemetry (never-silently-drop diagnostics) ───────────────────────────
-    events_received: int = 0
-    """Total IR events dispatched through the render FSM (across all render calls)."""
-
-    bytes_emitted: int = 0
-    """Total SSE bytes emitted by render steps (excludes the close terminator)."""
 
 
 class _RenderDone:
@@ -523,12 +514,12 @@ _render_graph = _g.build()
 # ── Public class ───────────────────────────────────────────────────────────
 
 
-class AnthropicResponseRenderFSM:
+class AnthropicResponseRenderFSM(ResponseRenderFSM[_AnthropicRenderState]):
     """Async pydantic-graph-driven Anthropic Messages SSE renderer.
 
     Behavioral twin of
     :class:`ccproxy.lightllm.response.render_anthropic.AnthropicResponseRender`,
-    re-expressed as a :mod:`pydantic_graph.beta` ``GraphBuilder`` FSM. One graph
+    re-expressed as a :mod:`pydantic_graph` ``GraphBuilder`` FSM. One graph
     run per :meth:`render` call drives a single
     :class:`ModelResponseStreamEvent` through the per-variant dispatch ladder
     and returns the emitted SSE bytes. :meth:`close` is imperative — the
@@ -541,39 +532,33 @@ class AnthropicResponseRenderFSM:
     """
 
     name = "anthropic_messages"
+    _graph = _render_graph
 
-    def __init__(self, *, model: str = "unknown") -> None:
-        self._state = _AnthropicRenderState(
+    def _initial_state(self, *, model: str) -> _AnthropicRenderState:
+        return _AnthropicRenderState(
             message_id=f"msg_{uuid.uuid4().hex[:24]}",
             model=model,
         )
 
-    @property
-    def state(self) -> _AnthropicRenderState:
-        """Expose FSM state for tests and telemetry inspection."""
-        return self._state
-
-    async def render(self, event: ModelResponseStreamEvent) -> bytes:
-        """One IR event → zero-or-more bytes of Anthropic SSE wire output."""
-        self._state.pending_events.append(event)
-        result: bytes = await _render_graph.run(state=self._state)
-        return result
-
-    async def close(self) -> bytes:
+    async def close(
+        self,
+        *,
+        usage: RequestUsage | None = None,
+        raw_extras: Mapping[str, object] | None = None,
+    ) -> bytes:
         """Flush any open block, then emit ``message_delta`` + ``message_stop``.
 
         Imperative (no FSM): the terminator sequence is a fixed three-step
-        emission with no per-event dispatch. Emits a telemetry warning when IR
-        events arrived but no content bytes were rendered — a silent empty
-        Anthropic response must be explainable from logs.
+        emission with no per-event dispatch. When the intake captured usage, the
+        terminal ``message_delta`` carries the real token counts (funnel
+        re-stamping) rather than zeros. Emits a telemetry warning when IR events
+        arrived but no content bytes were rendered — a silent empty Anthropic
+        response must be explainable from logs.
         """
+        del raw_extras  # message_delta has no slot for arbitrary upstream metadata
         state = self._state
-        if state.events_received and not state.bytes_emitted:
-            logger.warning(
-                "anthropic render received %d IR event(s) but emitted NO content bytes "
-                "before close — every event mapped to a no-op wire surface",
-                state.events_received,
-            )
+        self._log_silent_close()
+        delta_usage = None if _usage.usage_is_empty(usage) else _usage.to_anthropic(cast("RequestUsage", usage))
         out = bytearray()
         if state.open_block_index is not None:
             out += _emit_content_block_stop(state.open_block_index)
@@ -581,8 +566,9 @@ class AnthropicResponseRenderFSM:
         if not state.started:
             # Empty stream — still emit a valid envelope so the client sees a
             # parseable response.
-            out += _emit_message_start(state.message_id, state.model)
+            start_usage = None if usage is None else _usage.to_anthropic_message_start(usage)
+            out += _emit_message_start(state.message_id, state.model, start_usage)
             state.started = True
-        out += _emit_message_delta()
+        out += _emit_message_delta(delta_usage)
         out += _emit_message_stop()
         return bytes(out)

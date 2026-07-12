@@ -57,19 +57,16 @@ def _make_buffered_render(
     and ``model``; the returned callable assembles the drained IR parts into one
     listener-format buffered JSON object.
     """
-    from ccproxy.lightllm.graph.buffered import (
-        intake_finish_reason,
-        intake_provider_response_id,
-        render_parts_to_listener,
-    )
+    from ccproxy.lightllm.graph.buffered import render_parts_to_listener
 
     def _render(parts: list[ModelResponsePart]) -> bytes:
         return render_parts_to_listener(
             parts=parts,
             inbound_format=inbound_format,
             model=model,
-            provider_response_id=intake_provider_response_id(intake),
-            finish_reason=intake_finish_reason(intake),
+            provider_response_id=intake.provider_response_id,
+            finish_reason=intake.finish_reason,
+            usage=intake.usage,
         )
 
     return _render

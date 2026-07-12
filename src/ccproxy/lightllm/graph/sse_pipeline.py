@@ -173,13 +173,21 @@ class SSEPipeline:
             logger.warning(
                 "SSEPipeline EOS produced NO content bytes for intake=%s render=%s "
                 "— only the SSE terminator will be sent (empty response to the client)",
-                getattr(self._intake, "name", type(self._intake).__name__),
-                getattr(self._render, "name", type(self._render).__name__),
+                self._intake.name,
+                self._render.name,
             )
         if not self._terminator_emitted:
             self._terminator_emitted = True
             try:
-                out.extend(await self._render.close())
+                # Funnel: hand the intake's accumulated usage + carried-through
+                # metadata to the render terminator so token accounting the
+                # cross-format transform would otherwise drop is re-stamped.
+                out.extend(
+                    await self._render.close(
+                        usage=self._intake.usage,
+                        raw_extras=self._intake.raw_extras,
+                    )
+                )
             except Exception:
                 logger.exception("SSEPipeline render.close failed; no terminator emitted")
         return bytes(out)
@@ -205,7 +213,7 @@ class SSEPipeline:
             logger.warning(
                 "SSEPipeline collect mode assembled NO parts for intake=%s — the buffered "
                 "object sent to the client carries no content (empty response)",
-                getattr(self._intake, "name", type(self._intake).__name__),
+                self._intake.name,
             )
         try:
             return self._buffered_render(parts)

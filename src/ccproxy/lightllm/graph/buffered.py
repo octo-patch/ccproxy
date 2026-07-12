@@ -75,6 +75,7 @@ from ccproxy.lightllm.graph import (
     _GOOGLE_COMPATIBLE,
     UnsupportedListenerError,
     UnsupportedUpstreamError,
+    _usage,
     dispatch_intake,
 )
 from ccproxy.lightllm.parsed import InboundFormat
@@ -82,6 +83,7 @@ from ccproxy.lightllm.parsed import InboundFormat
 if TYPE_CHECKING:
     from pydantic_ai.messages import ModelResponsePart
     from pydantic_ai.models import ModelRequestParameters
+    from pydantic_ai.usage import RequestUsage
 
     from ccproxy.lightllm.graph import AnyAsyncIntakeFSM
 
@@ -366,6 +368,10 @@ def _synthesize_openai_sse(body: dict[str, Any]) -> bytes:
             }
         ],
     }
+    # Forward the buffered body's usage so the intake's funnel accumulator
+    # captures it (the synthetic chunk stands in for the terminal usage chunk).
+    if isinstance(body.get("usage"), dict):
+        chunk_dict["usage"] = body["usage"]
     return _frame(chunk_dict) + b"data: [DONE]\n\n"
 
 
@@ -752,11 +758,13 @@ def _parts_to_openai_chat_completion(
     model: str,
     provider_response_id: str | None = None,
     finish_reason: str | None = None,
+    usage: RequestUsage | None = None,
 ) -> dict[str, Any]:
     """Serialize IR parts into an OpenAI ``ChatCompletion`` JSON dict.
 
     One ``choice`` with a ``message`` carrying assembled text + tool_calls
-    + finish_reason.
+    + finish_reason. When usage was captured off the upstream, it is projected
+    into the OpenAI ``usage`` block; when absent it is omitted (never zeroed).
     """
     content_chunks: list[str] = []
     out_tool_calls: list[dict[str, Any]] = []
@@ -779,6 +787,9 @@ def _parts_to_openai_chat_completion(
             )
 
     content_str = "".join(content_chunks) if content_chunks else None
+    if finish_reason == "tool_call":
+        # pydantic-ai's FinishReason spells it singular; the OpenAI wire is plural.
+        finish_reason = "tool_calls"
     resolved_finish = "tool_calls" if out_tool_calls and finish_reason in (None, "stop") else finish_reason or "stop"
     message: dict[str, Any] = {
         "role": "assistant",
@@ -787,7 +798,7 @@ def _parts_to_openai_chat_completion(
     if out_tool_calls:
         message["tool_calls"] = out_tool_calls
 
-    return {
+    out: dict[str, Any] = {
         "id": provider_response_id or f"chatcmpl-{uuid.uuid4().hex[:24]}",
         "object": "chat.completion",
         "created": int(time.time()),
@@ -801,6 +812,9 @@ def _parts_to_openai_chat_completion(
             }
         ],
     }
+    if not _usage.usage_is_empty(usage):
+        out["usage"] = _usage.to_openai_chat(cast("RequestUsage", usage))
+    return out
 
 
 def _parts_to_openai_responses(
@@ -809,6 +823,7 @@ def _parts_to_openai_responses(
     model: str,
     provider_response_id: str | None = None,
     finish_reason: str | None = None,
+    usage: RequestUsage | None = None,
 ) -> dict[str, Any]:
     """Serialize IR parts into an OpenAI ``/v1/responses`` buffered JSON dict.
 
@@ -871,6 +886,7 @@ def _parts_to_openai_responses(
 
     status = "incomplete" if finish_reason == "length" else "completed"
 
+    usage_block = None if _usage.usage_is_empty(usage) else _usage.to_openai_responses(cast("RequestUsage", usage))
     return {
         "id": provider_response_id or f"resp_{uuid.uuid4().hex[:24]}",
         "object": "response",
@@ -878,7 +894,7 @@ def _parts_to_openai_responses(
         "model": model,
         "status": status,
         "output": output_items,
-        "usage": {"input_tokens": 0, "output_tokens": 0},
+        "usage": usage_block,
     }
 
 
@@ -888,6 +904,7 @@ def _parts_to_anthropic_message(
     model: str,
     provider_response_id: str | None = None,
     stop_reason: str | None = None,
+    usage: RequestUsage | None = None,
 ) -> dict[str, Any]:
     """Serialize IR parts into an Anthropic ``BetaMessage`` JSON dict."""
     blocks: list[dict[str, Any]] = []
@@ -919,6 +936,11 @@ def _parts_to_anthropic_message(
             )
 
     resolved_stop = stop_reason or ("tool_use" if any(b.get("type") == "tool_use" for b in blocks) else "end_turn")
+    usage_block = (
+        {"input_tokens": 0, "output_tokens": 0}
+        if _usage.usage_is_empty(usage)
+        else _usage.to_anthropic(cast("RequestUsage", usage))
+    )
     return {
         "id": provider_response_id or f"msg_{uuid.uuid4().hex[:24]}",
         "type": "message",
@@ -927,7 +949,7 @@ def _parts_to_anthropic_message(
         "model": model,
         "stop_reason": resolved_stop,
         "stop_sequence": None,
-        "usage": {"input_tokens": 0, "output_tokens": 0},
+        "usage": usage_block,
     }
 
 
@@ -938,6 +960,7 @@ def render_parts_to_listener(
     model: str,
     provider_response_id: str | None = None,
     finish_reason: str | None = None,
+    usage: RequestUsage | None = None,
 ) -> bytes:
     """Serialize IR parts into the listener's buffered JSON bytes by inbound format.
 
@@ -947,6 +970,8 @@ def render_parts_to_listener(
     whose client asked for a single buffered object). ``provider_response_id``
     and ``finish_reason`` are honored by the OpenAI Chat / Responses renderers
     and ignored by the Anthropic renderer (which derives its own stop reason).
+    ``usage`` (captured off the upstream by the intake) is projected into each
+    listener's native usage block; when absent it is omitted rather than zeroed.
     """
     if not parts:
         logger.warning(
@@ -960,15 +985,17 @@ def render_parts_to_listener(
             model=model,
             provider_response_id=provider_response_id,
             finish_reason=finish_reason,
+            usage=usage,
         )
     elif inbound_format is InboundFormat.ANTHROPIC_MESSAGES:
-        out_dict = _parts_to_anthropic_message(parts=parts, model=model)
+        out_dict = _parts_to_anthropic_message(parts=parts, model=model, usage=usage)
     elif inbound_format is InboundFormat.OPENAI_RESPONSES:
         out_dict = _parts_to_openai_responses(
             parts=parts,
             model=model,
             provider_response_id=provider_response_id,
             finish_reason=finish_reason,
+            usage=usage,
         )
     else:
         raise UnsupportedListenerError(f"no buffered renderer for inbound_format={inbound_format}")
@@ -1048,8 +1075,9 @@ def transform_buffered_response_sync(
         parts=parts,
         inbound_format=inbound_format,
         model=model,
-        provider_response_id=intake_provider_response_id(intake),
-        finish_reason=intake_finish_reason(intake),
+        provider_response_id=intake.provider_response_id,
+        finish_reason=intake.finish_reason,
+        usage=intake.usage,
     )
 
 
@@ -1069,21 +1097,6 @@ def _parse_json_body(raw_bytes: bytes) -> Any:
 def _looks_like_sse(raw_bytes: bytes) -> bool:
     stripped = raw_bytes.lstrip()
     return stripped.startswith(b"data:") or stripped.startswith(b"event:")
-
-
-def intake_provider_response_id(intake: AnyAsyncIntakeFSM) -> str | None:
-    """Pull the upstream response id from the intake if it tracks one (OpenAI only)."""
-    return getattr(intake, "provider_response_id", None)
-
-
-def intake_finish_reason(intake: AnyAsyncIntakeFSM) -> str | None:
-    """Pull a finish-reason hint from the intake when available (OpenAI only)."""
-    fr = getattr(intake, "finish_reason", None)
-    if fr is None:
-        return None
-    # pydantic-ai's FinishReason includes ``tool_call`` (singular); the
-    # OpenAI wire uses ``tool_calls``.
-    return "tool_calls" if fr == "tool_call" else str(fr)
 
 
 # ── Sync driver — one-shot asyncio loop ────────────────────────────────────

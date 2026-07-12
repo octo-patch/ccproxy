@@ -73,11 +73,7 @@ def _drive_collect(raw_sse: bytes, *, inbound_format: InboundFormat, model: str 
     buffered JSON object it assembles at EOS (mirrors the force-streamed
     openai_conversations path for a stream:false client)."""
     from ccproxy.lightllm.graph import dispatch_intake
-    from ccproxy.lightllm.graph.buffered import (
-        intake_finish_reason,
-        intake_provider_response_id,
-        render_parts_to_listener,
-    )
+    from ccproxy.lightllm.graph.buffered import render_parts_to_listener
     from ccproxy.lightllm.graph.sse_pipeline import SSEPipeline
 
     intake = dispatch_intake(
@@ -91,8 +87,8 @@ def _drive_collect(raw_sse: bytes, *, inbound_format: InboundFormat, model: str 
             parts=parts,
             inbound_format=inbound_format,
             model=model,
-            provider_response_id=intake_provider_response_id(intake),
-            finish_reason=intake_finish_reason(intake),
+            provider_response_id=intake.provider_response_id,
+            finish_reason=intake.finish_reason,
         )
 
     pipeline = SSEPipeline(intake=intake, buffered_render=_buffered_render)

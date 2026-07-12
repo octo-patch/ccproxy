@@ -25,7 +25,6 @@ async FSM in a one-loop-per-call sync adapter.
 from __future__ import annotations
 
 import logging
-from collections import deque
 from collections.abc import Iterator
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
@@ -79,6 +78,8 @@ from pydantic_ai.models.anthropic import (
 from pydantic_graph import GraphBuilder, StepContext, TypeExpression
 
 import ccproxy.lightllm.graph._subgraph_patch  # noqa: F401  -- installs GraphBuilder.add_subgraph
+from ccproxy.lightllm.graph import _usage
+from ccproxy.lightllm.graph._base import IntakeState, ResponseIntakeFSM
 
 if TYPE_CHECKING:
     from pydantic_ai.models import ModelRequestParameters
@@ -96,36 +97,21 @@ the canonical way to validate one instance from a JSON payload is via a ``TypeAd
 
 
 @dataclass
-class _AnthropicIntakeState:
+class _AnthropicIntakeState(IntakeState[BetaRawMessageStreamEvent]):
     """FSM state for one Anthropic intake graph run.
 
-    The ``events_queue`` is the queue of typed
-    :class:`BetaRawMessageStreamEvent` instances drained from the SSE buffer
-    *before* the graph run starts; the FSM router pops from it. The
-    ``out_events`` list accumulates :class:`ModelResponseStreamEvent` instances
-    emitted by handler steps; the terminal step returns it.
-    ``parts_manager``, ``current_block``, ``builtin_tool_calls`` persist across
-    feed calls so multi-feed reassembly works.
+    Shared queue/funnel/telemetry slots come from :class:`IntakeState`;
+    ``current_block`` and ``builtin_tool_calls`` persist across feed calls so
+    multi-feed reassembly works. Usage accumulates off ``message_start`` /
+    ``message_delta``; ``raw_extras`` carries the upstream message id and any
+    message-level field with no IR slot.
     """
 
-    parts_manager: ModelResponsePartsManager
     provider_name: str
     current_block: BetaContentBlock | None = None
     current_index: int | None = None
     """SSE ``index`` of the block currently being dispatched; set by the inner-subgraph open step."""
     builtin_tool_calls: dict[str, NativeToolCallPart] = field(default_factory=dict)
-    events_queue: deque[BetaRawMessageStreamEvent] = field(default_factory=deque)
-    out_events: list[ModelResponseStreamEvent] = field(default_factory=list)
-
-    # ── Telemetry (never-silently-drop diagnostics) ───────────────────────────
-    frames_seen: int = 0
-    """Total typed SSE events drained from the wire (across all feed calls)."""
-
-    frames_unparseable: int = 0
-    """SSE frames whose ``data:`` payload failed ``BetaRawMessageStreamEvent`` validation."""
-
-    emitted_events: int = 0
-    """Total IR ``ModelResponseStreamEvent`` instances emitted (across all feed calls)."""
 
 
 class _FeedDone:
@@ -159,6 +145,36 @@ _g: GraphBuilder[_AnthropicIntakeState, None, None, list[ModelResponseStreamEven
 )
 
 
+_ANTHROPIC_MESSAGE_MODELED_KEYS = frozenset(
+    {"id", "type", "role", "model", "content", "usage", "stop_reason", "stop_sequence"}
+)
+
+
+def _capture_message_start(state: _AnthropicIntakeState, event: BetaRawMessageStartEvent) -> None:
+    """Funnel ``message_start``: accumulate usage + carry unmodeled metadata.
+
+    This is the input-side of the usage accumulator pydantic-ai keeps on
+    ``StreamedResponse._usage``. Any message-level field the IR has no slot for
+    rides through ``raw_extras`` rather than being silently dropped.
+    """
+    message = event.message
+    if message is None:  # Bedrock emits type-less chunks; mirror pydantic-ai's guard.
+        return
+    state.usage = _usage.usage_from_anthropic(message.usage, existing=state.usage)
+    if message.id:
+        state.raw_extras.setdefault("response_id", message.id)
+    for key, value in message.model_dump(exclude_none=True, mode="json").items():
+        if key in _ANTHROPIC_MESSAGE_MODELED_KEYS:
+            continue
+        state.raw_extras.setdefault(f"message.{key}", value)
+        logger.debug("anthropic intake: carrying unmodeled message field %r through raw_extras", key)
+
+
+def _capture_message_delta(state: _AnthropicIntakeState, event: BetaRawMessageDeltaEvent) -> None:
+    """Funnel ``message_delta``: accumulate the cumulative output-token usage."""
+    state.usage = _usage.usage_from_anthropic(event.usage, existing=state.usage)
+
+
 @_g.step
 async def frame_next_event(
     ctx: StepContext[_AnthropicIntakeState, None, None],
@@ -167,11 +183,15 @@ async def frame_next_event(
     state = ctx.state
     while state.events_queue:
         event = state.events_queue.popleft()
-        # ``message_start`` and ``message_delta`` carry usage / metadata that
-        # pydantic-ai stashes on ``StreamedResponse``; they have no IR-event
-        # equivalent. Surface them as :class:`_IgnoredEvent` so the FSM stays
-        # decision-driven.
-        if isinstance(event, (BetaRawMessageStartEvent, BetaRawMessageDeltaEvent)):
+        # ``message_start`` and ``message_delta`` carry usage / metadata with no
+        # IR-event equivalent. Capture that off the wire (usage accumulator +
+        # carried-through metadata), then surface them as :class:`_IgnoredEvent`
+        # so the FSM stays decision-driven.
+        if isinstance(event, BetaRawMessageStartEvent):
+            _capture_message_start(state, event)
+            return _IgnoredEvent()
+        if isinstance(event, BetaRawMessageDeltaEvent):
+            _capture_message_delta(state, event)
             return _IgnoredEvent()
         if isinstance(event, BetaRawMessageStopEvent):
             state.current_block = None
@@ -602,98 +622,37 @@ _intake_graph = _g.build()
 # ── Public class ───────────────────────────────────────────────────────────
 
 
-class AnthropicResponseIntakeFSM:
+class AnthropicResponseIntakeFSM(ResponseIntakeFSM[_AnthropicIntakeState]):
     """Async pydantic-graph-driven Anthropic Messages SSE intake.
 
     Behavioral twin of
     :class:`ccproxy.lightllm.response.intake_anthropic.AnthropicResponseIntake`,
-    re-expressed as a :mod:`pydantic_graph.beta` ``GraphBuilder`` FSM. One graph
+    re-expressed as a :mod:`pydantic_graph` ``GraphBuilder`` FSM. One graph
     run per :meth:`feed` call drains all complete SSE frames buffered by that
     call into typed Anthropic events, dispatches each one to a handler step,
     and returns the accumulated IR events. Partial frames remain in the SSE
     buffer for the next call. ``parts_manager`` and ``current_block`` persist
-    across calls.
+    across calls. ``message_stop`` already closes everything, so the base
+    :meth:`close` (silent-empty telemetry only) applies as-is.
     """
 
     name = "anthropic"
+    _graph = _intake_graph
 
-    def __init__(self, *, model: str, request_params: ModelRequestParameters) -> None:
-        self._model = model
-        self._request_params = request_params
-        self._sse_buffer = bytearray()
-        self.upstream_raw_bytes = bytearray()
+    def _initial_state(self, *, model: str, request_params: ModelRequestParameters) -> _AnthropicIntakeState:
+        del model  # Anthropic tracks no wire-updated model slug on state.
         # ``provider_name`` matches what pydantic-ai's ``AnthropicStreamedResponse``
         # uses; hard-coded to "anthropic" because this intake is selected for
         # anthropic-family upstreams (anthropic, deepseek-anthropic-compat,
         # zai-anthropic-compat).
-        self._state = _AnthropicIntakeState(
+        return _AnthropicIntakeState(
             parts_manager=ModelResponsePartsManager(model_request_parameters=request_params),
             provider_name="anthropic",
         )
 
-    @property
-    def parts_manager(self) -> ModelResponsePartsManager:
-        """Expose the underlying parts manager for tests and downstream renderers."""
-        return self._state.parts_manager
-
-    @property
-    def state(self) -> _AnthropicIntakeState:
-        """Expose FSM state for tests and telemetry inspection."""
-        return self._state
-
-    async def feed(self, data: bytes) -> list[ModelResponseStreamEvent]:
-        """Buffer bytes, frame SSE events, drive the FSM, return emitted IR events."""
-        self.upstream_raw_bytes.extend(data)
-        if not data:
-            return []
-        self._sse_buffer.extend(data)
-        # Drain complete SSE frames into typed Anthropic events.
-        for raw_event in self._drain_sse_events():
-            self._state.events_queue.append(raw_event)
-            self._state.frames_seen += 1
-        # If there were no complete frames, short-circuit — the graph run would
-        # produce no events.
-        if not self._state.events_queue:
-            return []
-        result = await _intake_graph.run(state=self._state)
-        return result
-
-    async def close(self) -> list[ModelResponseStreamEvent]:
-        """Stream end. ``message_stop`` already closes everything; nothing to flush.
-
-        Emits a telemetry warning when the stream carried events but produced no
-        IR output — a silent empty Anthropic turn must be explainable from logs.
-        """
-        s = self._state
-        if s.frames_seen and not s.emitted_events:
-            logger.warning(
-                "anthropic intake produced NO IR events after %d frame(s) "
-                "(unparseable=%d) — the upstream stream carried no renderable content",
-                s.frames_seen,
-                s.frames_unparseable,
-            )
-        return []
-
-    def _drain_sse_events(self) -> Iterator[BetaRawMessageStreamEvent]:
-        """Frame SSE events from ``self._sse_buffer``; validate each into a typed event.
-
-        Handles both ``\\r\\n\\r\\n`` (industry standard) and ``\\n\\n`` (some servers)
-        separators; partial frames remain buffered for the next ``feed`` call.
-        """
-        while True:
-            # SSE separator is \r\n\r\n on the wire; some servers emit \n\n.
-            # Pick whichever boundary appears first in the buffer.
-            crlf = self._sse_buffer.find(b"\r\n\r\n")
-            lf = self._sse_buffer.find(b"\n\n")
-            if crlf == -1 and lf == -1:
-                return
-            if crlf != -1 and (lf == -1 or crlf < lf):
-                frame_bytes = bytes(self._sse_buffer[:crlf])
-                del self._sse_buffer[: crlf + 4]
-            else:
-                frame_bytes = bytes(self._sse_buffer[:lf])
-                del self._sse_buffer[: lf + 2]
-
+    def _drain_events(self) -> Iterator[BetaRawMessageStreamEvent]:
+        """Validate each complete SSE frame's ``data:`` payload into a typed event."""
+        for frame_bytes in self._split_sse_frames():
             payload = self._extract_data_payload(frame_bytes)
             if not payload:
                 continue

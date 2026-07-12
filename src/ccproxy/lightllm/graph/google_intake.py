@@ -60,6 +60,8 @@ from pydantic_ai.messages import BinaryContent, FilePart, ModelResponseStreamEve
 from pydantic_graph import GraphBuilder, StepContext
 
 import ccproxy.lightllm.graph._subgraph_patch  # noqa: F401  — installs add_subgraph
+from ccproxy.lightllm.graph import _usage
+from ccproxy.lightllm.graph._base import IntakeState, ResponseIntakeFSM
 
 if TYPE_CHECKING:
     from pydantic_ai.models import ModelRequestParameters
@@ -103,33 +105,16 @@ type _OuterRoute = _GenerateChunk | _FeedDone
 
 
 @dataclass
-class _GoogleIntakeState:
+class _GoogleIntakeState(IntakeState[_GenerateChunk]):
     """FSM state for one Google intake graph run.
 
-    The ``events_queue`` is the queue of dispatch envelopes drained from the
-    SSE buffer *before* the outer graph run starts; the outer router pops
-    from it. The ``out_events`` list accumulates
-    :class:`ModelResponseStreamEvent` instances; the terminal outer step
-    drains and returns it. ``parts_manager`` persists across feed calls so
-    multi-feed reassembly works. ``parts_queue`` is per-chunk scratch
-    drained inside the per-chunk subgraph.
+    Shared queue/funnel/telemetry slots come from :class:`IntakeState`; usage
+    accumulates off each chunk's ``usage_metadata``. ``parts_queue`` is
+    per-chunk scratch drained inside the per-chunk subgraph.
     """
 
-    parts_manager: ModelResponsePartsManager
-    events_queue: deque[_GenerateChunk] = field(default_factory=deque)
-    out_events: list[ModelResponseStreamEvent] = field(default_factory=list)
     parts_queue: deque[Part] = field(default_factory=deque)
     """Per-chunk queue of ``Part`` instances; drained by the per-chunk subgraph."""
-
-    # ── Telemetry (never-silently-drop diagnostics) ───────────────────────────
-    frames_seen: int = 0
-    """Total ``GenerateContentResponse`` chunks drained from the wire (across all feed calls)."""
-
-    frames_unparseable: int = 0
-    """SSE frames whose payload failed JSON decode or ``GenerateContentResponse`` validation."""
-
-    emitted_events: int = 0
-    """Total IR ``ModelResponseStreamEvent`` instances emitted (across all feed calls)."""
 
 
 # ── Per-chunk dispatch subgraph ─────────────────────────────────────────────
@@ -155,6 +140,11 @@ async def absorb_chunk(
     """
     state = ctx.state
     chunk = ctx.inputs.chunk
+    # Funnel: capture usage before the candidate/parts short-circuits — Gemini
+    # often carries ``usage_metadata`` on a candidate-less terminal chunk, the
+    # exact frame the parts walk skips. Values are cumulative, so replace.
+    if chunk.usage_metadata is not None:
+        state.usage = _usage.usage_from_google(chunk.usage_metadata)
     if not chunk.candidates:
         return
     candidate = chunk.candidates[0]
@@ -380,7 +370,7 @@ _intake_graph = _g.build()
 # ── Public class ───────────────────────────────────────────────────────────
 
 
-class GoogleResponseIntakeFSM:
+class GoogleResponseIntakeFSM(ResponseIntakeFSM[_GoogleIntakeState]):
     """Async pydantic-graph-driven Google ``streamGenerateContent`` SSE intake.
 
     Behavioral twin of
@@ -393,39 +383,20 @@ class GoogleResponseIntakeFSM:
     """
 
     name = "google"
+    _graph = _intake_graph
 
-    def __init__(self, *, model: str, request_params: ModelRequestParameters) -> None:
-        self._model = model
-        self._request_params = request_params
-        self._sse_buffer = bytearray()
-        self.upstream_raw_bytes = bytearray()
-        self._state = _GoogleIntakeState(
+    def _initial_state(self, *, model: str, request_params: ModelRequestParameters) -> _GoogleIntakeState:
+        del model  # Google tracks no wire-updated model slug on state.
+        return _GoogleIntakeState(
             parts_manager=ModelResponsePartsManager(model_request_parameters=request_params),
         )
 
-    @property
-    def parts_manager(self) -> ModelResponsePartsManager:
-        """Expose the underlying parts manager for tests and downstream renderers."""
-        return self._state.parts_manager
-
-    @property
-    def state(self) -> _GoogleIntakeState:
-        """Expose FSM state for tests and telemetry inspection."""
-        return self._state
-
-    async def feed(self, data: bytes) -> list[ModelResponseStreamEvent]:
-        """Buffer bytes, frame SSE events, drive the FSM, return emitted IR events."""
-        if not data:
-            return []
-        self.upstream_raw_bytes.extend(data)
-        self._sse_buffer.extend(data)
-        for envelope in self._drain_sse_envelopes():
-            self._state.events_queue.append(envelope)
-            self._state.frames_seen += 1
-        if not self._state.events_queue:
-            return []
-        result = await _intake_graph.run(state=self._state)
-        return result
+    def _drain_events(self) -> Iterator[_GenerateChunk]:
+        """Validate each complete SSE frame into a dispatch envelope."""
+        for frame in self._split_sse_frames():
+            envelope = self._parse_event(frame)
+            if envelope is not None:
+                yield envelope
 
     async def close(self) -> list[ModelResponseStreamEvent]:
         """Stream end. Drain any complete remaining event in the buffer.
@@ -445,36 +416,8 @@ class GoogleResponseIntakeFSM:
                 self._state.frames_seen += 1
                 out = await _intake_graph.run(state=self._state)
 
-        s = self._state
-        if s.frames_seen and not s.emitted_events:
-            logger.warning(
-                "google intake produced NO IR events after %d chunk(s) "
-                "(unparseable=%d) — the upstream stream carried no renderable content",
-                s.frames_seen,
-                s.frames_unparseable,
-            )
+        self._log_no_ir_events(unit="chunk")
         return out
-
-    def _drain_sse_envelopes(self) -> Iterator[_GenerateChunk]:
-        """Frame SSE events from ``self._sse_buffer``; validate surviving frames into a dispatch envelope.
-
-        Handles both ``\\r\\n\\r\\n`` (industry standard) and ``\\n\\n`` (some servers)
-        separators; partial frames remain buffered for the next ``feed`` call.
-        """
-        while True:
-            crlf = self._sse_buffer.find(b"\r\n\r\n")
-            lf = self._sse_buffer.find(b"\n\n")
-            if crlf == -1 and lf == -1:
-                return
-            if crlf != -1 and (lf == -1 or crlf < lf):
-                event = bytes(self._sse_buffer[:crlf])
-                del self._sse_buffer[: crlf + 4]
-            else:
-                event = bytes(self._sse_buffer[:lf])
-                del self._sse_buffer[: lf + 2]
-            envelope = self._parse_event(event)
-            if envelope is not None:
-                yield envelope
 
     def _parse_event(self, event: bytes) -> _GenerateChunk | None:
         """Parse a single SSE event into a ``_GenerateChunk``.

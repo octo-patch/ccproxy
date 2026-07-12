@@ -66,7 +66,6 @@ from __future__ import annotations
 
 import json
 import logging
-from collections import deque
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -76,6 +75,7 @@ from pydantic_ai.messages import ModelResponseStreamEvent
 from pydantic_graph import GraphBuilder, StepContext
 
 import ccproxy.lightllm.graph._subgraph_patch  # noqa: F401  — installs add_subgraph
+from ccproxy.lightllm.graph._base import IntakeState, ResponseIntakeFSM
 
 if TYPE_CHECKING:
     from pydantic_ai.models import ModelRequestParameters
@@ -162,18 +162,16 @@ identically — ``append`` + suffix-``replace`` + bare continuation deltas."""
 
 
 @dataclass
-class _ConversationsIntakeState:
+class _ConversationsIntakeState(IntakeState[Any]):
     """FSM state for one OpenAI Conversations SSE-v1 stream.
 
-    ``events_queue`` is populated by ``feed()`` before each graph run.
-    ``out_events`` accumulates pydantic-ai IR events; the terminal step
-    drains and returns it.
+    Shared queue/funnel/telemetry slots come from :class:`IntakeState`. The
+    funnel slots are present for interface parity but stay inert: the ChatGPT
+    web conversations stream carries no per-request token usage.
 
     Channel-tracking fields persist across ``feed()`` calls — they model
     the ongoing server-side JSON-patch state machine.
     """
-
-    parts_manager: ModelResponsePartsManager
 
     # ── Channel tracking ──────────────────────────────────────────────────────
     current_channel: int | None = None
@@ -212,13 +210,7 @@ class _ConversationsIntakeState:
     final_emitted: bool = False
     """True once the finish reason has been recorded; prevents duplication."""
 
-    finish_reason: str | None = None
-    """Finish reason string (``"stop"``, ``"length"``, etc.) when known."""
-
     # ── Telemetry (never-silently-drop diagnostics) ───────────────────────────
-    frames_seen: int = 0
-    """Total dispatch envelopes processed (add / patch / side-event / done)."""
-
     content_patches_off_channel: int = 0
     """Content patches (text path or bare delta) seen while the current channel is
     NOT the tracked final-answer channel — the answer may be on a channel we never
@@ -232,10 +224,6 @@ class _ConversationsIntakeState:
     # ── Handoff ───────────────────────────────────────────────────────────────
     continuation: ContinuationMetadata | None = None
     """Populated when a handoff side event is received."""
-
-    # ── Queue / output ────────────────────────────────────────────────────────
-    events_queue: deque[Any] = field(default_factory=deque)
-    out_events: list[ModelResponseStreamEvent] = field(default_factory=list)
 
 
 # ── Pure helpers ──────────────────────────────────────────────────────────────
@@ -610,6 +598,7 @@ async def emit_done(
 ) -> list[ModelResponseStreamEvent]:
     """Terminal step — drain and return accumulated IR events."""
     out = ctx.state.out_events
+    ctx.state.emitted_events += len(out)
     ctx.state.out_events = []
     return out
 
@@ -642,36 +631,28 @@ _intake_graph = _g.build()
 # ── Public class ───────────────────────────────────────────────────────────────
 
 
-class OpenAIConversationsIntakeFSM:
+class OpenAIConversationsIntakeFSM(ResponseIntakeFSM[_ConversationsIntakeState]):
     """Async pydantic-graph-driven OpenAI Conversations SSE-v1 intake.
 
     Parses the ``/backend-api/f/conversation`` SSE-v1 JSON-patch stream
     into pydantic-ai ``TextPart`` events compatible with any render FSM
     (OpenAI Chat, Anthropic, Responses).
 
-    Interface matches :class:`PerplexityResponseIntakeFSM` so
-    :class:`SSEPipeline` drives it unchanged.
+    Handoff side events are consumed silently during :meth:`feed`:
+    ``state.continuation`` is populated for inspection but no IR event is
+    emitted and nothing is raised. The real answer arrives as bridged
+    SSE-v1 frames the sidecar WebSocket handoff bridge appends, which this
+    same FSM parses.
     """
 
     name = "openai_conversations"
+    _graph = _intake_graph
 
-    def __init__(self, *, model: str, request_params: ModelRequestParameters) -> None:
-        self._model = model
-        self._request_params = request_params
-        self._sse_buffer = bytearray()
-        self.upstream_raw_bytes = bytearray()
-        self._state = _ConversationsIntakeState(
+    def _initial_state(self, *, model: str, request_params: ModelRequestParameters) -> _ConversationsIntakeState:
+        del model  # Conversations tracks the model slug off the wire (``model_slug``).
+        return _ConversationsIntakeState(
             parts_manager=ModelResponsePartsManager(model_request_parameters=request_params),
         )
-
-    @property
-    def parts_manager(self) -> ModelResponsePartsManager:
-        return self._state.parts_manager
-
-    @property
-    def state(self) -> _ConversationsIntakeState:
-        """Expose FSM state for tests and downstream consumers."""
-        return self._state
 
     @property
     def conversation_id(self) -> str:
@@ -684,29 +665,6 @@ class OpenAIConversationsIntakeFSM:
     @property
     def continuation(self) -> ContinuationMetadata | None:
         return self._state.continuation
-
-    @property
-    def finish_reason(self) -> str | None:
-        return self._state.finish_reason
-
-    async def feed(self, data: bytes) -> list[ModelResponseStreamEvent]:
-        """Buffer bytes, frame SSE events, drive FSM, return emitted IR events.
-
-        Handoff side events are consumed silently: ``state.continuation`` is
-        populated for inspection but no IR event is emitted and nothing is
-        raised. The real answer arrives as bridged SSE-v1 frames the sidecar
-        WebSocket handoff bridge appends, which this same FSM parses.
-        """
-        if not data:
-            return []
-        self.upstream_raw_bytes.extend(data)
-        self._sse_buffer.extend(data)
-        for envelope in self._drain_sse_frames():
-            self._state.events_queue.append(envelope)
-            self._state.frames_seen += 1
-        if not self._state.events_queue:
-            return []
-        return await _intake_graph.run(state=self._state)
 
     async def close(self) -> list[ModelResponseStreamEvent]:
         """End of stream. Emit a telemetry warning when the stream produced no
@@ -726,23 +684,9 @@ class OpenAIConversationsIntakeFSM:
             )
         return []
 
-    def _drain_sse_frames(self) -> Iterator[Any]:
-        """Frame and normalise SSE events from ``self._sse_buffer``.
-
-        Handles both ``\\r\\n\\r\\n`` (RFC standard) and ``\\n\\n`` separators;
-        partial frames remain buffered for the next ``feed`` call.
-        """
-        while True:
-            crlf = self._sse_buffer.find(b"\r\n\r\n")
-            lf = self._sse_buffer.find(b"\n\n")
-            if crlf == -1 and lf == -1:
-                return
-            if crlf != -1 and (lf == -1 or crlf < lf):
-                sep_idx, sep_len = crlf, 4
-            else:
-                sep_idx, sep_len = lf, 2
-            frame = bytes(self._sse_buffer[:sep_idx])
-            del self._sse_buffer[: sep_idx + sep_len]
+    def _drain_events(self) -> Iterator[Any]:
+        """Normalise each complete SSE frame into a dispatch envelope."""
+        for frame in self._split_sse_frames():
             envelope = _parse_frame(frame)
             if envelope is not None:
                 yield envelope

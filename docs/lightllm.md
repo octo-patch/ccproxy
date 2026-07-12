@@ -97,6 +97,12 @@ src/ccproxy/lightllm/
 └── graph/                ← FSM modules for streaming responses
     ├── __init__.py       dispatch_dump_sync, dispatch_intake, dispatch_render
     │
+    ├── _base.py          IntakeState / ResponseIntakeFSM + RenderState /
+    │                      ResponseRenderFSM — shared state slots (funnel,
+    │                      telemetry), feed()/render() templates, SSE framing
+    │
+    ├── _usage.py         usage_from_* capture + to_* projection helpers
+    │
     ├── _subgraph_patch.py Monkey-patch installing GraphBuilder.add_subgraph
     │                      (temporary until pydantic_graph ships it natively)
     │
@@ -218,24 +224,28 @@ to is a separate decision (made by the transform router via sentinel-key or
 
 ## The FSM pattern (response side only)
 
-The four `lightllm/graph/*_intake.py` modules and two `*_render.py` modules
-share a single shape. These handle **streaming SSE** transformations and are
-the only place ccproxy still uses pydantic-graph at runtime — the request
-side is procedural adapter classmethods, not graphs. Reading
-`anthropic_intake.py` end-to-end is the fastest way to understand the idiom;
-the other modules echo it.
+The six `lightllm/graph/*_intake.py` modules and three `*_render.py` modules
+share a single shape, anchored by the base classes in `graph/_base.py`
+(`IntakeState` / `ResponseIntakeFSM` for intakes, `RenderState` /
+`ResponseRenderFSM` for renders). These handle **streaming SSE**
+transformations and are the only place ccproxy still uses pydantic-graph at
+runtime — the request side is procedural adapter classmethods, not graphs.
+Reading `anthropic_intake.py` end-to-end is the fastest way to understand the
+idiom; the other modules echo it.
 
 ```python
 from pydantic_graph import GraphBuilder, StepContext  # canonical, not .beta
 
-# 1. State — a mutable dataclass carrying everything the FSM needs across steps.
+from ccproxy.lightllm.graph._base import IntakeState, ResponseIntakeFSM
+
+# 1. State — a mutable dataclass inheriting the shared slots from
+#    IntakeState[EventT] (parts_manager, events_queue, out_events, the funnel
+#    slots usage/raw_extras/finish_reason/provider_response_id, and the
+#    telemetry counters). The subclass carries only provider-specific fields.
 @dataclass
-class _AnthropicIntakeState:
-    parts_manager: ModelResponsePartsManager
+class _AnthropicIntakeState(IntakeState[BetaRawMessageStreamEvent]):
     provider_name: str
     current_block: BetaContentBlock | None = None
-    events_queue: deque[BetaRawMessageStreamEvent] = field(default_factory=deque)
-    out_events: list[ModelResponseStreamEvent] = field(default_factory=list)
     # ... per-FSM extra fields
 
 # 2. Marker classes — sentinel values the decision routes on.
@@ -306,29 +316,38 @@ _g.add(
 # 8. Build once at import time.
 _intake_graph = _g.build()
 
-# 9. Public FSM wrapper — drives the graph per chunk of SSE bytes.
-class AnthropicResponseIntakeFSM:
-    def __init__(self, *, model: str, request_params: ModelRequestParameters):
-        self._state = _AnthropicIntakeState(
+# 9. Public FSM wrapper — ResponseIntakeFSM owns the SSE buffering, the
+#    byte tee, feed() (frame → enqueue → run graph), the funnel properties
+#    (usage / raw_extras / finish_reason / provider_response_id), and the
+#    shared _split_sse_frames() framer. The subclass provides the graph, the
+#    state, and the provider-specific payload parsing.
+class AnthropicResponseIntakeFSM(ResponseIntakeFSM[_AnthropicIntakeState]):
+    name = "anthropic"
+    _graph = _intake_graph
+
+    def _initial_state(self, *, model, request_params):
+        return _AnthropicIntakeState(
             parts_manager=ModelResponsePartsManager(model_request_parameters=request_params),
             provider_name="anthropic",
         )
 
-    async def feed(self, data: bytes) -> list[ModelResponseStreamEvent]:
-        # parse SSE frames out of the buffer, push typed events onto the
-        # state's events_queue, then run the graph
-        ...
-        self._state.out_events = []
-        result = await _intake_graph.run(state=self._state)
-        return result
+    def _drain_events(self):
+        # per-provider ``data:`` payload semantics — validate each complete
+        # frame into a typed event (or dispatch envelope)
+        for frame in self._split_sse_frames():
+            ...
 ```
 
 The render side (`anthropic_render.py`, `openai_render.py`,
-`openai_responses_render.py`) is symmetric: state owns an
-`events_queue: deque[ModelResponseStreamEvent]` and an `out: bytearray`; the
-outer router dispatches each IR event kind, with the `part` / `delta`
-type-switches handled by inner no-loop subgraphs; the terminal step returns
-`bytes(state.out)`.
+`openai_responses_render.py`) is symmetric: state inherits `RenderState`
+(`pending_events` deque, `out: bytearray`, telemetry counters) and the wrapper
+inherits `ResponseRenderFSM` (shared `render()` = push event → run graph, an
+`_initial_state` hook for the per-listener id generation, and the
+`_log_silent_close()` telemetry helper); the outer router dispatches each IR
+event kind, with the `part` / `delta` type-switches handled by inner no-loop
+subgraphs; the terminal step returns `bytes(state.out)`. Each `close()` stays
+wire-specific but shares the `close(*, usage=, raw_extras=)` keyword signature
+declared abstract on the base.
 
 ### Why this shape
 
@@ -425,6 +444,7 @@ one rename pass at the import sites suffices.
 
 | File | What its FSM does | Key marker classes |
 |---|---|---|
+| `_base.py` | Shared base classes. `IntakeState[EventT]` / `RenderState` carry the common state slots (queues, funnel slots `usage`/`raw_extras`/`finish_reason`/`provider_response_id`, telemetry counters); `ResponseIntakeFSM[StateT]` owns the byte tee, SSE buffering, the `feed()` template, `_split_sse_frames()`, the funnel properties, and the silent-empty telemetry helpers; `ResponseRenderFSM[StateT]` owns `render()` and the abstract `close(*, usage=, raw_extras=)` signature. Subclass hooks: `_initial_state`, `_drain_events`, `_graph`. | — |
 | `_subgraph_patch.py` | Installs `GraphBuilder.add_subgraph` via monkey-patch (tracks upstream TODO at `pydantic_graph/graph_builder.py:1469`). Registers a built `Graph` as a synthetic `Step` whose body awaits `subgraph.run(state=ctx.state, deps=ctx.deps, inputs=ctx.inputs)`. Shared `StateT` flows through unchanged; inner subgraph mutates the same state instance as the parent. Mermaid renders the subgraph as a single labelled node. Removable when upstream ships native subgraph composition. | — |
 | `anthropic_intake.py` | Anthropic SSE → IR `ModelResponseStreamEvent` (typed dispatch on `BetaRawMessageStreamEvent` union) | `_FeedDone`, `_IgnoredEvent` |
 | `anthropic_render.py` | IR `ModelResponseStreamEvent` → Anthropic SSE wire bytes | `_RenderDone` |
@@ -707,16 +727,42 @@ the canonical Codex CLI path `/backend-api/codex/responses` (the
 `CHATGPT_CODEX_BASE_URL` base + `/responses` endpoint) in addition to
 the public-API `/v1/responses` form.
 
-### Response-side conventions
+### Response-side conventions — the usage/metadata funnel
 
-Streaming intakes drive `ModelResponsePartsManager` directly and don't
-currently surface per-message metadata via `raw_extras`. The buffered
-transform parses metadata into the listener-format envelope fields (usage,
-finish_reason, model) at serialization time. If you need response-side
-`raw_extras` (e.g., for citations, safety, groundingMetadata
-preservation), add a `state.raw_extras` field to the per-provider intake's
-FSM state and stitch it back on the buffered side — the pattern is
-symmetric with the request side.
+Streaming intakes drive `ModelResponsePartsManager` directly, which — like
+pydantic-ai's own parts manager — carries no token usage (in pydantic-ai
+proper, usage rides `StreamedResponse._usage` as side-channel state, never as a
+stream event). ccproxy replicates that accumulator: the shared state base
+(`graph/_base.py:IntakeState`) carries `usage: RequestUsage`,
+`raw_extras: dict`, `finish_reason`, and `provider_response_id` slots, exposed
+via same-named properties on `ResponseIntakeFSM` — so the funnel interface is
+guaranteed by type, and `buffered.py` / `sse_pipeline.py` /
+`inspector/addon.py` read the attributes directly (no `getattr` plumbing).
+Capture happens off the
+already-parsed wire events the IR has no slot for — Anthropic
+`message_start` / `message_delta`, the OpenAI terminal `include_usage` chunk,
+the OpenAI Responses `response.completed` envelope, Gemini `usageMetadata` —
+which the router would otherwise discard as ignored/skipped events. The mapping
+helpers live in `graph/_usage.py` (`usage_from_*` capture into the canonical
+`RequestUsage` where `input_tokens` excludes cache; `to_*` project back into
+each listener's native usage block).
+
+Usage is then re-stamped at every render seam so a cross-format transform never
+drops it: the buffered assemblers emit the listener's usage block (or omit it
+when the upstream reported none — never a fabricated zero), the OpenAI Chat
+stream appends a terminal `{choices: [], usage: {...}}` chunk before `[DONE]`,
+the OpenAI Responses stream fills `response.completed.usage`, and the Anthropic
+stream fills `message_delta.usage`. `raw_extras` additionally carries unmodeled
+per-message metadata (e.g. the upstream response id) rather than dropping it
+silently. All six intakes inherit the slots from the base, so the funnel
+interface is homogeneous; slots the wire never populates stay inert
+(`usage` empty, `finish_reason` / `provider_response_id` `None`) — Perplexity
+Pro and `openai_conversations` capture no token usage because their wire
+protocols report none (Perplexity's only usage is subscription quota, via the
+`pplx_usage` MCP tool), and only the OpenAI-family intakes populate
+`provider_response_id` (Anthropic carries its message id through
+`raw_extras["response_id"]`). If an upstream later exposes any of these,
+capture drops into the same seam.
 
 ### Round-trip contract
 
@@ -1217,6 +1263,8 @@ envelope without unwrap).
 | Perplexity adapter | `src/ccproxy/lightllm/adapters/perplexity.py` |
 | Envelope helpers | `src/ccproxy/lightllm/adapters/_envelope.py`, `_anthropic_envelope.py`, `_openai_envelope.py` |
 | Typed-tool wire-type mapping | `src/ccproxy/lightllm/adapters/_tool_kinds.py` |
+| Shared FSM base classes | `src/ccproxy/lightllm/graph/_base.py` |
+| Usage capture/projection helpers | `src/ccproxy/lightllm/graph/_usage.py` |
 | `GraphBuilder.add_subgraph` patch | `src/ccproxy/lightllm/graph/_subgraph_patch.py` |
 | Anthropic response FSMs | `src/ccproxy/lightllm/graph/anthropic_{intake,render}.py` |
 | OpenAI response FSMs | `src/ccproxy/lightllm/graph/openai_{intake,render}.py` |
