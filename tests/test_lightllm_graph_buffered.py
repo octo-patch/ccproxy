@@ -106,18 +106,18 @@ class TestAnthropicBufferedToOpenAI:
         assert choice["finish_reason"] == "tool_calls"
 
     def test_alias_providers(self) -> None:
-        """The Anthropic synthesizer applies to ``deepseek`` and ``zai`` too."""
-        raw = _make_anthropic_text_body("via deepseek", model="deepseek-chat")
+        """The Anthropic synthesizer applies to every registered alias."""
+        raw = _make_anthropic_text_body("via alias", model="test-model")
         for alias in ("deepseek", "zai", "minimax"):
             out_bytes = transform_buffered_response_sync(
                 raw_bytes=raw,
                 provider_type=alias,
                 inbound_format=InboundFormat.OPENAI_CHAT,
-                model="deepseek-chat",
+                model="test-model",
                 request_params=ModelRequestParameters(),
             )
             out = json.loads(out_bytes)
-            assert out["choices"][0]["message"]["content"] == "via deepseek"
+            assert out["choices"][0]["message"]["content"] == "via alias"
 
 
 # ── Anthropic buffered → OpenAI Responses ──────────────────────────────────

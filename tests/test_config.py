@@ -626,3 +626,28 @@ class TestOpenAIConversationsProviderDefault:
         from ccproxy.transport import VALID_PROFILES
 
         assert "chrome136" in VALID_PROFILES
+
+
+class TestMiniMaxProviderDefault:
+    """The shipped default template includes a parseable MiniMax provider."""
+
+    def _load_packaged_config(self) -> CCProxyConfig:
+        from importlib.resources import as_file, files
+
+        with as_file(files("ccproxy.templates").joinpath("ccproxy.yaml")) as template_path:
+            return CCProxyConfig.from_yaml(Path(template_path))
+
+    def test_packaged_template_routes_minimax(self) -> None:
+        """The generated default template carries the MiniMax provider."""
+        provider = self._load_packaged_config().providers.get("minimax")
+        assert provider is not None
+        assert provider.type == "anthropic"
+        assert provider.host == "api.minimax.io"
+        assert provider.path == "/anthropic/v1/messages"
+
+    def test_packaged_template_uses_minimax_api_key(self) -> None:
+        """The MiniMax provider sends its configured key in ``x-api-key``."""
+        provider = self._load_packaged_config().providers["minimax"]
+        assert isinstance(provider.auth, CommandAuthSource)
+        assert provider.auth.command == "printenv MINIMAX_API_KEY"
+        assert provider.auth.header == "x-api-key"

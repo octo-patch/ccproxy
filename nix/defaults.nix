@@ -45,6 +45,16 @@
         path = "/anthropic/v1/messages";
         type = "anthropic";
       };
+      minimax = {
+        auth = {
+          type = "command";
+          command = "printenv MINIMAX_API_KEY";
+          header = "x-api-key";
+        };
+        host = "api.minimax.io";
+        path = "/anthropic/v1/messages";
+        type = "anthropic";
+      };
       perplexity_pro = {
         auth = {
           type = "file";

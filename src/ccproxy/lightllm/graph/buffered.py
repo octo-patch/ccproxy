@@ -20,7 +20,7 @@ Two structural cases per upstream:
 
 Per-provider conversion strategy:
 
-* **Anthropic** (anthropic / deepseek / zai): parse ``BetaMessage`` JSON,
+* **Anthropic** (anthropic / deepseek / zai / minimax): parse ``BetaMessage`` JSON,
   synthesize an event stream the existing :class:`AnthropicResponseIntakeFSM`
   would emit — one ``message_start`` + (per content block) a
   ``content_block_start`` + a single ``content_block_delta`` covering the
@@ -990,7 +990,7 @@ def transform_buffered_response_sync(
 
     Provider routing:
 
-    * Anthropic-compatible (anthropic / deepseek / zai) → parse
+    * Anthropic-compatible (anthropic / deepseek / zai / minimax) → parse
       ``BetaMessage`` JSON → synthesize SSE → feed Anthropic intake FSM.
     * OpenAI → parse ``ChatCompletion`` JSON → synthesize one
       ``ChatCompletionChunk`` SSE frame → feed OpenAI intake FSM.
