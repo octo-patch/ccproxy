@@ -436,6 +436,7 @@ one rename pass at the import sites suffices.
 | `openai_chat.py` | `OpenAIChatAdapter` — bidirectional wire ↔ IR for OpenAI Chat Completions |
 | `google.py` | `GoogleAdapter` — outbound-only IR → Google Gemini `generateContent` wire bytes. Direct dict construction with camelCase keys, base64-inline binary data, `generationConfig` hoist for sampling params. Does NOT wrap pydantic-ai's `GoogleModel` — too many ccproxy-specific tweaks (cloudcode-pa envelope, raw_extras passthrough). |
 | `perplexity.py` | `PerplexityAdapter` — outbound-only IR → Perplexity Pro wire bytes. Projects IR back to OpenAI-format dicts, then invokes `pplx.py:_build_pplx_payload` (the 28-field Perplexity payload builder) with `raw_extras["pplx"]` as the params block. |
+| `promptast.py` | `PromptAstAdapter` — **library-only, inbound-only** Alloy PromptAst JSON → IR. Not a listener wire format: no `InboundFormat`, no `Context`, no dispatch wiring. `parsed_request_from_alloy(prompt_ast, client_view)` builds a `ParsedRequest` a consumer hands to `dispatch_dump_sync`. See the Alloy PromptAst bridge section. |
 | `_envelope.py` | `parse_request_into_fields`, `parse_request`, `render_request` — test/inspector helpers |
 | `_anthropic_envelope.py` | Anthropic wire helpers |
 | `_openai_envelope.py` | OpenAI wire helpers |
@@ -971,6 +972,47 @@ folded into `google_intake.py` for that path; the addon-installed
 `EnvelopeUnwrapStream` still handles passthrough Gemini flows.
 
 ---
+
+## Alloy PromptAst bridge (library lane)
+
+`adapters/promptast.py` is a **library-only** cross-IR transform, not a proxy
+listener format. Alloy renders a typed prompt to its provider-specialized
+prompt AST (`alloy/baml/render_prompt {projection: "ast"}` →
+`prompt_ast_to_json`), and a Python consumer (first: talkstream) converts that
+AST **directly** to the pydantic-ai `list[ModelMessage]` IR — never
+PromptAst → wire bytes → `load_messages`, which would lower and re-raise
+through a wire format both ends already structure.
+
+```
+Alloy BAML source ──render_prompt{ast}──▶ PromptAst JSON
+                                              │
+                       PromptAstAdapter.load_messages   (AST → IR, directly)
+                                              ▼
+                                     list[ModelMessage]
+                                              │
+                        parsed_request_from_alloy(+ client_view)
+                                              ▼
+                                       ParsedRequest ──▶ dispatch_dump_sync ──▶ upstream
+```
+
+The AST arrives already provider-specialized (roles wrapped/merged/validated,
+text runs coalesced, `ctx.output_format` schema prose burned into message
+text — the SAP owns typing on the reply side, so `request_parameters` stays
+empty). Node mapping: `message` role `system`/`user` → `SystemPromptPart` /
+`UserPromptPart` accumulating into one `ModelRequest`; `assistant`/`model`
+closes the request and appends a `ModelResponse[TextPart]`; any other role
+fails loudly. Media maps to `ImageUrl`/`Audio`/`Video`/`DocumentUrl` (url) or
+`BinaryContent` (base64, no `media_type` fallback); a local `file` source or
+media inside a system/assistant message fails loudly. Message `metadata`
+follows the Alloy VM-003 forward contract: `cache_control` → `CachePoint`
+(supported TTL) or `raw_extras["cc:promptast:msg:{i}"]` (other TTL); any other
+metadata key stashes verbatim under `raw_extras["promptast_meta:msg:{i}"]`.
+
+**Boundary.** This module has no `InboundFormat` entry, no `Context`
+integration, and no `dispatch_dump_sync`/`dispatch_intake`/`dispatch_render`
+branch — the proxy pipeline is untouched. It is a first-party consumer entry
+point that produces an `LLMRenderInput` (`ParsedRequest`), reusing the same
+outbound adapters the proxy uses.
 
 ## Adding a new provider
 
