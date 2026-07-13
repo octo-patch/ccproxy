@@ -645,7 +645,7 @@ outbound renderer (or response render) stitches it back onto the wire body.
 | `cc:msg:{i}:block:{j}` | Original `cache_control` dict from a content block | TTL wasn't `5m` or `1h` (the only values pydantic-ai's `CachePoint` accepts) — preserved so dump can re-apply verbatim |
 | `unknown_block:msg:{i}:idx:{j}` | Original wire-block dict | Block had a `type` we don't recognize — preserved so dump can emit it back |
 | `system` | The original `system` list from the body | Non-uniform `cache_control` across system blocks — can't be expressed via `settings['anthropic_cache_instructions']` (which is uniform-only) |
-| `tools` | The original `tools` list from the body | Non-uniform `cache_control` across tools — same reason |
+| `tools` | The original `tools` list from the body | `cache_control` stamping doesn't match the canonical shape. Lift rule: exactly one marker, on the **last non-deferred** tool, with a supported TTL → `settings['anthropic_cache_tool_definitions']`; every other pattern (all-stamped, mixed TTLs, marker on a deferred or non-boundary tool) rides here verbatim. `defer_loading` round-trips on `ToolDefinition.defer_loading` and is re-emitted only when `True` |
 | `metadata` | The body's `metadata` dict | Anthropic-specific; no IR slot |
 | Other unmodeled top-level keys | Copied verbatim under their wire name | E.g. `service_tier` |
 
@@ -1013,6 +1013,76 @@ integration, and no `dispatch_dump_sync`/`dispatch_intake`/`dispatch_render`
 branch — the proxy pipeline is untouched. It is a first-party consumer entry
 point that produces an `LLMRenderInput` (`ParsedRequest`), reusing the same
 outbound adapters the proxy uses.
+
+## Cache-breakpoint policy engine (`cache_policy.py`)
+
+`ccproxy.lightllm.cache_policy` is a pure placement engine for Anthropic
+prompt-cache breakpoints over the pydantic-ai IR. Division of labor:
+BAML/Alloy owns *content* — statically authored markers arrive in-body
+(VM-003 → `cache_control` → `CachePoint`s / `cc:` raw_extras via the inbound
+adapters); cache *placement* is transport policy, and this engine computes
+the dynamic placements an author can't know at blueprint time.
+
+```python
+from ccproxy.lightllm import CachePolicy, apply_cache_policy
+
+policy = CachePolicy(tools="1h", system="1h", user_tail=2, user_tail_ttl="5m")
+new_messages, new_settings, report = apply_cache_policy(
+    messages, settings, policy, raw_extras=raw_extras
+)
+```
+
+Pure function: inputs are never mutated (settings copied, touched message
+parts rebuilt). Placements:
+
+- `tools` → sets `anthropic_cache_tool_definitions` on the returned settings
+  (there is no IR slot for tool markers; the dump side stamps the wire —
+  exactly one marker, on the last non-deferred tool, matching pydantic-ai's
+  contract; Anthropic rejects `cache_control` on `defer_loading` tools. An
+  all-deferred tool set makes the placement a wire no-op — the engine can't
+  see tools, so it still counts 1 breakpoint, a safe overestimate).
+- `system` → appends the sentinel `UserPromptPart([CachePoint(ttl=…)])`
+  after the last `SystemPromptPart` (the `dump_system` convention). No
+  system parts → skipped, reported.
+- `user_tail=N` → `CachePoint` appended to the final `UserPromptPart` of the
+  last N user-content-bearing `ModelRequest`s, newest first (`str` content
+  promoted to `[str, CachePoint]`). Shortfall → placed where possible,
+  reported.
+
+**Budget arbitration** — Anthropic allows at most 4 breakpoints per request;
+the engine owns that invariant. It first censuses every marker that will
+reach the wire, then admits policy placements in order `tools` → `system` →
+`user_tail` newest-first; the first placement that would exceed 4 is dropped
+along with everything after it.
+
+| Marker source | Census | Removable by policy |
+|---|---|---|
+| Authored `CachePoint`s in messages (VM-003 / prior run) | 1 each | never |
+| Sentinel system markers | 1 each | never |
+| `cc:`-family `raw_extras` (`cc:msg:*`, `cc:promptast:msg:*`) | 1 each | never |
+| `anthropic_cache_tool_definitions` / `_instructions` / `_messages` | 1 each | never |
+| `anthropic_cache` shorthand | 1 | never |
+| Policy placements | admitted while budget holds | yielded first |
+
+Authored always wins: the engine never removes or re-TTLs an existing
+marker. Idempotent: re-running a policy over its own output places nothing —
+a target position that already carries a marker (any TTL) is skipped, never
+stacked. `CacheBudgetReport` (`existing`, `placed`, `dropped`, `skipped` —
+labels `"tools"`, `"system"`, `"user[-1]"`, …) accounts for every decision;
+nothing is dropped silently.
+
+Scope: Anthropic semantics only; callers gate on provider (the
+`cache_breakpoints` hook guards on the anthropic-compatible family; library
+callers — e.g. talkstream via `parsed_request_from_alloy(...)` — know their
+upstream).
+
+Wire-side, the `ccproxy.hooks.cache_breakpoints` outbound hook exposes the
+engine per-request via the `x-ccproxy-cache-policy` header or per-instance
+via hook `params`. Header DSL: comma-separated `key[=value]` pairs —
+`tools[=ttl]`, `system[=ttl]`, `user_tail=N[:ttl]`; bare `tools`/`system`
+default `5m`; e.g. `x-ccproxy-cache-policy: tools=1h,system=1h,user_tail=2:5m`.
+Header beats config params; parse errors surface as an error `HookResult`
+naming the bad token; the control header is stripped before egress.
 
 ## Adding a new provider
 

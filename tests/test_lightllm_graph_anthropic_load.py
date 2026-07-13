@@ -138,12 +138,12 @@ class TestParseTools:
         assert tools[0].description == "Read file"
         assert tools[0].parameters_json_schema == {"type": "object"}
 
-    def test_uniform_cache_lifts_to_settings(self, parse: Parse) -> None:
+    def test_last_tool_marker_lifts_to_settings(self, parse: Parse) -> None:
         parsed = parse(
             _wrap(
                 messages=[{"role": "user", "content": "x"}],
                 tools=[
-                    {"name": "a", "input_schema": {}, "cache_control": {"type": "ephemeral"}},
+                    {"name": "a", "input_schema": {}},
                     {"name": "b", "input_schema": {}, "cache_control": {"type": "ephemeral"}},
                 ],
             )
@@ -152,13 +152,69 @@ class TestParseTools:
         assert settings_dict.get("anthropic_cache_tool_definitions") == "5m"
         assert "tools" not in parsed.raw_extras
 
-    def test_mixed_cache_preserves_raw_tools(self, parse: Parse) -> None:
+    def test_last_nondeferred_marker_1h_lifts_to_settings(self, parse: Parse) -> None:
+        parsed = parse(
+            _wrap(
+                messages=[{"role": "user", "content": "x"}],
+                tools=[
+                    {"name": "a", "input_schema": {}},
+                    {"name": "b", "input_schema": {}, "cache_control": {"type": "ephemeral", "ttl": "1h"}},
+                    {"name": "c", "input_schema": {}, "defer_loading": True},
+                ],
+            )
+        )
+        settings_dict: dict[str, Any] = {**parsed.settings}
+        assert settings_dict.get("anthropic_cache_tool_definitions") == "1h"
+        assert "tools" not in parsed.raw_extras
+        tools = parsed.request_parameters.function_tools
+        assert [t.defer_loading for t in tools] == [False, False, True]
+
+    def test_all_stamped_preserves_raw_tools(self, parse: Parse) -> None:
+        raw_tools = [
+            {"name": "a", "input_schema": {}, "cache_control": {"type": "ephemeral"}},
+            {"name": "b", "input_schema": {}, "cache_control": {"type": "ephemeral"}},
+        ]
+        parsed = parse(_wrap(messages=[{"role": "user", "content": "x"}], tools=raw_tools))
+        assert parsed.raw_extras["tools"] == raw_tools
+        settings_dict: dict[str, Any] = {**parsed.settings}
+        assert "anthropic_cache_tool_definitions" not in settings_dict
+
+    def test_marker_not_on_boundary_preserves_raw_tools(self, parse: Parse) -> None:
         raw_tools = [
             {"name": "a", "input_schema": {}, "cache_control": {"type": "ephemeral"}},
             {"name": "b", "input_schema": {}},
         ]
         parsed = parse(_wrap(messages=[{"role": "user", "content": "x"}], tools=raw_tools))
         assert parsed.raw_extras["tools"] == raw_tools
+
+    def test_marker_on_deferred_tool_preserves_raw_tools(self, parse: Parse) -> None:
+        raw_tools = [
+            {"name": "a", "input_schema": {}},
+            {
+                "name": "b",
+                "input_schema": {},
+                "defer_loading": True,
+                "cache_control": {"type": "ephemeral"},
+            },
+        ]
+        parsed = parse(_wrap(messages=[{"role": "user", "content": "x"}], tools=raw_tools))
+        assert parsed.raw_extras["tools"] == raw_tools
+        settings_dict: dict[str, Any] = {**parsed.settings}
+        assert "anthropic_cache_tool_definitions" not in settings_dict
+
+    def test_deferred_no_markers_roundtrips_defer_loading(self, parse: Parse) -> None:
+        parsed = parse(
+            _wrap(
+                messages=[{"role": "user", "content": "x"}],
+                tools=[
+                    {"name": "a", "input_schema": {}},
+                    {"name": "b", "input_schema": {}, "defer_loading": True},
+                ],
+            )
+        )
+        assert "tools" not in parsed.raw_extras
+        tools = parsed.request_parameters.function_tools
+        assert [t.defer_loading for t in tools] == [False, True]
 
     def test_unsupported_ttl_preserves_raw_tools(self, parse: Parse) -> None:
         raw_tools = [

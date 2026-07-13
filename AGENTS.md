@@ -199,6 +199,7 @@ be read in their entirely when using the library:
 | `pplx_preflight` | outbound | Best-effort `GET /search/new?q=...` warm-up before `perplexity_ask`. |
 | `inject_mcp_notifications` | outbound | Inject buffered MCP events as synthetic tool_use/tool_result pairs before final user message. |
 | `verbose_mode` | outbound | Strip `redact-thinking-*` from `anthropic-beta`. |
+| `cache_breakpoints` | outbound | Apply the `lightllm.cache_policy` placement engine (Anthropic 4-breakpoint budget, authored-wins). Policy from `x-ccproxy-cache-policy` header (DSL: `tools[=ttl],system[=ttl],user_tail=N[:ttl]`; bare keys default `5m`) or hook `params`; header wins and is stripped after consumption. Anthropic-family-guarded. |
 | `shape` | outbound | Apply provider-specific packaged/local shape with `content_fields` injection. |
 | `commitbee_compat` | outbound | commitbee compatibility shim; `isinstance(_body, dict)` short-circuit. |
 

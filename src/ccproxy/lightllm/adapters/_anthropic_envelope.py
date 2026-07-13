@@ -51,6 +51,14 @@ def _parse_tools(raw_tools: Sequence[Any], *, settings: ModelSettings) -> tuple[
     parts_manager's ``_typed_call_part`` promotes the response's
     ``ToolCallPart`` to its typed subclass (e.g. ``ToolSearchCallPart``).
     User-defined tools (no ``type`` field) get ``tool_kind=None``.
+
+    ``cache_control`` lifting matches the shape real Anthropic clients emit
+    (and pydantic-ai's dump contract): exactly one marker, sitting on the last
+    non-deferred tool, with a supported TTL → lift to
+    ``settings['anthropic_cache_tool_definitions']``. Any other stamping
+    pattern (all-stamped, mixed TTLs, marker on a deferred or non-boundary
+    tool) returns ``needs_override=True`` so the caller preserves the original
+    array verbatim via ``raw_extras['tools']``.
     """
     tools: list[ToolDefinition] = []
     cache_ttls: list[str | None] = []
@@ -65,19 +73,19 @@ def _parse_tools(raw_tools: Sequence[Any], *, settings: ModelSettings) -> tuple[
                 description=tool.get("description"),
                 parameters_json_schema=tool.get("input_schema") or {},
                 tool_kind=tool_kind,
+                defer_loading=bool(tool.get("defer_loading")),
             )
         )
         cc = tool.get("cache_control")
         cache_ttls.append(cc.get("ttl", "5m") if isinstance(cc, dict) else None)
 
-    cached_ttls = {ttl for ttl in cache_ttls if ttl is not None}
-    if not cached_ttls:
+    marked = [i for i, ttl in enumerate(cache_ttls) if ttl is not None]
+    if not marked:
         return tools, False
-    if len(cached_ttls) == 1:
-        only_ttl = next(iter(cached_ttls))
-        if all(t is not None for t in cache_ttls) and only_ttl in _SUPPORTED_TTLS:
-            cast(dict[str, Any], settings)["anthropic_cache_tool_definitions"] = only_ttl
-            return tools, False
+    last_stable = next((i for i in range(len(tools) - 1, -1, -1) if not tools[i].defer_loading), None)
+    if len(marked) == 1 and marked[0] == last_stable and cache_ttls[marked[0]] in _SUPPORTED_TTLS:
+        cast(dict[str, Any], settings)["anthropic_cache_tool_definitions"] = cache_ttls[marked[0]]
+        return tools, False
     return tools, True
 
 
@@ -97,7 +105,6 @@ def _format_tools(tools: Sequence[ToolDefinition], settings: dict[str, Any]) -> 
     """Format :class:`ToolDefinition` entries as Anthropic tool dicts."""
     if not tools:
         return []
-    cache_ttl = settings.get("anthropic_cache_tool_definitions")
     out: list[dict[str, Any]] = []
     for tool in tools:
         entry: dict[str, Any] = {
@@ -106,9 +113,21 @@ def _format_tools(tools: Sequence[ToolDefinition], settings: dict[str, Any]) -> 
         }
         if tool.description:
             entry["description"] = tool.description
-        if cache_ttl:
-            entry["cache_control"] = {"type": "ephemeral", "ttl": cache_ttl}
+        if tool.defer_loading:
+            entry["defer_loading"] = True
         out.append(entry)
+
+    # Contract source of truth — pydantic_ai/models/anthropic.py (pinned venv):
+    #   # Add cache_control to the last non-deferred tool if enabled. Anthropic rejects
+    #   # `cache_control` on tools with `defer_loading=True` (`Tools with defer_loading
+    #   # cannot use prompt caching`); they're hidden from the model until tool search
+    #   # discovers them, so they aren't part of the cacheable prompt prefix anyway.
+    cache_ttl = settings.get("anthropic_cache_tool_definitions")
+    if cache_ttl:
+        for entry in reversed(out):
+            if entry.get("defer_loading") is not True:
+                entry["cache_control"] = {"type": "ephemeral", "ttl": cache_ttl}
+                break
     return out
 
 
