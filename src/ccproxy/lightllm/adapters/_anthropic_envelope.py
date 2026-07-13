@@ -52,21 +52,35 @@ def _parse_tools(raw_tools: Sequence[Any], *, settings: ModelSettings) -> tuple[
     ``ToolCallPart`` to its typed subclass (e.g. ``ToolSearchCallPart``).
     User-defined tools (no ``type`` field) get ``tool_kind=None``.
 
-    ``cache_control`` lifting matches the shape real Anthropic clients emit
-    (and pydantic-ai's dump contract): exactly one marker, sitting on the last
-    non-deferred tool, with a supported TTL → lift to
-    ``settings['anthropic_cache_tool_definitions']``. Any other stamping
-    pattern (all-stamped, mixed TTLs, marker on a deferred or non-boundary
-    tool) returns ``needs_override=True`` so the caller preserves the original
-    array verbatim via ``raw_extras['tools']``.
+    Two independent conditions force ``needs_override=True`` so the caller
+    preserves the original array verbatim via ``raw_extras['tools']``:
+
+    * **Typed tools** — any entry whose ``type`` is present and not
+      ``"custom"`` (Anthropic's explicit discriminator for user-defined
+      tools) is a server/builtin tool whose wire shape the IR cannot model
+      (versioned ``type``, side fields like ``max_uses``). ``ToolDefinition``
+      entries are still built for typed-part promotion, but the wire rides
+      the override.
+    * **Non-canonical cache markers** — the lift to
+      ``settings['anthropic_cache_tool_definitions']`` fires only for the
+      shape real Anthropic clients emit (and pydantic-ai's dump contract):
+      exactly one marker, sitting on the last non-deferred tool, with a
+      supported TTL. Any other stamping pattern (all-stamped, mixed TTLs,
+      marker on a deferred or non-boundary tool) overrides instead. When the
+      typed override fires the lift is skipped entirely — the marker already
+      reaches the wire verbatim, and lifting the knob too would double-count
+      it in the cache engine's census.
     """
     tools: list[ToolDefinition] = []
     cache_ttls: list[str | None] = []
+    has_typed_tool = False
     for tool in raw_tools:
         if not isinstance(tool, dict):
             continue
         wire_type = tool.get("type")
         tool_kind = ANTHROPIC_TYPED_TOOLS.get(wire_type) if isinstance(wire_type, str) else None
+        if isinstance(wire_type, str) and wire_type != "custom":
+            has_typed_tool = True
         tools.append(
             ToolDefinition(
                 name=tool.get("name", ""),
@@ -79,6 +93,8 @@ def _parse_tools(raw_tools: Sequence[Any], *, settings: ModelSettings) -> tuple[
         cc = tool.get("cache_control")
         cache_ttls.append(cc.get("ttl", "5m") if isinstance(cc, dict) else None)
 
+    if has_typed_tool:
+        return tools, True
     marked = [i for i, ttl in enumerate(cache_ttls) if ttl is not None]
     if not marked:
         return tools, False

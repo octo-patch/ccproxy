@@ -582,3 +582,44 @@ def test_roundtrip_deferred_no_markers(parse: Parse, render: Render) -> None:
     assert "tools" not in parsed.raw_extras
     tools = json.loads(render(parsed))["tools"]
     assert [_canonicalize_block(t) for t in tools] == [_canonicalize_block(t) for t in body["tools"]]
+
+
+def test_roundtrip_server_tool_byte_faithful(parse: Parse, render: Render) -> None:
+    """Typed tools (versioned `type`, side fields like max_uses) ride the verbatim override."""
+    body = _tool_body(
+        [
+            {"name": "read", "input_schema": {"type": "object"}},
+            {"type": "web_search_20250305", "name": "web_search", "max_uses": 5},
+        ]
+    )
+    parsed = parse(body)
+    assert parsed.raw_extras["tools"] == body["tools"]
+    assert json.loads(render(parsed))["tools"] == body["tools"]
+
+
+def test_roundtrip_tool_search_pseudo_tool_byte_faithful(parse: Parse, render: Render) -> None:
+    body = _tool_body(
+        [
+            {"type": "tool_search_tool_bm25_20251119", "name": "tool_search_tool_bm25"},
+            {"name": "get_weather", "input_schema": {"type": "object"}, "defer_loading": True},
+        ]
+    )
+    parsed = parse(body)
+    assert json.loads(render(parsed))["tools"] == body["tools"]
+
+
+def test_roundtrip_typed_tool_with_canonical_marker_byte_faithful(parse: Parse, render: Render) -> None:
+    """Typed override wins over the canonical-marker lift; wire rides verbatim, knob unset."""
+    body = _tool_body(
+        [
+            {"type": "web_search_20250305", "name": "web_search"},
+            {
+                "name": "read",
+                "input_schema": {"type": "object"},
+                "cache_control": {"type": "ephemeral", "ttl": "5m"},
+            },
+        ]
+    )
+    parsed = parse(body)
+    assert "anthropic_cache_tool_definitions" not in dict(parsed.settings)
+    assert json.loads(render(parsed))["tools"] == body["tools"]

@@ -153,6 +153,28 @@ class TestBudgetArbitration:
         assert report.placed == ["tools", "system", "user[-1]"]
         assert report.dropped == ["user[-2]"]
 
+    def test_census_counts_tools_override_markers_and_skips_tools_placement(self) -> None:
+        raw_extras = {
+            "tools": [
+                {"type": "web_search_20250305", "name": "web_search"},
+                {"name": "read", "input_schema": {}, "cache_control": {"type": "ephemeral", "ttl": "5m"}},
+            ]
+        }
+        _, new_settings, report = apply_cache_policy(_convo(), ModelSettings(), FULL_POLICY, raw_extras=raw_extras)
+        assert report.existing == 1
+        assert report.skipped == ["tools"]
+        assert report.placed == ["system", "user[-1]", "user[-2]"]
+        assert "anthropic_cache_tool_definitions" not in cast(dict[str, Any], new_settings)
+
+    def test_tools_override_without_markers_still_skips_tools_placement(self) -> None:
+        """The skip rides on the stitch-time overwrite (wire no-op), not on marker presence."""
+        raw_extras = {"tools": [{"type": "web_search_20250305", "name": "web_search"}]}
+        _, new_settings, report = apply_cache_policy(_convo(), ModelSettings(), FULL_POLICY, raw_extras=raw_extras)
+        assert report.existing == 0
+        assert report.skipped == ["tools"]
+        assert report.placed == ["system", "user[-1]", "user[-2]"]
+        assert "anthropic_cache_tool_definitions" not in cast(dict[str, Any], new_settings)
+
     def test_idempotence(self) -> None:
         m1, s1, r1 = apply_cache_policy(_convo(), ModelSettings(), FULL_POLICY)
         assert len(r1.placed) == 4
@@ -234,6 +256,60 @@ class TestIntegration:
             if isinstance(block, dict) and "cache_control" in block
         )
         assert wire_markers <= 4
+
+    def test_typed_tool_override_stays_within_breakpoint_budget(self) -> None:
+        """A verbatim tools override carrying a marker is censused; policy places around it.
+
+        Regression for the census blind spot: the typed override routes the client's
+        tool marker into raw_extras['tools'], which the engine must count as existing
+        or system + user_tail placements could push the wire past 4 breakpoints.
+        """
+        body = {
+            "model": "claude-sonnet-5",
+            "max_tokens": 128,
+            "system": "You are helpful.",
+            "tools": [
+                {"type": "web_search_20250305", "name": "web_search", "max_uses": 3},
+                {
+                    "name": "read",
+                    "input_schema": {"type": "object"},
+                    "cache_control": {"type": "ephemeral", "ttl": "1h"},
+                },
+            ],
+            "messages": [
+                {"role": "user", "content": [{"type": "text", "text": "one"}]},
+                {"role": "assistant", "content": [{"type": "text", "text": "a"}]},
+                {"role": "user", "content": [{"type": "text", "text": "two"}]},
+            ],
+        }
+        flow = MagicMock()
+        flow.id = "test-flow"
+        flow.request.path = "/v1/messages"
+        flow.request.content = json.dumps(body).encode()
+        flow.request.headers = {}
+        flow.metadata = {}
+        ctx = Context.from_flow(flow)
+
+        policy = CachePolicy(tools="1h", system="1h", user_tail=2)
+        new_messages, new_settings, report = apply_cache_policy(
+            ctx.messages, ctx.settings, policy, raw_extras=ctx.raw_extras
+        )
+        assert report.existing == 1
+        assert report.skipped == ["tools"]
+        assert report.placed == ["system", "user[-1]", "user[-2]"]
+        ctx.messages = new_messages
+        ctx.settings = new_settings
+
+        rendered = json.loads(AnthropicAdapter.render(ctx))
+        assert rendered["tools"] == body["tools"]
+
+        wire_markers = sum(
+            1
+            for container in (rendered["tools"], rendered["system"], *(m["content"] for m in rendered["messages"]))
+            for block in container
+            if isinstance(block, dict) and "cache_control" in block
+        )
+        assert wire_markers == 4
 
     def test_deferred_tools_stay_within_breakpoint_budget(self) -> None:
         """4 stable + 2 deferred tools: exactly 4 wire markers, tool marker on stable tool 4."""

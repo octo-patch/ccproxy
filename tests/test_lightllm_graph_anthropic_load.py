@@ -202,6 +202,53 @@ class TestParseTools:
         settings_dict: dict[str, Any] = {**parsed.settings}
         assert "anthropic_cache_tool_definitions" not in settings_dict
 
+    def test_server_tool_preserves_raw_tools_and_promotes(self, parse: Parse) -> None:
+        raw_tools = [
+            {"name": "read", "input_schema": {"type": "object"}},
+            {"type": "web_search_20250305", "name": "web_search", "max_uses": 5},
+        ]
+        parsed = parse(_wrap(messages=[{"role": "user", "content": "x"}], tools=raw_tools))
+        assert parsed.raw_extras["tools"] == raw_tools
+        tools = parsed.request_parameters.function_tools
+        assert [t.tool_kind for t in tools] == [None, "tool-search"]
+
+    def test_tool_search_pseudo_tool_preserves_and_promotes(self, parse: Parse) -> None:
+        raw_tools = [
+            {"type": "tool_search_tool_bm25_20251119", "name": "tool_search_tool_bm25"},
+            {"name": "get_weather", "input_schema": {"type": "object"}, "defer_loading": True},
+        ]
+        parsed = parse(_wrap(messages=[{"role": "user", "content": "x"}], tools=raw_tools))
+        assert parsed.raw_extras["tools"] == raw_tools
+        tools = parsed.request_parameters.function_tools
+        assert tools[0].tool_kind == "tool-search"
+        assert tools[1].defer_loading is True
+
+    def test_typed_tool_with_canonical_marker_overrides_without_lift(self, parse: Parse) -> None:
+        raw_tools = [
+            {"type": "web_search_20250305", "name": "web_search"},
+            {
+                "name": "read",
+                "input_schema": {"type": "object"},
+                "cache_control": {"type": "ephemeral", "ttl": "5m"},
+            },
+        ]
+        parsed = parse(_wrap(messages=[{"role": "user", "content": "x"}], tools=raw_tools))
+        assert parsed.raw_extras["tools"] == raw_tools
+        settings_dict: dict[str, Any] = {**parsed.settings}
+        assert "anthropic_cache_tool_definitions" not in settings_dict
+
+    def test_custom_type_tool_is_plain_function_tool(self, parse: Parse) -> None:
+        parsed = parse(
+            _wrap(
+                messages=[{"role": "user", "content": "x"}],
+                tools=[{"type": "custom", "name": "read", "input_schema": {"type": "object"}}],
+            )
+        )
+        assert "tools" not in parsed.raw_extras
+        tools = parsed.request_parameters.function_tools
+        assert tools[0].name == "read"
+        assert tools[0].tool_kind is None
+
     def test_deferred_no_markers_roundtrips_defer_loading(self, parse: Parse) -> None:
         parsed = parse(
             _wrap(

@@ -655,3 +655,144 @@ class TestSilentDropTelemetry:
             self._run(fsm, stream)
         assert fsm.state.frames_unparseable >= 1
         assert "unparseable frame" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# Native tool search (server_tool_use + tool_search_tool_result)
+# ---------------------------------------------------------------------------
+
+
+def _tool_search_message_events(blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Wrap content-block event triples in a full message envelope."""
+    events: list[dict[str, Any]] = [
+        {
+            "type": "message_start",
+            "message": {
+                "id": "msg_toolsearch",
+                "type": "message",
+                "role": "assistant",
+                "content": [],
+                "model": "claude-3-haiku-20240307",
+                "stop_reason": None,
+                "stop_sequence": None,
+                "usage": {"input_tokens": 8, "output_tokens": 0},
+            },
+        },
+    ]
+    events.extend(blocks)
+    events.extend(
+        [
+            {
+                "type": "message_delta",
+                "delta": {"stop_reason": "end_turn", "stop_sequence": None},
+                "usage": {"output_tokens": 3},
+            },
+            {"type": "message_stop"},
+        ]
+    )
+    return events
+
+
+class TestNativeToolSearch:
+    def test_call_and_result_blocks_emit_native_parts(self, intake_factory: _IntakeFactory) -> None:
+        """A bm25 ``server_tool_use`` call (args via input_json_delta) paired with a
+        ``tool_search_tool_result`` success block yields NativeToolSearchCallPart +
+        NativeToolSearchReturnPart with exact discovered tool names.
+        """
+        from pydantic_ai.messages import NativeToolSearchCallPart, NativeToolSearchReturnPart
+
+        intake = intake_factory()
+        events = _tool_search_message_events(
+            [
+                {
+                    "type": "content_block_start",
+                    "index": 0,
+                    "content_block": {
+                        "type": "server_tool_use",
+                        "id": "srvtoolu_bm25",
+                        "name": "tool_search_tool_bm25",
+                        "input": {},
+                    },
+                },
+                {
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": {"type": "input_json_delta", "partial_json": '{"query": "weather'},
+                },
+                {
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": {"type": "input_json_delta", "partial_json": ' tools"}'},
+                },
+                {"type": "content_block_stop", "index": 0},
+                {
+                    "type": "content_block_start",
+                    "index": 1,
+                    "content_block": {
+                        "type": "tool_search_tool_result",
+                        "tool_use_id": "srvtoolu_bm25",
+                        "content": {
+                            "type": "tool_search_tool_search_result",
+                            "tool_references": [
+                                {"type": "tool_reference", "tool_name": "get_weather"},
+                                {"type": "tool_reference", "tool_name": "get_forecast"},
+                            ],
+                        },
+                    },
+                },
+                {"type": "content_block_stop", "index": 1},
+            ]
+        )
+        list(intake.feed(_frames(events)))
+        list(intake.close())
+
+        parts = intake.parts_manager.get_parts()
+        assert len(parts) == 2
+        call, ret = parts
+        assert isinstance(call, NativeToolSearchCallPart)
+        assert call.tool_call_id == "srvtoolu_bm25"
+        # Streamed args finalize back to the canonical ToolSearchArgs dict at block stop.
+        assert call.args == {"queries": ["weather tools"]}
+        assert call.provider_details == {"strategy": "bm25"}
+        assert isinstance(ret, NativeToolSearchReturnPart)
+        assert ret.tool_call_id == "srvtoolu_bm25"
+        content = ret.content
+        assert isinstance(content, dict)
+        assert [m["name"] for m in content["discovered_tools"]] == ["get_weather", "get_forecast"]
+
+    def test_result_error_block_maps_to_provider_details(self, intake_factory: _IntakeFactory) -> None:
+        """The ``tool_search_tool_result_error`` variant lands on provider_details with
+        empty discovered_tools.
+        """
+        from pydantic_ai.messages import NativeToolSearchReturnPart
+
+        intake = intake_factory()
+        events = _tool_search_message_events(
+            [
+                {
+                    "type": "content_block_start",
+                    "index": 0,
+                    "content_block": {
+                        "type": "tool_search_tool_result",
+                        "tool_use_id": "srvtoolu_err",
+                        "content": {
+                            "type": "tool_search_tool_result_error",
+                            "error_code": "unavailable",
+                            "error_message": "tool search unavailable",
+                        },
+                    },
+                },
+                {"type": "content_block_stop", "index": 0},
+            ]
+        )
+        list(intake.feed(_frames(events)))
+        list(intake.close())
+
+        parts = intake.parts_manager.get_parts()
+        assert len(parts) == 1
+        ret = parts[0]
+        assert isinstance(ret, NativeToolSearchReturnPart)
+        assert ret.provider_details == {"error_code": "unavailable", "error_message": "tool search unavailable"}
+        content = ret.content
+        assert isinstance(content, dict)
+        assert content["discovered_tools"] == []

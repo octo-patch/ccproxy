@@ -645,7 +645,7 @@ outbound renderer (or response render) stitches it back onto the wire body.
 | `cc:msg:{i}:block:{j}` | Original `cache_control` dict from a content block | TTL wasn't `5m` or `1h` (the only values pydantic-ai's `CachePoint` accepts) — preserved so dump can re-apply verbatim |
 | `unknown_block:msg:{i}:idx:{j}` | Original wire-block dict | Block had a `type` we don't recognize — preserved so dump can emit it back |
 | `system` | The original `system` list from the body | Non-uniform `cache_control` across system blocks — can't be expressed via `settings['anthropic_cache_instructions']` (which is uniform-only) |
-| `tools` | The original `tools` list from the body | `cache_control` stamping doesn't match the canonical shape. Lift rule: exactly one marker, on the **last non-deferred** tool, with a supported TTL → `settings['anthropic_cache_tool_definitions']`; every other pattern (all-stamped, mixed TTLs, marker on a deferred or non-boundary tool) rides here verbatim. `defer_loading` round-trips on `ToolDefinition.defer_loading` and is re-emitted only when `True` |
+| `tools` | The original `tools` list from the body | Two independent triggers. **Typed tools**: any entry whose `type` is present and not `"custom"` (server/builtin tools — versioned `type`, side fields like `max_uses` — the IR can't model them; `ToolDefinition`s are still built for typed promotion, but the wire rides here verbatim). **Non-canonical cache markers**: the lift to `settings['anthropic_cache_tool_definitions']` fires only for exactly one marker, on the **last non-deferred** tool, with a supported TTL; every other pattern (all-stamped, mixed TTLs, marker on a deferred or non-boundary tool) rides here verbatim, and when the typed trigger fires the lift is skipped entirely (the marker already reaches the wire; the knob would double-count in the cache engine's census). `defer_loading` round-trips on `ToolDefinition.defer_loading` and is re-emitted only when `True` |
 | `metadata` | The body's `metadata` dict | Anthropic-specific; no IR slot |
 | Other unmodeled top-level keys | Copied verbatim under their wire name | E.g. `service_tier` |
 
@@ -818,11 +818,23 @@ adapter's `_parse_tools` functions now consult
 # Anthropic — versioned wire-type discriminators
 ANTHROPIC_TYPED_TOOLS: dict[str, ToolPartKind] = {
     "web_search_20250305": "tool-search",
+    "web_search_20260209": "tool-search",
+    "tool_search_tool_bm25_20251119": "tool-search",
+    "tool_search_tool_regex_20251119": "tool-search",
 }
 
 # OpenAI — built-in server tools (Chat Completions sees these rarely)
 OPENAI_TYPED_TOOLS: dict[str, ToolPartKind] = {}
 ```
+
+**Promotion, not preservation.** This map only drives response-part
+promotion. Wire fidelity for typed tools is the `raw_extras["tools"]`
+verbatim override in `_parse_tools` (any `type` other than `"custom"`
+triggers it). The bm25/regex entries are mostly redundant for *native*
+traffic — native tool-search calls arrive as `server_tool_use` blocks
+already typed by `_map_server_tool_use_block` — but matter for the
+local/client-flavored path where a plain `tool_use` needs name-keyed
+promotion.
 
 `_anthropic_envelope._parse_tools` reads `tool["type"]` and looks up the
 kind; `_openai_envelope._parse_tools` does the same with its own table.
@@ -847,6 +859,37 @@ ships upstream (e.g. a new Anthropic dated web-search variant). Tests
 asserting typed parts go alongside the existing intake tests; see
 `tests/test_lightllm_graph_intake_anthropic.py::test_typed_search_tool_promotes_tool_call_part`
 for the canonical pattern.
+
+### Tool-search invariants
+
+The Anthropic intake FSM handles both sides of a native tool-search
+interaction: `server_tool_use` calls named `tool_search_tool_bm25` /
+`tool_search_tool_regex` map to `NativeToolSearchCallPart` (streamed args
+finalize to the canonical `{"queries": [...]}` shape at `content_block_stop`),
+and `tool_search_tool_result` blocks map to `NativeToolSearchReturnPart`
+(success → `discovered_tools`; error variant → `provider_details`).
+
+Constraints anything that touches these conversations must honor:
+
+- **Never orphan a call/result pair.** Anthropic 400s a replayed history
+  containing an unpaired `tool_search_tool_*` block. Hooks that reorder or
+  inject messages must not split or drop one side. Known hazard:
+  `inject_mcp_notifications` inserts its synthetic pair immediately before
+  the final message, which can split a trailing assistant-call/user-result
+  pair — harmless for plain tool_use (Anthropic tolerates the detached
+  result) but not for `tool_search_tool_*` blocks.
+- **Never strand a `tool_reference`.** `tool_reference` blocks inside a
+  `tool_result` may only name tools present in the same request's `tools`
+  array; hooks that filter or rewrite `tools` must keep referenced tools.
+- **Known dump-side limitation.** `dump_messages` does not re-emit
+  `server_tool_use` / `tool_search_tool_result` blocks from IR history:
+  native parts (`NativeToolSearchCallPart` / `NativeToolSearchReturnPart`)
+  are dropped, and client-flavored search parts degrade to plain
+  `tool_use` / `tool_result`. The same applies to the Anthropic render FSM
+  (IR → SSE), whose `NativeToolCallPart` branch emits plain `tool_use`.
+  Both must be revisited *together with* OpenAI Responses server-execution
+  intake support — they only matter as a pair, and doing render alone
+  invites the pairing/`tool_reference` 400s above.
 
 ---
 
@@ -1060,9 +1103,15 @@ along with everything after it.
 | Authored `CachePoint`s in messages (VM-003 / prior run) | 1 each | never |
 | Sentinel system markers | 1 each | never |
 | `cc:`-family `raw_extras` (`cc:msg:*`, `cc:promptast:msg:*`) | 1 each | never |
+| `cache_control` on `raw_extras["tools"]` entries (verbatim override) | 1 each | never |
 | `anthropic_cache_tool_definitions` / `_instructions` / `_messages` | 1 each | never |
 | `anthropic_cache` shorthand | 1 | never |
 | Policy placements | admitted while budget holds | yielded first |
+
+When `raw_extras` contains a `"tools"` override, the `tools` placement is
+always skipped (marker or not): the verbatim array overwrites the dump
+side's formatted tools at stitch time, so a knob placement would burn
+budget for a wire no-op.
 
 Authored always wins: the engine never removes or re-TTLs an existing
 marker. Idempotent: re-running a policy over its own output places nothing —

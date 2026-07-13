@@ -52,6 +52,7 @@ from anthropic.types.beta import (
     BetaTextDelta,
     BetaThinkingBlock,
     BetaThinkingDelta,
+    BetaToolSearchToolResultBlock,
     BetaToolUseBlock,
     BetaWebFetchToolResultBlock,
     BetaWebSearchToolResultBlock,
@@ -60,18 +61,23 @@ from pydantic import TypeAdapter, ValidationError
 
 # Private pydantic-ai imports — see the matching note in
 # ``response/intake_anthropic.py``. We need byte-identical dispatch behavior
-# and there is no public replacement.
+# and there is no public replacement. On a pin bump, a broken import here is
+# expected breakage with a known fix: vendor the affected mapper (each is a
+# ~20-line pure function over the SDK block type).
 from pydantic_ai._parts_manager import ModelResponsePartsManager
 from pydantic_ai.messages import (
     CompactionPart,
     ModelResponseStreamEvent,
     NativeToolCallPart,
+    NativeToolSearchCallPart,
 )
 from pydantic_ai.models.anthropic import (
+    _finalize_streamed_tool_search_call_part,
     _map_code_execution_tool_result_block,
     _map_mcp_server_result_block,
     _map_mcp_server_use_block,
     _map_server_tool_use_block,
+    _map_tool_search_tool_result_block,
     _map_web_fetch_tool_result_block,
     _map_web_search_tool_result_block,
 )
@@ -285,11 +291,20 @@ async def handle_tool_use_block(ctx: StepContext[_AnthropicIntakeState, None, Be
 async def handle_server_tool_use_block(
     ctx: StepContext[_AnthropicIntakeState, None, BetaServerToolUseBlock],
 ) -> None:
-    """``server_tool_use`` block — record the builtin call and emit it with deferred args."""
+    """``server_tool_use`` block — record the builtin call and emit it with deferred args.
+
+    On the real wire the block's ``input`` is empty at ``content_block_start``
+    and arrives via ``input_json_delta`` events, so the part is emitted with
+    ``args=None`` (string deltas can't attach to the mapper's normalized dict
+    args); ``handle_content_block_stop`` finalizes tool-search args back to the
+    canonical shape. The buffered synthesizer passes the full ``input`` on the
+    start event, in which case the mapped args are kept as-is.
+    """
     state = ctx.state
     call_part = _map_server_tool_use_block(ctx.inputs, state.provider_name)
     state.builtin_tool_calls[call_part.tool_call_id] = call_part
-    state.out_events.append(state.parts_manager.handle_part(vendor_part_id=state.current_index, part=call_part))
+    emitted = call_part if ctx.inputs.input else replace(call_part, args=None)
+    state.out_events.append(state.parts_manager.handle_part(vendor_part_id=state.current_index, part=emitted))
 
 
 @_bsg.step
@@ -302,6 +317,25 @@ async def handle_web_search_tool_result_block(
         state.parts_manager.handle_part(
             vendor_part_id=state.current_index,
             part=_map_web_search_tool_result_block(ctx.inputs, state.provider_name),
+        )
+    )
+
+
+@_bsg.step
+async def handle_tool_search_tool_result_block(
+    ctx: StepContext[_AnthropicIntakeState, None, BetaToolSearchToolResultBlock],
+) -> None:
+    """``tool_search_tool_result`` block — emit the mapped result part.
+
+    Pairs with the ``server_tool_use`` call side (``tool_search_tool_bm25`` /
+    ``tool_search_tool_regex``); dropping it would orphan the call, and
+    Anthropic rejects unpaired ``tool_search_tool_*`` blocks on replay.
+    """
+    state = ctx.state
+    state.out_events.append(
+        state.parts_manager.handle_part(
+            vendor_part_id=state.current_index,
+            part=_map_tool_search_tool_result_block(ctx.inputs, state.provider_name),
         )
     )
 
@@ -400,6 +434,7 @@ _bsg.add(
         .branch(_bsg.match(BetaToolUseBlock).to(handle_tool_use_block))
         .branch(_bsg.match(BetaServerToolUseBlock).to(handle_server_tool_use_block))
         .branch(_bsg.match(BetaWebSearchToolResultBlock).to(handle_web_search_tool_result_block))
+        .branch(_bsg.match(BetaToolSearchToolResultBlock).to(handle_tool_search_tool_result_block))
         .branch(_bsg.match(BetaCodeExecutionToolResultBlock).to(handle_code_execution_tool_result_block))
         .branch(_bsg.match(BetaWebFetchToolResultBlock).to(handle_web_fetch_tool_result_block))
         .branch(_bsg.match(BetaMCPToolUseBlock).to(handle_mcp_tool_use_block))
@@ -414,6 +449,7 @@ _bsg.add(
         handle_tool_use_block,
         handle_server_tool_use_block,
         handle_web_search_tool_result_block,
+        handle_tool_search_tool_result_block,
         handle_code_execution_tool_result_block,
         handle_web_fetch_tool_result_block,
         handle_mcp_tool_use_block,
@@ -564,7 +600,10 @@ _dispatch_block_delta = _g.add_subgraph(_block_delta_graph, label="block_delta")
 async def handle_content_block_stop(
     ctx: StepContext[_AnthropicIntakeState, None, BetaRawContentBlockStopEvent],
 ) -> None:
-    """Handle ``content_block_stop`` — close the block. MCP tool-use needs a final ``}`` for its args."""
+    """Handle ``content_block_stop`` — close the block. MCP tool-use needs a final ``}``
+    for its args; a streamed tool-search call's string-accumulated args are normalized
+    back to the canonical ``ToolSearchArgs`` dict (matching the non-streaming shape).
+    """
     event = ctx.inputs
     state = ctx.state
     if isinstance(state.current_block, BetaMCPToolUseBlock):
@@ -574,6 +613,15 @@ async def handle_content_block_stop(
         )
         if maybe_event is not None:
             state.out_events.append(maybe_event)
+    elif isinstance(state.current_block, BetaServerToolUseBlock):
+        existing = state.parts_manager.get_part_by_vendor_id(event.index)
+        if isinstance(existing, NativeToolSearchCallPart):
+            state.out_events.append(
+                state.parts_manager.handle_part(
+                    vendor_part_id=event.index,
+                    part=_finalize_streamed_tool_search_call_part(existing),
+                )
+            )
     state.current_block = None
 
 

@@ -136,6 +136,14 @@ def _census(
     count += sum(1 for key in _CACHE_SETTINGS_KEYS if settings.get(key))
     if raw_extras:
         count += sum(1 for key in raw_extras if key.startswith("cc:"))
+        # A verbatim tools override reaches the wire byte-faithfully, so any
+        # cache_control it carries is an existing marker. Shallow scan only —
+        # markers sit on the tool entries themselves, and fidelity-first means
+        # even an invalid marker (e.g. on a deferred tool) is preserved and
+        # therefore counted.
+        tools_override = raw_extras.get("tools")
+        if isinstance(tools_override, list):
+            count += sum(1 for tool in tools_override if isinstance(tool, dict) and "cache_control" in tool)
     return count
 
 
@@ -248,7 +256,10 @@ def apply_cache_policy(
         return True
 
     if policy.tools is not None:
-        if settings_map.get("anthropic_cache_tool_definitions"):
+        # A verbatim tools override overwrites the dump side's formatted tools
+        # at stitch time, so a knob placement would burn budget for a wire
+        # no-op — skip it whether or not the override carries markers.
+        if settings_map.get("anthropic_cache_tool_definitions") or (raw_extras and "tools" in raw_extras):
             skipped.append("tools")
         elif admit("tools"):
             cast(dict[str, Any], new_settings)["anthropic_cache_tool_definitions"] = policy.tools
