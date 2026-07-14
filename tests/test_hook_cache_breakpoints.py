@@ -47,7 +47,7 @@ def _make_ctx(headers: dict[str, str] | None = None, *, auth_provider: str = "an
 def _provider(type_: str) -> Provider:
     return Provider(
         auth=CommandAuthSource(command="printf tok"),
-        host="api.example.com",
+        base_url="https://api.example.com",
         path="/v1/messages",
         type=type_,
     )

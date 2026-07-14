@@ -1,0 +1,127 @@
+model_list:
+- litellm_params:
+    model: claude-sonnet-4-6
+  model_name: default
+- litellm_params:
+    model: anthropic/claude-opus-4-6
+  model_name: claude-opus-4-6
+- litellm_params:
+    model: anthropic/claude-sonnet-4-6
+  model_name: claude-sonnet-4-6
+- litellm_params:
+    model: anthropic/claude-sonnet-4-5-20250929
+  model_name: claude-sonnet-4-5-20250929
+- litellm_params:
+    model: anthropic/claude-opus-4-5-20251101
+  model_name: claude-opus-4-5-20251101
+- litellm_params:
+    model: anthropic/claude-haiku-4-5-20251001
+  model_name: claude-haiku-4-5-20251001
+- litellm_params:
+    model: anthropic/claude-3-5-haiku-20241022
+  model_name: claude-3-5-haiku-20241022
+- litellm_params:
+    model: gemini/gemini-3.1-pro-preview
+  model_name: gemini-3.1-pro-preview
+- litellm_params:
+    model: gemini/gemini-3-pro-preview
+  model_name: gemini-3-pro-preview
+- litellm_params:
+    model: gemini/gemini-2.5-pro
+  model_name: gemini-2.5-pro
+- litellm_params:
+    model: gemini/gemini-3-flash-preview
+  model_name: gemini-3-flash-preview
+- litellm_params:
+    model: gemini/gemini-3.1-flash-lite-preview
+  model_name: gemini-3.1-flash-lite-preview
+- litellm_params:
+    model: gemini/gemini-2.5-flash
+  model_name: gemini-2.5-flash
+- litellm_params:
+    model: gemini/gemini-2.5-flash-lite
+  model_name: gemini-2.5-flash-lite
+- litellm_params:
+    model: gemini/gemini-2.0-flash
+  model_name: gemini-2.0-flash
+- litellm_params:
+    model: gemini/gemini-2.0-flash-lite
+  model_name: gemini-2.0-flash-lite
+- litellm_params:
+    model: gemini/gemini-3-pro-image-preview
+  model_name: gemini-3-pro-image-preview
+- litellm_params:
+    model: gemini/gemini-3.1-flash-image-preview
+  model_name: gemini-3.1-flash-image-preview
+- litellm_params:
+    model: gemini/gemini-2.5-flash-image
+  model_name: gemini-2.5-flash-image
+- litellm_params:
+    model: deepseek/deepseek-v4
+  model_name: deepseek-v4
+- litellm_params:
+    model: perplexity_pro/perplexity/best
+  model_name: perplexity/best
+- litellm_params:
+    model: perplexity_pro/perplexity/deep-research
+  model_name: perplexity/deep-research
+- litellm_params:
+    model: perplexity_pro/perplexity/sonar-2
+  model_name: perplexity/sonar-2
+- litellm_params:
+    model: perplexity_pro/openai/gpt-5.4
+  model_name: openai/gpt-5.4
+- litellm_params:
+    model: perplexity_pro/openai/gpt-5.4-thinking
+  model_name: openai/gpt-5.4-thinking
+- litellm_params:
+    model: perplexity_pro/openai/gpt-5.5-thinking
+  model_name: openai/gpt-5.5-thinking
+- litellm_params:
+    model: perplexity_pro/google/gemini-3.1-pro-thinking-low
+  model_name: google/gemini-3.1-pro-thinking-low
+- litellm_params:
+    model: perplexity_pro/google/gemini-3.1-pro-thinking-high
+  model_name: google/gemini-3.1-pro-thinking-high
+- litellm_params:
+    model: perplexity_pro/anthropic/claude-sonnet-4.6
+  model_name: anthropic/claude-sonnet-4.6
+- litellm_params:
+    model: perplexity_pro/anthropic/claude-sonnet-4.6-thinking
+  model_name: anthropic/claude-sonnet-4.6-thinking
+- litellm_params:
+    model: perplexity_pro/anthropic/claude-opus-4.7
+  model_name: anthropic/claude-opus-4.7
+- litellm_params:
+    model: perplexity_pro/anthropic/claude-opus-4.7-thinking
+  model_name: anthropic/claude-opus-4.7-thinking
+- litellm_params:
+    model: perplexity_pro/moonshot/kimi-k2.6-instant
+  model_name: moonshot/kimi-k2.6-instant
+- litellm_params:
+    model: perplexity_pro/moonshot/kimi-k2.6-thinking
+  model_name: moonshot/kimi-k2.6-thinking
+- litellm_params:
+    model: perplexity_pro/nvidia/nemotron-3-super-thinking
+  model_name: nvidia/nemotron-3-super-thinking
+- litellm_params:
+    model: perplexity_pro/perplexity/pro
+  model_name: perplexity/pro
+- litellm_params:
+    model: perplexity_pro/perplexity/reasoning
+  model_name: perplexity/reasoning
+- litellm_params:
+    model: perplexity_pro/openai/gpt-5.5
+  model_name: openai/gpt-5.5
+- litellm_params:
+    model: perplexity_pro/openai/o3
+  model_name: openai/o3
+- litellm_params:
+    model: perplexity_pro/openai/o3-pro
+  model_name: openai/o3-pro
+- litellm_params:
+    model: perplexity_pro/xai/grok-4
+  model_name: xai/grok-4
+- litellm_params:
+    model: perplexity_pro/deepseek/r1
+  model_name: deepseek/r1

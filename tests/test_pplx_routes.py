@@ -45,7 +45,7 @@ def set_pplx_config(tmp_path: Path, *, mcp_auth: str | None = None, token: str =
             providers={
                 "perplexity_pro": Provider(
                     auth=FileAuthSource(file=str(token_file)),
-                    host="www.perplexity.ai",
+                    base_url="https://www.perplexity.ai",
                     path="/rest/sse/perplexity_ask",
                     type="perplexity_pro",
                 ),

@@ -14,7 +14,8 @@ from mitmproxy import http
 
 from ccproxy import transport
 from ccproxy.config import get_config
-from ccproxy.pipeline.context import metadata_from_flow
+from ccproxy.hooks.inject_auth import inject_provider_auth
+from ccproxy.pipeline.context import Context, metadata_from_flow
 
 logger = logging.getLogger(__name__)
 
@@ -51,11 +52,16 @@ class AuthAddon:
             logger.warning("Auth 401 for provider '%s' — no token available, not retrying", provider)
             return False
 
-        target_header = (config.get_auth_header(provider) or "authorization").lower()
-        new_value = f"Bearer {new_token}" if target_header == "authorization" else new_token
-        flow.request.headers[target_header] = new_value
-        for header, value in config.get_auth_extra_headers(provider).items():
-            flow.request.headers[header] = value
+        provider_config = config.get_provider(provider)
+        if provider_config is None:
+            return False
+        inject_provider_auth(
+            Context.from_flow(flow),
+            provider,
+            provider_config,
+            token=new_token,
+            force=True,
+        )
 
         logger.info("Auth 401 for provider '%s' — token refreshed, retrying request", provider)
 

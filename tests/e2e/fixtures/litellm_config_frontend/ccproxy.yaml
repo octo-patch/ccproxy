@@ -1,0 +1,17 @@
+ccproxy:
+  host: 127.0.0.1
+  port: 4011
+  log_file: ccproxy.log
+  verify_readiness_on_startup: false
+  hooks:
+    inbound: []
+    outbound: []
+  inspector:
+    port: 8091
+    mitmproxy:
+      web_password: litellm-frontend-e2e
+  mcp:
+    http:
+      enabled: false
+  shaping:
+    enabled: false

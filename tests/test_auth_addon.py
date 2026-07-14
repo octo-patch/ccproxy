@@ -5,6 +5,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from ccproxy import transport
+from ccproxy.auth.sources import EnvironmentAuthSource
+from ccproxy.config import Provider
 from ccproxy.inspector.auth_addon import AuthAddon
 
 
@@ -42,6 +44,14 @@ def _make_mock_client(mock_response: MagicMock) -> tuple[AsyncMock, AsyncMock]:
     mock_client = AsyncMock()
     mock_client.request = AsyncMock(return_value=mock_response)
     return mock_client, mock_client.request
+
+
+def _provider(*, header: str | None = None, type: str = "anthropic") -> Provider:
+    return Provider(
+        auth=EnvironmentAuthSource(variable="UNUSED_TEST_TOKEN", header=header),
+        base_url="https://api.example.com",
+        type=type,
+    )
 
 
 class TestResponseEntryPoint:
@@ -147,7 +157,7 @@ class TestRetryWithRefreshedToken:
         flow = _make_auth_flow(provider="anthropic")
         mock_config = MagicMock()
         mock_config.resolve_auth_token.return_value = "new-token"
-        mock_config.get_auth_header.return_value = None
+        mock_config.get_provider.return_value = _provider()
         mock_config.provider_timeout = None
 
         mock_response = MagicMock()
@@ -179,7 +189,7 @@ class TestRetryWithRefreshedToken:
         )
         mock_config = MagicMock()
         mock_config.resolve_auth_token.return_value = "new-token"
-        mock_config.get_auth_header.return_value = None
+        mock_config.get_provider.return_value = _provider()
         mock_config.provider_timeout = None
 
         mock_response = MagicMock()
@@ -206,7 +216,7 @@ class TestRetryWithRefreshedToken:
         flow.request.pretty_host = "gemini.googleapis.com"
         mock_config = MagicMock()
         mock_config.resolve_auth_token.return_value = "new-gemini-token"
-        mock_config.get_auth_header.return_value = "x-api-key"
+        mock_config.get_provider.return_value = _provider(header="x-api-key", type="gemini")
         mock_config.provider_timeout = None
 
         mock_response = MagicMock()
@@ -225,8 +235,7 @@ class TestRetryWithRefreshedToken:
         assert result is True
         sent_headers = mock_request.call_args.kwargs["headers"]
         assert sent_headers.get("x-api-key") == "new-gemini-token"
-        # Default Authorization header should not be set when a custom header is configured
-        assert sent_headers.get("authorization") == "Bearer old-token"
+        assert "authorization" not in sent_headers
 
     @pytest.mark.asyncio
     async def test_retry_does_not_send_internal_headers(self) -> None:
@@ -238,7 +247,7 @@ class TestRetryWithRefreshedToken:
         }
         mock_config = MagicMock()
         mock_config.resolve_auth_token.return_value = "new-token"
-        mock_config.get_auth_header.return_value = None
+        mock_config.get_provider.return_value = _provider()
         mock_config.provider_timeout = None
 
         mock_response = MagicMock()
@@ -263,7 +272,7 @@ class TestRetryWithRefreshedToken:
         flow = _make_auth_flow(provider="anthropic")
         mock_config = MagicMock()
         mock_config.resolve_auth_token.return_value = "new-token"
-        mock_config.get_auth_header.return_value = None
+        mock_config.get_provider.return_value = _provider()
         mock_config.provider_timeout = None
 
         mock_response = MagicMock()
@@ -295,7 +304,7 @@ class TestRetryWithRefreshedToken:
         flow.request.headers = {"authorization": "Bearer old-token"}
         mock_config = MagicMock()
         mock_config.resolve_auth_token.return_value = "fresh-token"
-        mock_config.get_auth_header.return_value = None
+        mock_config.get_provider.return_value = _provider()
         mock_config.provider_timeout = None
 
         mock_response = MagicMock()
@@ -320,7 +329,7 @@ class TestRetryWithRefreshedToken:
         flow.request.headers = {"x-api-key": "old-key"}
         mock_config = MagicMock()
         mock_config.resolve_auth_token.return_value = "fresh-key"
-        mock_config.get_auth_header.return_value = "x-api-key"
+        mock_config.get_provider.return_value = _provider(header="x-api-key", type="gemini")
         mock_config.provider_timeout = None
 
         mock_response = MagicMock()
@@ -344,7 +353,7 @@ class TestRetryWithRefreshedToken:
         flow = _make_auth_flow(provider="anthropic")
         mock_config = MagicMock()
         mock_config.resolve_auth_token.return_value = "new-token"
-        mock_config.get_auth_header.return_value = None
+        mock_config.get_provider.return_value = _provider()
         mock_config.provider_timeout = 120.0
 
         mock_response = MagicMock()
@@ -368,7 +377,7 @@ class TestRetryWithRefreshedToken:
         flow = _make_auth_flow(provider="anthropic")
         mock_config = MagicMock()
         mock_config.resolve_auth_token.return_value = "new-token"
-        mock_config.get_auth_header.return_value = None
+        mock_config.get_provider.return_value = _provider()
         mock_config.provider_timeout = None
 
         mock_response = MagicMock()
@@ -396,7 +405,7 @@ class TestRetryWithRefreshedToken:
         flow = _make_auth_flow(provider="anthropic")
         mock_config = MagicMock()
         mock_config.resolve_auth_token.return_value = "new-token"
-        mock_config.get_auth_header.return_value = None
+        mock_config.get_provider.return_value = _provider()
         mock_config.provider_timeout = None
 
         mock_client = AsyncMock()
@@ -420,7 +429,7 @@ class TestTransportDispatchIntegration:
         flow = _make_auth_flow(provider="anthropic")
         mock_config = MagicMock()
         mock_config.resolve_auth_token.return_value = "new-token"
-        mock_config.get_auth_header.return_value = None
+        mock_config.get_provider.return_value = _provider()
         mock_config.provider_timeout = None
 
         mock_response = MagicMock()
@@ -446,7 +455,7 @@ class TestTransportDispatchIntegration:
         flow.metadata["ccproxy.fingerprint_profile"] = "firefox133"
         mock_config = MagicMock()
         mock_config.resolve_auth_token.return_value = "new-token"
-        mock_config.get_auth_header.return_value = None
+        mock_config.get_provider.return_value = _provider()
         mock_config.provider_timeout = None
 
         mock_response = MagicMock()

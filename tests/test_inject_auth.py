@@ -12,9 +12,9 @@ from ccproxy.auth.sources import CommandAuthSource
 from ccproxy.config import CCProxyConfig, Provider, set_config_instance
 from ccproxy.constants import AUTH_SENTINEL_PREFIX, AuthConfigError
 from ccproxy.hooks.inject_auth import (
-    _inject_token,
     inject_auth,
     inject_auth_guard,
+    inject_provider_auth,
 )
 from ccproxy.pipeline.context import Context
 
@@ -39,11 +39,15 @@ def _flow(ctx: Context) -> HTTPFlow:
     return ctx.flow
 
 
+def _literal(value: str) -> str:
+    return value
+
+
 def _make_provider(*, value: str = "tok", header: str | None = None) -> Provider:
     """Build a Provider whose auth.resolve() returns ``value`` via shell echo."""
     return Provider(
         auth=CommandAuthSource(command=f"printf '%s' {value}", header=header),
-        host="api.example.com",
+        base_url="https://api.example.com",
         path="/v1/messages",
         type="anthropic",
     )
@@ -140,7 +144,7 @@ class TestInjectAuthSentinelPath:
         clean_config.providers = {
             "codex": Provider(
                 auth=_ExtraHeaderAuthSource(command="printf '%s' codex-token"),
-                host="chatgpt.com",
+                base_url="https://chatgpt.com",
                 path="/backend-api/codex/responses",
                 type="openai_responses",
             )
@@ -157,6 +161,19 @@ class TestInjectAuthSentinelPath:
         ctx = _make_ctx({"x-api-key": f"{AUTH_SENTINEL_PREFIX}missing-provider"})
 
         with pytest.raises(AuthConfigError, match="missing-provider"):
+            inject_auth(ctx, {})
+
+    def test_sentinel_provider_without_auth_is_rejected(self, clean_config: CCProxyConfig) -> None:
+        clean_config.providers = {
+            "public": Provider(
+                base_url="https://api.example.com",
+                path="/v1/chat/completions",
+                type="openai",
+            )
+        }
+        ctx = _make_ctx({"authorization": f"Bearer {AUTH_SENTINEL_PREFIX}public"})
+
+        with pytest.raises(AuthConfigError, match="no auth source"):
             inject_auth(ctx, {})
 
     def test_sentinel_get_config_exception_raises_auth_config_error(self) -> None:
@@ -190,11 +207,12 @@ class TestInjectAuthPassthrough:
         assert "ccproxy.auth_injected" not in _flow(ctx).metadata
 
 
-class TestInjectToken:
+class TestInjectProviderAuth:
     def test_default_header_sets_authorization_bearer(self, clean_config: CCProxyConfig) -> None:
+        clean_config.providers = {"anthropic": _make_provider()}
         ctx = _make_ctx()
 
-        _inject_token(ctx, "anthropic", "my-token")
+        inject_provider_auth(ctx, "anthropic", token=_literal("my-token"))
 
         assert ctx.get_header("authorization") == "Bearer my-token"
         assert _flow(ctx).metadata["ccproxy.auth_injected"] is True
@@ -205,7 +223,7 @@ class TestInjectToken:
         clean_config.providers = {"google": _make_provider(header="x-goog-api-key")}
         ctx = _make_ctx()
 
-        _inject_token(ctx, "google", "goog-token")
+        inject_provider_auth(ctx, "google", token=_literal("goog-token"))
 
         assert ctx.get_header("x-goog-api-key") == "goog-token"
         assert _flow(ctx).metadata["ccproxy.auth_injected"] is True
@@ -218,21 +236,37 @@ class TestInjectToken:
         clean_config.providers = {"prov": _make_provider(header="x-api-key")}
         ctx = _make_ctx()
 
-        _inject_token(ctx, "prov", "my-secret")
+        inject_provider_auth(ctx, "prov", token=_literal("my-secret"))
 
         assert ctx.get_header("x-api-key") == "my-secret"
         assert ctx.get_header("x-goog-api-key") == ""
         assert _flow(ctx).metadata["ccproxy.auth_injected"] is True
 
     def test_always_sets_injected_flag(self, clean_config: CCProxyConfig) -> None:
+        clean_config.providers = {"any": _make_provider()}
         ctx = _make_ctx()
-        _inject_token(ctx, "any", "any-token")
+        inject_provider_auth(ctx, "any", token=_literal("any-token"))
         assert _flow(ctx).metadata["ccproxy.auth_injected"] is True
 
     def test_inject_preserves_other_headers(self, clean_config: CCProxyConfig) -> None:
+        clean_config.providers = {"prov": _make_provider()}
         ctx = _make_ctx({"content-type": "application/json", "anthropic-version": "2023-06-01"})
 
-        _inject_token(ctx, "prov", "tok")
+        inject_provider_auth(ctx, "prov", token=_literal("tok"))
 
         assert ctx.get_header("content-type") == "application/json"
         assert ctx.get_header("anthropic-version") == "2023-06-01"
+
+    def test_model_selected_provider_replaces_prior_sentinel_auth(self, clean_config: CCProxyConfig) -> None:
+        clean_config.providers = {
+            "first": _make_provider(),
+            "second": _make_provider(header="x-api-key"),
+        }
+        ctx = _make_ctx()
+        inject_provider_auth(ctx, "first", token=_literal("first-token"))
+
+        inject_provider_auth(ctx, "second", token=_literal("second-token"))
+
+        assert ctx.get_header("authorization") == ""
+        assert ctx.get_header("x-api-key") == "second-token"
+        assert _flow(ctx).metadata["ccproxy.auth_provider"] == "second"

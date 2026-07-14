@@ -17,6 +17,7 @@ from pydantic_ai.messages import (
     CachePoint,
     DocumentUrl,
     ImageUrl,
+    ModelMessage,
     ModelRequest,
     ModelResponse,
     SystemPromptPart,
@@ -60,6 +61,16 @@ WORKED_EXAMPLE: dict[str, Any] = {
         },
     ],
 }
+
+
+def _first_user_content_items(messages: list[ModelMessage]) -> list[Any]:
+    message = messages[0]
+    assert isinstance(message, ModelRequest)
+    part = message.parts[0]
+    assert isinstance(part, UserPromptPart)
+    assert isinstance(part.content, list)
+    return part.content
+
 
 CLIENT_VIEW: dict[str, Any] = {
     "name": "Coprocessor",
@@ -167,7 +178,7 @@ def test_media_image_base64_with_mimetype() -> None:
         }
     )
     messages = PromptAstAdapter.load_messages(ast)
-    item = messages[0].parts[0].content[0]  # type: ignore[union-attr,index]
+    item = _first_user_content_items(messages)[0]
     assert isinstance(item, BinaryContent)
     assert item.media_type == "image/png"
     assert item.data == b"hello"
@@ -211,7 +222,7 @@ def test_media_generic_pdf_becomes_document_url() -> None:
         }
     )
     messages = PromptAstAdapter.load_messages(ast)
-    item = messages[0].parts[0].content[0]  # type: ignore[union-attr,index]
+    item = _first_user_content_items(messages)[0]
     assert isinstance(item, DocumentUrl)
     assert item.url == "https://example.com/doc.pdf"
 
@@ -230,7 +241,7 @@ def test_media_generic_pdf_base64_becomes_binary() -> None:
         }
     )
     messages = PromptAstAdapter.load_messages(ast)
-    item = messages[0].parts[0].content[0]  # type: ignore[union-attr,index]
+    item = _first_user_content_items(messages)[0]
     assert isinstance(item, BinaryContent)
     assert item.media_type == "application/pdf"
     assert item.data == b"hello"
@@ -323,8 +334,8 @@ def test_metadata_unknown_key_stashes_verbatim() -> None:
 def test_parsed_request_dumps_to_anthropic_body() -> None:
     req = parsed_request_from_alloy(WORKED_EXAMPLE, CLIENT_VIEW)
     assert req.model == "claude-haiku-4-5"
-    assert req.settings.get("max_tokens") == 512  # type: ignore[attr-defined]
-    assert req.settings.get("temperature") == 0.25  # type: ignore[attr-defined]
+    assert req.settings.get("max_tokens") == 512
+    assert req.settings.get("temperature") == 0.25
 
     wire = dispatch_dump_sync(req, provider_type="anthropic")
     body = json.loads(wire)

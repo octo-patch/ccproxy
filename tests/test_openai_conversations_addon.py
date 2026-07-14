@@ -103,6 +103,7 @@ def _make_config(
     provider.auth = MagicMock()
     provider.auth.file_path = credential_path
     cfg.providers = {provider_name: provider}
+    cfg.get_provider.side_effect = lambda name: cfg.providers.get(name)
     oaic_cfg = MagicMock()
     oaic_cfg.warmup_throttle_seconds = warmup_throttle_seconds
     oaic_cfg.sentinel_skew_seconds = sentinel_skew_seconds

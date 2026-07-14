@@ -295,6 +295,7 @@ class Sidecar:
             app=_build_app(),
             log_level="warning",
             lifespan="off",
+            ws="none",
             access_log=False,
             log_config=None,
         )

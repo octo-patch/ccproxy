@@ -14,7 +14,9 @@ let
     (defaults.settings.providers or { })
     // (cfg.settings.providers or { });
   mergedSettings = deepMerged // { inherit providers; };
+  mergedLiteLLMConfig = lib.recursiveUpdate defaults.litellmConfig cfg.litellmConfig;
   ccproxyYaml = yaml.generate "ccproxy.yaml" { ccproxy = mergedSettings; };
+  configYaml = yaml.generate "config.yaml" mergedLiteLLMConfig;
 in
 {
   options.programs.ccproxy = {
@@ -42,12 +44,22 @@ in
         attrset keys deep-merge.
       '';
     };
+
+    litellmConfig = lib.mkOption {
+      type = lib.types.attrs;
+      default = { };
+      description = ''
+        LiteLLM-compatible model configuration written to config.yaml and
+        compiled into ccproxy's native runtime services.
+      '';
+    };
   };
 
   config = lib.mkIf cfg.enable {
     home.packages = [ cfg.package ];
 
     home.file."${cfg.configDir}/ccproxy.yaml".source = ccproxyYaml;
+    home.file."${cfg.configDir}/config.yaml".source = configYaml;
 
     systemd.user.services.ccproxy = {
       Unit = {
@@ -66,7 +78,7 @@ in
         ];
       };
       Install.WantedBy = [ "default.target" ];
-      Unit."X-Restart-Triggers" = [ ccproxyYaml ];
+      Unit."X-Restart-Triggers" = [ ccproxyYaml configYaml ];
     };
   };
 }

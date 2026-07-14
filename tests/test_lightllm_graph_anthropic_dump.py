@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -481,7 +481,7 @@ def test_dump_knob_stamps_last_tool_only(parse: Parse, render: Render) -> None:
             ]
         )
     )
-    parsed.settings["anthropic_cache_tool_definitions"] = "5m"  # type: ignore[typeddict-unknown-key]
+    cast(dict[str, Any], parsed.settings)["anthropic_cache_tool_definitions"] = "5m"
     tools = json.loads(render(parsed))["tools"]
     assert [("cache_control" in t) for t in tools] == [False, False, True]
     assert tools[2]["cache_control"] == {"type": "ephemeral", "ttl": "5m"}
@@ -498,7 +498,7 @@ def test_dump_knob_stamps_last_nondeferred_tool(parse: Parse, render: Render) ->
             ]
         )
     )
-    parsed.settings["anthropic_cache_tool_definitions"] = "1h"  # type: ignore[typeddict-unknown-key]
+    cast(dict[str, Any], parsed.settings)["anthropic_cache_tool_definitions"] = "1h"
     tools = json.loads(render(parsed))["tools"]
     assert [("cache_control" in t) for t in tools] == [False, True, False, False]
     assert tools[1]["cache_control"] == {"type": "ephemeral", "ttl": "1h"}
@@ -514,7 +514,7 @@ def test_dump_knob_all_deferred_emits_no_marker(parse: Parse, render: Render) ->
             ]
         )
     )
-    parsed.settings["anthropic_cache_tool_definitions"] = "5m"  # type: ignore[typeddict-unknown-key]
+    cast(dict[str, Any], parsed.settings)["anthropic_cache_tool_definitions"] = "5m"
     tools = json.loads(render(parsed))["tools"]
     assert all("cache_control" not in t for t in tools)
     assert all(t["defer_loading"] is True for t in tools)
@@ -534,7 +534,7 @@ def test_roundtrip_last_nondeferred_marker_byte_faithful(parse: Parse, render: R
     )
     parsed = parse(body)
     assert "tools" not in parsed.raw_extras
-    assert parsed.settings.get("anthropic_cache_tool_definitions") == "1h"  # type: ignore[typeddict-item]
+    assert cast(dict[str, Any], parsed.settings).get("anthropic_cache_tool_definitions") == "1h"
     tools = json.loads(render(parsed))["tools"]
     assert [_canonicalize_block(t) for t in tools] == [_canonicalize_block(t) for t in body["tools"]]
 

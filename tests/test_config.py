@@ -21,6 +21,7 @@ from ccproxy.config import (
     CCProxyConfig,
     GeminiCapacityFallbackConfig,
     Provider,
+    TransformOverride,
     clear_config_instance,
     get_config,
     get_config_dir,
@@ -38,7 +39,7 @@ def _make_provider(
     """Build a Provider with a CommandAuthSource for tests."""
     return Provider(
         auth=CommandAuthSource(command=command, header=header) if command else None,
-        host=host,
+        base_url=f"https://{host}",
         path=path,
         type=type,
     )
@@ -133,6 +134,10 @@ ccproxy:
 
         finally:
             yaml_path.unlink()
+
+    def test_legacy_transform_destination_host_is_rejected(self) -> None:
+        with pytest.raises(ValueError, match="dest_host"):
+            TransformOverride.model_validate({"dest_host": "api.anthropic.com"})
 
     def test_inspector_transforms_rejected(self) -> None:
         """Test that the old inspector.transforms location fails clearly."""
@@ -466,7 +471,7 @@ class TestResolveAuthToken:
             providers={
                 "prov": Provider(
                     auth=FileAuthSource(file=str(f)),
-                    host="api.example.com",
+                    base_url="https://api.example.com",
                     path="/v1/messages",
                     type="anthropic",
                 ),

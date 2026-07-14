@@ -1,0 +1,19 @@
+model_list:
+  - model_name: local/*
+    litellm_params:
+      model: openai/*
+      api_base: http://127.0.0.1:18081/v1
+      api_key: os.environ/CCPROXY_E2E_LOCAL_KEY
+      temperature: 0.25
+      top_p: 0.9
+  - model_name: local-fixed
+    litellm_params:
+      model: openai/qwen3
+      api_base: http://127.0.0.1:18081/v1
+      api_key: os.environ/CCPROXY_E2E_LOCAL_KEY
+  - model_name: local-claude
+    litellm_params:
+      model: anthropic/claude-local
+      api_base: http://127.0.0.1:18081/v1
+      api_key: os.environ/CCPROXY_E2E_LOCAL_KEY
+      max_tokens: 64

@@ -13,8 +13,10 @@ import logging
 import os
 import re
 import threading
+from copy import deepcopy
 from pathlib import Path
 from typing import Annotated, Any, Literal, cast
+from urllib.parse import urlsplit
 
 import yaml
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, field_validator, model_validator
@@ -46,6 +48,7 @@ __all__ = [
     "McpBufferConfig",
     "McpConfig",
     "McpHttpConfig",
+    "ModelBinding",
     "PplxConfig",
     "PplxSearchConfig",
     "PplxUploadConfig",
@@ -433,9 +436,10 @@ class MitmproxyOptions(BaseModel):
 class Provider(BaseModel):
     """Auth + single destination + provider format identifier.
 
-    Keyed by sentinel suffix in :class:`CCProxyConfig.providers`. When a
-    request arrives with ``x-api-key: sk-ant-oat-ccproxy-{name}``, the
-    matching Provider entry drives token injection and routing.
+    Native entries are keyed by sentinel suffix in
+    :class:`CCProxyConfig.providers`; compiled LiteLLM deployments carry an
+    effective Provider through their model binding. Both drive the same
+    destination, transport, and credential services.
     """
 
     model_config = ConfigDict(extra="ignore", frozen=True)
@@ -445,12 +449,18 @@ class Provider(BaseModel):
     ``None`` means no managed auth — the request must already carry
     credentials."""
 
-    host: str
-    """Destination hostname (e.g. ``api.anthropic.com``)."""
+    base_url: str
+    """Destination base URL, including scheme, optional port, and base path."""
 
     path: str = "/"
     """Destination path. Supports ``{model}`` and ``{action}`` templating
     substituted from glom-read body fields and URL captures at routing time."""
+
+    headers: dict[str, str] = Field(default_factory=dict)
+    """Static headers applied after destination selection."""
+
+    query: dict[str, str] = Field(default_factory=dict)
+    """Static query parameters applied after destination selection."""
 
     type: str
     """Wire-dialect identifier (``anthropic``, ``gemini``, ``deepseek``,
@@ -487,6 +497,16 @@ class Provider(BaseModel):
             return value.value
         return value
 
+    @field_validator("base_url")
+    @classmethod
+    def _validate_base_url(cls, value: str) -> str:
+        parsed = urlsplit(value)
+        if parsed.scheme not in {"http", "https"} or parsed.hostname is None:
+            raise ValueError("provider base_url must be an absolute http(s) URL")
+        if parsed.query or parsed.fragment:
+            raise ValueError("provider base_url cannot contain a query string or fragment")
+        return value.rstrip("/")
+
     @field_validator("auth", mode="before")
     @classmethod
     def _parse_auth(cls, value: Any) -> Any:
@@ -495,6 +515,81 @@ class Provider(BaseModel):
         if value is None:
             return None
         return parse_auth_source(value)
+
+    @property
+    def host(self) -> str:
+        parsed = urlsplit(self.base_url)
+        assert parsed.hostname is not None
+        return parsed.hostname
+
+    @property
+    def scheme(self) -> str:
+        return urlsplit(self.base_url).scheme
+
+    @property
+    def port(self) -> int:
+        parsed = urlsplit(self.base_url)
+        return parsed.port or (443 if parsed.scheme == "https" else 80)
+
+
+class ModelBinding(BaseModel):
+    """Compiled LiteLLM model declaration consumed by native routing."""
+
+    model_config = ConfigDict(arbitrary_types_allowed=True, frozen=True)
+
+    model_name: str
+    upstream_model: str
+    owned_by: str
+    provider_name: str
+    provider: Provider
+    request_defaults: dict[str, Any] = Field(default_factory=dict)
+    model_info: dict[str, Any] = Field(default_factory=dict)
+    source_index: int
+    match_re: re.Pattern[str] = Field(exclude=True, repr=False)
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        model_name: str,
+        upstream_model: str,
+        owned_by: str,
+        provider_name: str,
+        provider: Provider,
+        request_defaults: dict[str, Any],
+        model_info: dict[str, Any],
+        source_index: int,
+    ) -> "ModelBinding":
+        if model_name.count("*") > 1:
+            raise ValueError(f"model_list[{source_index}].model_name supports at most one wildcard")
+        pattern = "^" + re.escape(model_name).replace(r"\*", "(?P<wildcard>.*)") + "$"
+        return cls(
+            model_name=model_name,
+            upstream_model=upstream_model,
+            owned_by=owned_by,
+            provider_name=provider_name,
+            provider=provider,
+            request_defaults=deepcopy(request_defaults),
+            model_info=deepcopy(model_info),
+            source_index=source_index,
+            match_re=re.compile(pattern),
+        )
+
+    def matches(self, model: str) -> bool:
+        return self.match_re.fullmatch(model) is not None
+
+    def resolve_model(self, model: str) -> str:
+        match = self.match_re.fullmatch(model)
+        if match is None:
+            raise ValueError(f"model {model!r} does not match binding {self.model_name!r}")
+        wildcard = match.groupdict().get("wildcard", "")
+        return self.upstream_model.replace("*", wildcard)
+
+    def apply_defaults(self, body: dict[str, Any]) -> dict[str, Any]:
+        merged = deepcopy(body)
+        for key, value in self.request_defaults.items():
+            merged.setdefault(key, deepcopy(value))
+        return merged
 
 
 class TransformOverride(BaseModel):
@@ -506,7 +601,7 @@ class TransformOverride(BaseModel):
     combo, bypassing auth for a specific host, etc.
     """
 
-    model_config = ConfigDict(extra="ignore")
+    model_config = ConfigDict(extra="forbid")
 
     match_host: str | None = None
     """Regex matched against ``pretty_host``, ``Host`` header, and
@@ -528,8 +623,8 @@ class TransformOverride(BaseModel):
     """ccproxy provider name — resolves to a ``CCProxyConfig.providers``
     entry (host/path/auth/format)."""
 
-    dest_host: str | None = None
-    """Raw host override. Bypasses Provider lookup."""
+    dest_base_url: str | None = None
+    """Raw destination base URL. Bypasses Provider endpoint lookup."""
 
     dest_path: str | None = None
     """Raw path override."""
@@ -554,6 +649,13 @@ class TransformOverride(BaseModel):
 
     @model_validator(mode="after")
     def _compile_match_regexes(self) -> "TransformOverride":
+        if self.dest_base_url is not None:
+            parsed = urlsplit(self.dest_base_url)
+            if parsed.scheme not in {"http", "https"} or parsed.hostname is None:
+                raise ValueError("dest_base_url must be an absolute http(s) URL")
+            if parsed.query or parsed.fragment:
+                raise ValueError("dest_base_url cannot contain a query string or fragment")
+            self.dest_base_url = self.dest_base_url.rstrip("/")
         if self.match_host is not None:
             self.match_host_re = re.compile(self.match_host)
         self.match_path_re = re.compile(self.match_path)
@@ -819,11 +921,21 @@ class CCProxyConfig(BaseSettings):
     providers: dict[str, Provider] = Field(default_factory=dict)
     """Provider entries keyed by sentinel suffix."""
 
+    model_bindings: list[ModelBinding] = Field(default_factory=list, exclude=True)
+    """Compiled LiteLLM model declarations in configuration order."""
+
+    deployment_providers: dict[str, Provider] = Field(default_factory=dict, exclude=True)
+    """Effective providers created for LiteLLM deployments with overrides."""
+
+    litellm_diagnostics: list[Any] = Field(default_factory=list, exclude=True)
+    """Compatibility diagnostics emitted while compiling ``config.yaml``."""
+
     # Hook configurations — either a flat list (all inbound) or a dict
     # with ``inbound`` and ``outbound`` keys for two-stage pipeline.
     hooks: dict[str, list[str | dict[str, Any]]] = Field(default_factory=lambda: _default_hooks())
 
     ccproxy_config_path: Path = Field(default_factory=lambda: Path("./ccproxy.yaml"))
+    litellm_config_path: Path = Field(default_factory=lambda: Path("./config.yaml"))
 
     @property
     def resolved_log_file(self) -> Path | None:
@@ -849,7 +961,7 @@ class CCProxyConfig(BaseSettings):
         now-fresh credential file from disk without re-hitting the upstream
         OAuth endpoint.
         """
-        provider_entry = self.providers.get(provider)
+        provider_entry = self.get_provider(provider)
         if provider_entry is None or provider_entry.auth is None:
             logger.warning("No auth configured for provider '%s'", provider)
             return None
@@ -863,23 +975,52 @@ class CCProxyConfig(BaseSettings):
         provider is unknown, has no auth, or its auth source did not
         specify a header (callers default to ``Authorization: Bearer``).
         """
-        provider_entry = self.providers.get(provider)
+        provider_entry = self.get_provider(provider)
         if provider_entry is None or provider_entry.auth is None:
             return None
         return provider_entry.auth.header
 
     def get_auth_extra_headers(self, provider: str) -> dict[str, str]:
         """Return companion auth headers for a provider, if its source exposes any."""
-        provider_entry = self.providers.get(provider)
+        provider_entry = self.get_provider(provider)
         if provider_entry is None or provider_entry.auth is None:
             return {}
         with _get_provider_lock(provider):
             return provider_entry.auth.extra_headers(f"Auth/{provider}")
 
+    def get_provider(self, provider: str) -> Provider | None:
+        """Resolve either a native provider or a compiled deployment provider."""
+        return self.providers.get(provider) or self.deployment_providers.get(provider)
+
+    def resolve_provider_auth(
+        self,
+        provider_name: str,
+        provider: Provider,
+        *,
+        label: str | None = None,
+    ) -> str | None:
+        """Resolve credentials for an effective Provider under a stable lock."""
+        if provider.auth is None:
+            return None
+        auth_label = label or f"Auth/{provider_name}"
+        with _get_provider_lock(provider_name):
+            return provider.auth.resolve(auth_label)
+
     @classmethod
-    def from_yaml(cls, yaml_path: Path, **kwargs: Any) -> "CCProxyConfig":
-        """Load configuration from ccproxy.yaml file."""
-        instance = cls(ccproxy_config_path=yaml_path, **kwargs)
+    def from_yaml(
+        cls,
+        yaml_path: Path,
+        *,
+        litellm_path: Path | None = None,
+        **kwargs: Any,
+    ) -> "CCProxyConfig":
+        """Load ccproxy-native YAML plus its sibling LiteLLM config frontend."""
+        resolved_litellm_path = litellm_path or yaml_path.with_name("config.yaml")
+        instance = cls(
+            ccproxy_config_path=yaml_path,
+            litellm_config_path=resolved_litellm_path,
+            **kwargs,
+        )
 
         if yaml_path.exists():
             with yaml_path.open() as f:
@@ -943,6 +1084,16 @@ class CCProxyConfig(BaseSettings):
                 if mcp_data:
                     instance.mcp = McpConfig(**cast(dict[str, Any], mcp_data))
 
+        if resolved_litellm_path.exists():
+            from ccproxy.litellm_config import load_litellm_config
+
+            frontend = load_litellm_config(resolved_litellm_path, instance.providers)
+            instance.model_bindings = frontend.bindings
+            instance.deployment_providers = frontend.deployment_providers
+            instance.litellm_diagnostics = frontend.diagnostics
+            for diagnostic in frontend.diagnostics:
+                logger.warning("LiteLLM config %s: %s", diagnostic.path, diagnostic.message)
+
         return instance
 
 
@@ -990,11 +1141,15 @@ def get_config() -> CCProxyConfig:
                 logger.info("Using config directory: %s", config_path)
 
                 ccproxy_yaml = config_path / "ccproxy.yaml"
-                if ccproxy_yaml.exists():
-                    logger.info("Loading config from: %s", ccproxy_yaml)
-                    _config_instance = CCProxyConfig.from_yaml(ccproxy_yaml)
+                litellm_yaml = config_path / "config.yaml"
+                if ccproxy_yaml.exists() or litellm_yaml.exists():
+                    logger.info(
+                        "Loading config from: %s",
+                        ", ".join(str(path) for path in (ccproxy_yaml, litellm_yaml) if path.exists()),
+                    )
+                    _config_instance = CCProxyConfig.from_yaml(ccproxy_yaml, litellm_path=litellm_yaml)
                 else:
-                    logger.info("No ccproxy.yaml found, using defaults")
+                    logger.info("No ccproxy.yaml or config.yaml found, using defaults")
                     _config_instance = CCProxyConfig()
 
     return _config_instance

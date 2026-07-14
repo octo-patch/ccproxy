@@ -87,13 +87,13 @@ ccproxy:
         file_path: ~/.claude/.credentials.json
         refresh_path: claudeAiOauth.refreshToken
         type: anthropic_oauth
-      host: api.anthropic.com
+      base_url: https://api.anthropic.com
       path: /v1/messages
       type: anthropic
     codex:
       auth:
         type: codex_oauth
-      host: chatgpt.com
+      base_url: https://chatgpt.com
       path: /backend-api/codex/responses
       type: openai_responses
     deepseek:
@@ -101,7 +101,7 @@ ccproxy:
         command: printenv DEEPSEEK_API_KEY
         header: x-api-key
         type: command
-      host: api.deepseek.com
+      base_url: https://api.deepseek.com
       path: /anthropic/v1/messages
       type: anthropic
     gemini:
@@ -109,7 +109,7 @@ ccproxy:
         client_id: 681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com
         client_secret: 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
         type: google_oauth
-      host: cloudcode-pa.googleapis.com
+      base_url: https://cloudcode-pa.googleapis.com
       path: /v1internal:{action}
       type: gemini
     openai_conversations:
@@ -117,16 +117,16 @@ ccproxy:
         cookie_file: ~/.config/ccproxy/openai-conversations-cookies.txt
         file_path: ~/.config/ccproxy/openai-conversations-credentials.json
         type: openai_conversations
+      base_url: https://chatgpt.com
       fingerprint_profile: chrome136
-      host: chatgpt.com
       path: /backend-api/f/conversation
       type: openai_conversations
     perplexity_pro:
       auth:
         file: ~/.opnix/secrets/perplexity-pro-api-key
         type: file
+      base_url: https://www.perplexity.ai
       fingerprint_profile: chrome131
-      host: www.perplexity.ai
       path: /rest/sse/perplexity_ask
       type: perplexity_pro
   shaping:

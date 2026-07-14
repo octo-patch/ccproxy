@@ -399,7 +399,7 @@ def test_openai_conversations_auth_source_in_provider_auth(tmp_path: Path) -> No
     provider = Provider.model_validate(
         {
             "auth": {"type": "openai_conversations", "file_path": str(creds_path)},
-            "host": "chatgpt.com",
+            "base_url": "https://chatgpt.com",
             "path": "/backend-api/f/conversation",
             "type": "openai_conversations",
         }

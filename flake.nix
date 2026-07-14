@@ -91,6 +91,7 @@
         mkConfig =
           {
             settings ? { },
+            litellmConfig ? { },
             configDir ? ".ccproxy",
           }:
           let
@@ -102,24 +103,25 @@
               (defaultSettings.settings.providers or { })
               // (settings.providers or { });
             mergedSettings = deepMerged // { inherit providers; };
+            mergedLiteLLMConfig = lib.recursiveUpdate defaultSettings.litellmConfig litellmConfig;
             ccproxyYaml = yaml.generate "ccproxy.yaml" { ccproxy = mergedSettings; };
+            configYaml = yaml.generate "config.yaml" mergedLiteLLMConfig;
           in
           {
-            inherit ccproxyYaml;
+            inherit ccproxyYaml configYaml;
 
             shellHook = ''
               mkdir -p "${configDir}"
               ln -sfn ${ccproxyYaml} "${configDir}/ccproxy.yaml"
+              ln -sfn ${configYaml} "${configDir}/config.yaml"
               export CCPROXY_CONFIG_DIR="$PWD/${configDir}"
             '';
           };
 
-        # Bundled template installed at src/ccproxy/templates/ccproxy.yaml and
-        # served by `ccproxy init` to seed a user's first ccproxy.yaml. Built
-        # from nix/defaults.nix as-is (no dev overrides).
-        templateYaml = yaml.generate "ccproxy.yaml" {
+        templateCcproxyYaml = yaml.generate "ccproxy.yaml" {
           ccproxy = defaultSettings.settings;
         };
+        templateConfigYaml = yaml.generate "config.yaml" defaultSettings.litellmConfig;
 
         devConfig = mkConfig {
           settings = {
@@ -143,20 +145,6 @@
             otel = {
               enabled = false;
               endpoint = "http://localhost:4317";
-            };
-            # Dev affordance: route OpenAI-format /v1/chat/completions requests
-            # whose model matches ^claude through the cross-format transform to
-            # the anthropic provider (exercises anthropic_intake + openai_render
-            # end to end through the reverse listener).
-            lightllm = {
-              transforms = [
-                {
-                  match_path = "/v1/chat/completions";
-                  match_model = "^claude";
-                  action = "transform";
-                  dest_provider = "anthropic";
-                }
-              ];
             };
           };
         };
@@ -189,7 +177,8 @@
           ];
           text = ''
             repo_root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
-            install -m 644 ${templateYaml} "$repo_root/src/ccproxy/templates/ccproxy.yaml"
+            install -m 644 ${templateCcproxyYaml} "$repo_root/src/ccproxy/templates/ccproxy.yaml"
+            install -m 644 ${templateConfigYaml} "$repo_root/src/ccproxy/templates/config.yaml"
           '';
         };
         wslArtifactValidator = pkgs.writeShellApplication {
@@ -240,6 +229,7 @@
         apps.sync-ccproxy-template = {
           type = "app";
           program = "${syncCcproxyTemplate}/bin/sync-ccproxy-template";
+          meta.description = "Regenerate ccproxy's packaged YAML templates";
         };
 
         devShells = {
@@ -293,7 +283,9 @@
           };
         };
 
-        lib = { inherit mkConfig; };
+        lib = {
+          inherit defaultSettings mkConfig;
+        };
       });
     in
     {
@@ -302,7 +294,6 @@
       devShells = lib.mapAttrs (_: v: v.devShells) perSystem;
       lib = lib.mapAttrs (_: v: v.lib) perSystem;
 
-      inherit defaultSettings;
       homeModules.ccproxy = import ./nix/module.nix;
       nixosConfigurations.ccproxy-wsl = nixpkgs.lib.nixosSystem {
         system = "x86_64-linux";

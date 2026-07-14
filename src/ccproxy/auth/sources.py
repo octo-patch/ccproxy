@@ -8,9 +8,9 @@ Configuration shape in ``ccproxy.yaml``, nested under each Provider's ``auth``::
           type: command
           command: "jq -r '.access_token' ~/.claude/.credentials.json"
           header: authorization
-        host: api.anthropic.com
+        base_url: https://api.anthropic.com
         path: /v1/messages
-        provider: anthropic
+        type: anthropic
       claude_oauth:
         auth:
           type: anthropic_oauth
@@ -19,9 +19,9 @@ Configuration shape in ``ccproxy.yaml``, nested under each Provider's ``auth``::
           refresh_path: claudeAiOauth.refreshToken
           expiry_path: claudeAiOauth.expiresAt
           header: authorization
-        host: api.anthropic.com
+        base_url: https://api.anthropic.com
         path: /v1/messages
-        provider: anthropic
+        type: anthropic
 
 The discriminated union dispatches via the ``type`` field. Bare command
 strings and dict-without-type forms are resolved via ``parse_auth_source``.
@@ -33,6 +33,7 @@ import base64
 import copy
 import json
 import logging
+import os
 import subprocess
 import time
 from datetime import UTC, datetime
@@ -41,7 +42,7 @@ from typing import Annotated, Any, Literal
 
 import httpx
 from glom import PathAccessError, assign, glom
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
 
 from ccproxy.openai_conversations.credentials import load_credential_state
 from ccproxy.utils import atomic_write_back
@@ -104,16 +105,25 @@ def _run_credential_command(cmd: str, label: str) -> str | None:
 class AuthFields(BaseModel):
     """Fields common to every credential source.
 
-    Just the target header for now. Pydantic config (extra="ignore") allows
-    YAML carrying obsolete keys to load without error during the rename.
+    A credential can be placed in one header or one query parameter.
     """
 
-    model_config = ConfigDict(extra="ignore")
+    model_config = ConfigDict(extra="forbid")
 
     header: str | None = None
     """Target header name (e.g. ``x-api-key``). When set, the resolved token
     is injected as a raw value into this header. ``None`` (default) sends
     ``Authorization: Bearer {token}``."""
+
+    query_param: str | None = None
+    """Target query parameter for credentials that are not header-based.
+    Mutually exclusive with ``header``."""
+
+    @model_validator(mode="after")
+    def _exclusive_placement(self) -> AuthFields:
+        if self.header is not None and self.query_param is not None:
+            raise ValueError("auth.header and auth.query_param are mutually exclusive")
+        return self
 
     def extra_headers(self, label: str = "Auth") -> dict[str, str]:
         """Provider-specific companion auth headers stamped with the token."""
@@ -138,6 +148,34 @@ class FileAuthSource(AuthFields):
 
     def resolve(self, label: str = "Auth") -> str | None:
         return _read_credential_file(self.file, label)
+
+
+class EnvironmentAuthSource(AuthFields):
+    """Token read from an environment variable on every resolution."""
+
+    type: Literal["environment"] = "environment"
+    variable: str
+
+    def resolve(self, label: str = "Auth") -> str | None:
+        value = os.environ.get(self.variable, "").strip()
+        if not value:
+            logger.error("%s environment variable is unset or empty: %s", label, self.variable)
+            return None
+        return value
+
+
+class LiteralAuthSource(AuthFields):
+    """Literal token carried by a LiteLLM-compatible deployment entry."""
+
+    type: Literal["literal"] = "literal"
+    value: SecretStr
+
+    def resolve(self, label: str = "Auth") -> str | None:
+        value = self.value.get_secret_value().strip()
+        if not value:
+            logger.error("%s literal credential is empty", label)
+            return None
+        return value
 
 
 class AuthSource(AuthFields):
@@ -545,6 +583,8 @@ class OpenAIConversationsAuthSource(AuthFields):
 AnyAuthSource = Annotated[
     CommandAuthSource
     | FileAuthSource
+    | EnvironmentAuthSource
+    | LiteralAuthSource
     | AnthropicAuthSource
     | GoogleAuthSource
     | CodexAuthSource
@@ -578,11 +618,16 @@ def parse_auth_source(raw: str | dict[str, Any] | AuthFields) -> AuthFields:
             return OpenAIConversationsAuthSource(**raw)
         if type_ == "file" or ("file" in raw and "type" not in raw):
             return FileAuthSource(**raw)
+        if type_ == "environment" or ("variable" in raw and "type" not in raw):
+            return EnvironmentAuthSource(**raw)
+        if type_ == "literal" or ("value" in raw and "type" not in raw):
+            return LiteralAuthSource(**raw)
         if type_ == "command" or ("command" in raw and "type" not in raw):
             return CommandAuthSource(**raw)
         raise ValueError(
             f"Cannot infer AuthSource type from keys {list(raw.keys())!r}; "
-            f"specify 'type: command|file|anthropic_oauth|google_oauth|codex_oauth|openai_conversations'",
+            "specify 'type: command|file|environment|literal|anthropic_oauth|"
+            "google_oauth|codex_oauth|openai_conversations'",
         )
     raise TypeError(f"Unsupported auth entry: {type(raw).__name__}")
 

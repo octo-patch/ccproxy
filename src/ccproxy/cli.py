@@ -321,6 +321,7 @@ def init_config(config_dir: Path, force: bool = False) -> None:
 
     template_files = [
         "ccproxy.yaml",
+        "config.yaml",
     ]
 
     installed = 0
@@ -342,7 +343,8 @@ def init_config(config_dir: Path, force: bool = False) -> None:
         print(f"\nConfiguration installed to: {config_dir}")
         print("\nNext steps:")
         print(f"  1. Edit {config_dir}/ccproxy.yaml")
-        print("  2. Start with: ccproxy start")
+        print(f"  2. Edit {config_dir}/config.yaml")
+        print("  3. Start with: ccproxy start")
     else:
         print(f"\nNothing to install. Config files already exist in {config_dir}.")
 
@@ -433,9 +435,9 @@ def run_with_proxy(
     # deferred: heavy inspector chain
     from ccproxy.config import get_config
 
-    ccproxy_config_path = config_dir / "ccproxy.yaml"
-    if not ccproxy_config_path.exists():
-        print(f"Error: Configuration not found at {ccproxy_config_path}", file=sys.stderr)
+    config_paths = (config_dir / "ccproxy.yaml", config_dir / "config.yaml")
+    if not any(path.exists() for path in config_paths):
+        print(f"Error: Configuration not found in {config_dir}", file=sys.stderr)
         print("Run 'ccproxy init' first to set up configuration.", file=sys.stderr)
         sys.exit(1)
 
@@ -745,6 +747,9 @@ def show_status(
     config_paths: dict[str, str] = {}
     if ccproxy_config.exists():
         config_paths["ccproxy.yaml"] = str(ccproxy_config)
+    litellm_config = config_dir / "config.yaml"
+    if litellm_config.exists():
+        config_paths["config.yaml"] = str(litellm_config)
 
     proxy_url = f"http://{host}:{main_port}"
 

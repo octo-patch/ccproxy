@@ -1,3 +1,10 @@
+let
+  perplexityModels = builtins.fromJSON (builtins.readFile ../src/ccproxy/specs/perplexity_models.json);
+  perplexityModelBindings = map (model: {
+    model_name = model.id;
+    litellm_params.model = "perplexity_pro/${model.id}";
+  }) perplexityModels;
+in
 {
   settings = {
     host = "127.0.0.1";
@@ -13,7 +20,7 @@
           refresh_path = "claudeAiOauth.refreshToken";
           expiry_path = "claudeAiOauth.expiresAt";
         };
-        host = "api.anthropic.com";
+        base_url = "https://api.anthropic.com";
         path = "/v1/messages";
         type = "anthropic";
       };
@@ -23,7 +30,7 @@
           client_id = "681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com";
           client_secret = "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";
         };
-        host = "cloudcode-pa.googleapis.com";
+        base_url = "https://cloudcode-pa.googleapis.com";
         path = "/v1internal:{action}";
         type = "gemini";
       };
@@ -31,7 +38,7 @@
         auth = {
           type = "codex_oauth";
         };
-        host = "chatgpt.com";
+        base_url = "https://chatgpt.com";
         path = "/backend-api/codex/responses";
         type = "openai_responses";
       };
@@ -41,7 +48,7 @@
           command = "printenv DEEPSEEK_API_KEY";
           header = "x-api-key";
         };
-        host = "api.deepseek.com";
+        base_url = "https://api.deepseek.com";
         path = "/anthropic/v1/messages";
         type = "anthropic";
       };
@@ -50,7 +57,7 @@
           type = "file";
           file = "~/.opnix/secrets/perplexity-pro-api-key";
         };
-        host = "www.perplexity.ai";
+        base_url = "https://www.perplexity.ai";
         path = "/rest/sse/perplexity_ask";
         type = "perplexity_pro";
         fingerprint_profile = "chrome131";
@@ -66,7 +73,7 @@
           file_path = "~/.config/ccproxy/openai-conversations-credentials.json";
           cookie_file = "~/.config/ccproxy/openai-conversations-cookies.txt";
         };
-        host = "chatgpt.com";
+        base_url = "https://chatgpt.com";
         path = "/backend-api/f/conversation";
         type = "openai_conversations";
         fingerprint_profile = "chrome136";
@@ -317,5 +324,90 @@
       port = 8083;
       cert_dir = "~/.config/ccproxy";
     };
+  };
+
+  litellmConfig = {
+    model_list = [
+      {
+        model_name = "default";
+        litellm_params.model = "claude-sonnet-4-6";
+      }
+      {
+        model_name = "claude-opus-4-6";
+        litellm_params.model = "anthropic/claude-opus-4-6";
+      }
+      {
+        model_name = "claude-sonnet-4-6";
+        litellm_params.model = "anthropic/claude-sonnet-4-6";
+      }
+      {
+        model_name = "claude-sonnet-4-5-20250929";
+        litellm_params.model = "anthropic/claude-sonnet-4-5-20250929";
+      }
+      {
+        model_name = "claude-opus-4-5-20251101";
+        litellm_params.model = "anthropic/claude-opus-4-5-20251101";
+      }
+      {
+        model_name = "claude-haiku-4-5-20251001";
+        litellm_params.model = "anthropic/claude-haiku-4-5-20251001";
+      }
+      {
+        model_name = "claude-3-5-haiku-20241022";
+        litellm_params.model = "anthropic/claude-3-5-haiku-20241022";
+      }
+      {
+        model_name = "gemini-3.1-pro-preview";
+        litellm_params.model = "gemini/gemini-3.1-pro-preview";
+      }
+      {
+        model_name = "gemini-3-pro-preview";
+        litellm_params.model = "gemini/gemini-3-pro-preview";
+      }
+      {
+        model_name = "gemini-2.5-pro";
+        litellm_params.model = "gemini/gemini-2.5-pro";
+      }
+      {
+        model_name = "gemini-3-flash-preview";
+        litellm_params.model = "gemini/gemini-3-flash-preview";
+      }
+      {
+        model_name = "gemini-3.1-flash-lite-preview";
+        litellm_params.model = "gemini/gemini-3.1-flash-lite-preview";
+      }
+      {
+        model_name = "gemini-2.5-flash";
+        litellm_params.model = "gemini/gemini-2.5-flash";
+      }
+      {
+        model_name = "gemini-2.5-flash-lite";
+        litellm_params.model = "gemini/gemini-2.5-flash-lite";
+      }
+      {
+        model_name = "gemini-2.0-flash";
+        litellm_params.model = "gemini/gemini-2.0-flash";
+      }
+      {
+        model_name = "gemini-2.0-flash-lite";
+        litellm_params.model = "gemini/gemini-2.0-flash-lite";
+      }
+      {
+        model_name = "gemini-3-pro-image-preview";
+        litellm_params.model = "gemini/gemini-3-pro-image-preview";
+      }
+      {
+        model_name = "gemini-3.1-flash-image-preview";
+        litellm_params.model = "gemini/gemini-3.1-flash-image-preview";
+      }
+      {
+        model_name = "gemini-2.5-flash-image";
+        litellm_params.model = "gemini/gemini-2.5-flash-image";
+      }
+      {
+        model_name = "deepseek-v4";
+        litellm_params.model = "deepseek/deepseek-v4";
+      }
+    ] ++ perplexityModelBindings;
   };
 }

@@ -109,7 +109,7 @@ def _config_params() -> dict[str, Any]:
 
 
 def _provider_is_anthropic(ctx: Context) -> bool:
-    provider = get_config().providers.get(ctx.metadata.auth_provider)
+    provider = get_config().get_provider(ctx.metadata.auth_provider)
     return provider is not None and provider.type in _ANTHROPIC_COMPATIBLE
 
 

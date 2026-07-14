@@ -6,8 +6,8 @@ forwarding upstream. Registered as a REQUEST route at higher priority than
 ``/v1/models`` to a provider that doesn't exist (the placeholder reverse-proxy
 backend).
 
-``?refresh=true`` triggers a live merge against configured providers'
-upstream ``/v1/models``; otherwise the static catalog is returned instantly.
+``?refresh=true`` expands wildcard bindings through their configured upstream
+``/models`` endpoints; otherwise concrete configured aliases are returned.
 """
 
 from __future__ import annotations

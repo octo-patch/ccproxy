@@ -1,22 +1,22 @@
-"""Transform route — sentinel-driven Provider routing + optional override layer.
+"""Transform route — model bindings, sentinel Providers, and explicit overrides.
 
 Routing precedence on every inbound request:
 
     1. ``lightllm.transforms`` — first regex-matched override wins.
-    2. ccproxy metadata ``auth_provider`` — set by ``inject_auth`` when a
+    2. Compiled LiteLLM model bindings — first configured pattern wins.
+    3. ccproxy metadata ``auth_provider`` — set by ``inject_auth`` when a
        sentinel key resolved. Looks up :class:`CCProxyConfig.providers`.
-    3. None — :class:`mitmproxy.proxy.mode_specs.ReverseMode` flows return
+    4. None — :class:`mitmproxy.proxy.mode_specs.ReverseMode` flows return
        OpenAI-shape 501; WireGuard flows pass through unchanged.
 
 Three actions:
 
     - ``transform``: rewrite the request body via lightllm dispatch (cross-format).
-    - ``redirect``: rewrite destination only, preserve body (same-format).
+    - ``redirect``: rewrite destination and selected model without wire conversion.
     - ``passthrough``: forward unchanged.
 
-For sentinel-resolved Provider targets, the action is auto-derived: when
-``_detect_incoming_format`` matches ``provider.provider.value`` it's redirect,
-otherwise transform.
+For sentinel-resolved Provider targets, the action is auto-derived from the
+incoming wire format and the Provider's adapter type.
 """
 
 from __future__ import annotations
@@ -25,14 +25,15 @@ import json
 import logging
 import re
 from typing import TYPE_CHECKING, Literal
+from urllib.parse import urlsplit
 
 from glom import glom
 from mitmproxy.connection import Server
 from mitmproxy.proxy.mode_specs import ReverseMode
 
-from ccproxy.config import Provider, TransformOverride, get_config
+from ccproxy.config import ModelBinding, Provider, TransformOverride, get_config
 from ccproxy.flows.store import TransformMeta
-from ccproxy.lightllm.graph import _ANTHROPIC_COMPATIBLE
+from ccproxy.lightllm.graph import _ANTHROPIC_COMPATIBLE, _GOOGLE_COMPATIBLE
 from ccproxy.pipeline.context import metadata_from_flow
 
 if TYPE_CHECKING:
@@ -56,7 +57,7 @@ _FORMAT_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
 )
 """URL-prefix patterns ccproxy recognises as a known wire format."""
 
-_GEMINI_FORMATS: frozenset[str] = frozenset({"gemini", "vertex_ai", "vertex_ai_beta"})
+_GEMINI_FORMATS = _GOOGLE_COMPATIBLE
 
 
 def _openai_error(message: str, *, error_type: str, code: int) -> bytes:
@@ -79,6 +80,14 @@ def _detect_incoming_format(path: str) -> str | None:
         if pattern.search(path):
             return name
     return None
+
+
+def _wire_formats_match(incoming: str | None, provider_type: str) -> bool:
+    if incoming == "anthropic":
+        return provider_type in _ANTHROPIC_COMPATIBLE
+    if incoming == "gemini":
+        return provider_type in _GOOGLE_COMPATIBLE
+    return incoming == provider_type
 
 
 def _flow_hosts(flow: HTTPFlow) -> set[str]:
@@ -119,7 +128,7 @@ def _apply_path_template(template: str, *, model: str, action: str | None) -> st
 def _resolve_transform_target(
     flow: HTTPFlow,
     body: dict[str, object] | None = None,
-) -> Provider | TransformOverride | None:
+) -> Provider | TransformOverride | ModelBinding | None:
     """Pick the routing target. First match wins; None means no signal."""
     config = get_config()
     request_model = str(glom(body or {}, "model", default=""))
@@ -133,9 +142,13 @@ def _resolve_transform_target(
             continue
         return rule
 
+    for binding in config.model_bindings:
+        if binding.matches(request_model):
+            return binding
+
     auth_provider = metadata_from_flow(flow).auth_provider
     if auth_provider:
-        return config.providers.get(auth_provider)
+        return config.get_provider(auth_provider)
 
     return None
 
@@ -164,12 +177,55 @@ def _record_transform_meta(
     )
 
 
-def _apply_destination(flow: HTTPFlow, host: str, path: str) -> None:
+def _apply_destination(flow: HTTPFlow, url: str) -> None:
+    parsed = urlsplit(url)
+    host = parsed.hostname
+    if host is None:
+        raise ValueError(f"destination URL has no hostname: {url!r}")
+    scheme = parsed.scheme or "https"
+    port = parsed.port or (443 if scheme == "https" else 80)
     flow.request.host = host
-    flow.request.port = 443
-    flow.request.scheme = "https"
-    flow.request.path = path
-    flow.server_conn = Server(address=(host, 443))
+    flow.request.port = port
+    flow.request.scheme = scheme
+    flow.request.path = parsed.path or "/"
+    if parsed.query:
+        flow.request.path = f"{flow.request.path}?{parsed.query}"
+    flow.server_conn = Server(address=(host, port))
+
+
+def _endpoint_url(base_url: str, path: str) -> str:
+    if not path:
+        return base_url.rstrip("/")
+    return f"{base_url.rstrip('/')}/{path.lstrip('/')}"
+
+
+def _provider_for_target(
+    flow: HTTPFlow,
+    target: Provider | TransformOverride | ModelBinding,
+) -> tuple[str | None, Provider | None]:
+    config = get_config()
+    if isinstance(target, ModelBinding):
+        return target.provider_name, target.provider
+    if isinstance(target, Provider):
+        provider_name = metadata_from_flow(flow).auth_provider or target.type
+        return provider_name, target
+    if target.dest_provider is None:
+        return None, None
+    return target.dest_provider, config.get_provider(target.dest_provider)
+
+
+def _apply_provider_request(
+    flow: HTTPFlow,
+    *,
+    provider_name: str | None,
+    provider: Provider | None,
+) -> None:
+    if provider_name is None or provider is None:
+        return
+    from ccproxy.hooks.inject_auth import inject_provider_auth
+    from ccproxy.pipeline.context import Context
+
+    inject_provider_auth(Context.from_flow(flow), provider_name, provider)
 
 
 def _handle_passthrough(flow: HTTPFlow) -> None:
@@ -183,31 +239,34 @@ def _handle_passthrough(flow: HTTPFlow) -> None:
 
 def _handle_redirect(
     flow: HTTPFlow,
-    target: Provider | TransformOverride,
+    target: Provider | TransformOverride | ModelBinding,
     body: dict[str, object],
 ) -> None:
-    """Same-format redirect: rewrite host/path, preserve body."""
+    """Same-format redirect: rewrite destination and selected model."""
     is_streaming = bool(glom(body, "stream", default=False))
     action = _action_from_path(flow.request.path)
-    config = get_config()
+    provider_name, bound = _provider_for_target(flow, target)
 
-    host: str
+    base_url: str
     path: str
-    if isinstance(target, Provider):
+    if isinstance(target, ModelBinding):
+        provider_str = target.provider.type
+        model = target.resolve_model(_model_for_routing(body, flow.request.path))
+        base_url = target.provider.base_url
+        path = _apply_path_template(target.provider.path, model=model, action=action)
+    elif isinstance(target, Provider):
         provider_str = target.type
         model = _model_for_routing(body, flow.request.path)
-        host = target.host
+        base_url = target.base_url
         path = _apply_path_template(target.path, model=model, action=action)
-        api_key: str | None = None  # auth already stamped by inject_auth
     else:
-        bound = config.providers.get(target.dest_provider) if target.dest_provider else None
-        resolved_host = target.dest_host or (bound.host if bound else None)
-        if resolved_host is None:
+        resolved_base_url = target.dest_base_url or (bound.base_url if bound else None)
+        if resolved_base_url is None:
             logger.error(
-                "redirect override missing dest_host and no resolvable dest_provider; passthrough",
+                "redirect override missing dest_base_url and no resolvable dest_provider; passthrough",
             )
             return
-        host = resolved_host
+        base_url = resolved_base_url
         provider_str = (bound.type if bound else target.dest_provider) or ""
         model = target.dest_model or _model_for_routing(body, flow.request.path)
         if target.dest_path:
@@ -216,7 +275,10 @@ def _handle_redirect(
             path = _apply_path_template(bound.path, model=model, action=action)
         else:
             path = flow.request.path
-        api_key = config.resolve_auth_token(target.dest_provider) if target.dest_provider else None
+
+    if body.get("model") != model and model:
+        body = {**body, "model": model}
+        flow.request.content = json.dumps(body).encode()
 
     _record_transform_meta(
         flow,
@@ -227,12 +289,12 @@ def _handle_redirect(
         mode="redirect",
     )
 
-    _apply_destination(flow, host, path)
-    if api_key:
-        flow.request.headers["authorization"] = f"Bearer {api_key}"
+    url = _endpoint_url(base_url, path)
+    _apply_destination(flow, url)
+    _apply_provider_request(flow, provider_name=provider_name, provider=bound)
 
-    flow.comment = f"redirect → {provider_str}/{host}"
-    logger.info("redirect: → %s %s%s", provider_str, host, path)
+    flow.comment = f"redirect → {provider_str}/{urlsplit(url).netloc}"
+    logger.info("redirect: → %s %s", provider_str, url.split("?")[0])
 
 
 def _action_for_transform(provider_type: str, *, is_streaming: bool) -> str | None:
@@ -250,7 +312,7 @@ def _action_for_transform(provider_type: str, *, is_streaming: bool) -> str | No
 
 def _build_upstream_url_and_headers(
     *,
-    target: Provider | TransformOverride,
+    target: Provider | TransformOverride | ModelBinding,
     bound: Provider | None,
     model: str,
     provider_type: str,
@@ -258,43 +320,46 @@ def _build_upstream_url_and_headers(
 ) -> tuple[str, dict[str, str]]:
     """Build the upstream ``(url, headers)`` for a transform-mode dispatch.
 
-    Pulls host/path from the resolved target (``Provider`` or
-    ``TransformOverride`` with optional ``dest_host`` / ``dest_path`` overrides
-    falling back to the bound Provider). Auth headers are already stamped by
-    the ``inject_auth`` inbound hook — this builder only adds the
-    Anthropic-compat ``anthropic-version`` floor.
+    Pulls base URL/path from the resolved target (``Provider`` or
+    ``TransformOverride`` with optional ``dest_base_url`` / ``dest_path`` overrides
+    falling back to the bound Provider). Credential placement happens after
+    destination selection; this builder only adds the Anthropic-compat
+    ``anthropic-version`` floor.
     """
     action = _action_for_transform(provider_type, is_streaming=is_streaming)
 
-    host: str
+    base_url: str
     path_template: str
-    if isinstance(target, Provider):
-        host = target.host
+    if isinstance(target, ModelBinding):
+        base_url = target.provider.base_url
+        path_template = target.provider.path
+    elif isinstance(target, Provider):
+        base_url = target.base_url
         path_template = target.path
     else:
-        resolved_host = target.dest_host or (bound.host if bound is not None else None)
-        if resolved_host is None:
+        resolved_base_url = target.dest_base_url or (bound.base_url if bound is not None else None)
+        if resolved_base_url is None:
             raise ValueError(
-                "transform override missing dest_host and no resolvable dest_provider",
+                "transform override missing dest_base_url and no resolvable dest_provider",
             )
-        host = resolved_host
+        base_url = resolved_base_url
         path_template = target.dest_path or (bound.path if bound is not None else "/")
 
     path = _apply_path_template(path_template, model=model, action=action)
-    url = f"https://{host}{path}"
+    url = _endpoint_url(base_url, path)
 
     headers: dict[str, str] = {}
     if provider_type in _ANTHROPIC_COMPATIBLE:
         # Defensive floor for cross-format flows targeting an Anthropic upstream
-        # where no Anthropic shape replay runs. inject_auth has already stamped
-        # auth; the shape hook adds the canonical Claude headers when present.
+        # where no Anthropic shape replay runs. The shape hook adds the
+        # canonical Claude headers when present.
         headers["anthropic-version"] = "2023-06-01"
     return url, headers
 
 
 def _handle_transform(
     flow: HTTPFlow,
-    target: Provider | TransformOverride,
+    target: Provider | TransformOverride | ModelBinding,
     body: dict[str, object],
 ) -> None:
     """Cross-format transform: render the body via ``dispatch_dump_sync`` and
@@ -303,7 +368,7 @@ def _handle_transform(
     All providers (Anthropic-compatible, OpenAI, Gemini-family, Perplexity Pro)
     route through pydantic-ai's IR via :class:`~ccproxy.pipeline.context.Context.parse_sync`
     + :func:`dispatch_dump_sync`. URL + headers come from the resolved
-    :class:`Provider` config (host/path with ``{model}`` / ``{action}`` templating)
+    :class:`Provider` config (base URL/path with ``{model}`` / ``{action}`` templating)
     or the :class:`TransformOverride` overrides.
     """
     # deferred: avoid pulling pydantic-ai at module import time
@@ -312,9 +377,14 @@ def _handle_transform(
 
     is_streaming = bool(glom(body, "stream", default=False))
     config = get_config()
+    provider_name, resolved_provider = _provider_for_target(flow, target)
 
     bound: Provider | None
-    if isinstance(target, Provider):
+    if isinstance(target, ModelBinding):
+        provider_str = target.provider.type
+        model = target.resolve_model(_model_for_routing(body, flow.request.path))
+        bound = target.provider
+    elif isinstance(target, Provider):
         provider_str = target.type
         model = _model_for_routing(body, flow.request.path)
         bound = target
@@ -322,7 +392,7 @@ def _handle_transform(
         if target.dest_provider is None:
             logger.error("transform override missing dest_provider; passthrough")
             return
-        bound = config.providers.get(target.dest_provider)
+        bound = config.get_provider(target.dest_provider)
         if bound is None:
             logger.error(
                 "transform override dest_provider '%s' not in config.providers; passthrough",
@@ -362,19 +432,15 @@ def _handle_transform(
         mode="transform",
     )
 
-    from urllib.parse import urlparse
-
-    parsed_url = urlparse(url)
-    host = parsed_url.hostname or flow.request.host
-    port = parsed_url.port or (443 if parsed_url.scheme == "https" else 80)
-    flow.request.host = host
-    flow.request.port = port
-    flow.request.scheme = parsed_url.scheme or "https"
-    flow.request.path = parsed_url.path or "/"
-    flow.server_conn = Server(address=(host, port))
+    _apply_destination(flow, url)
     for k, v in headers.items():
         flow.request.headers[k] = v
     flow.request.content = new_body
+    _apply_provider_request(
+        flow,
+        provider_name=provider_name,
+        provider=resolved_provider,
+    )
 
     incoming_model = str(glom(body, "model", default="?"))
     flow.comment = f"{incoming_model} → {provider_str}/{model}"
@@ -418,6 +484,10 @@ def register_transform_routes(router: InspectorRouter) -> None:
                 )
             return
 
+        if isinstance(target, ModelBinding) and is_reverse:
+            body = target.apply_defaults(body)
+            flow.request.content = json.dumps(body).encode()
+
         action = target.action if isinstance(target, TransformOverride) else None
 
         if action == "passthrough":
@@ -425,9 +495,10 @@ def register_transform_routes(router: InspectorRouter) -> None:
         elif not is_reverse:
             # WireGuard flows already encode their destination.
             _handle_passthrough(flow)
-        elif isinstance(target, Provider):
+        elif isinstance(target, Provider | ModelBinding):
             incoming = _detect_incoming_format(flow.request.path)
-            if incoming == target.type:
+            provider_type = target.provider.type if isinstance(target, ModelBinding) else target.type
+            if _wire_formats_match(incoming, provider_type):
                 _handle_redirect(flow, target, body)
             else:
                 _handle_transform(flow, target, body)
