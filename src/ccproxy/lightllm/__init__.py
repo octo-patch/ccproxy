@@ -7,6 +7,11 @@ public entry points for the rest of ccproxy.
 """
 
 from ccproxy.lightllm.adapters import LLMRenderInput
+from ccproxy.lightllm.cache_policy import (
+    CacheBudgetReport,
+    CachePolicy,
+    apply_cache_policy,
+)
 from ccproxy.lightllm.graph import (
     UnsupportedUpstreamError,
     dispatch_dump,
@@ -21,11 +26,14 @@ from ccproxy.lightllm.pplx import (
 )
 
 __all__ = [
+    "CacheBudgetReport",
+    "CachePolicy",
     "InboundFormat",
     "LLMRenderInput",
     "LightLLMError",
     "PerplexityError",
     "UnsupportedUpstreamError",
+    "apply_cache_policy",
     "dispatch_dump",
     "dispatch_dump_sync",
     "dispatch_intake",

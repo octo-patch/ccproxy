@@ -58,6 +58,7 @@ from pydantic_ai.messages import ModelResponseStreamEvent
 from pydantic_graph import GraphBuilder, StepContext
 
 import ccproxy.lightllm.graph._subgraph_patch  # noqa: F401  — installs add_subgraph
+from ccproxy.lightllm.graph._base import IntakeState, ResponseIntakeFSM
 from ccproxy.lightllm.pplx_steps import _KNOWN_INTENDED_USAGES, render_step
 
 if TYPE_CHECKING:
@@ -112,14 +113,15 @@ class _FeedDone:
 
 
 @dataclass
-class _PerplexityIntakeState:
+class _PerplexityIntakeState(IntakeState[Any]):
     """FSM state for one Perplexity intake graph run.
 
-    The ``events_queue`` is the queue of dispatch envelopes drained from the
-    SSE buffer *before* the outer graph run starts; the outer router pops
-    from it. The ``out_events`` list accumulates
-    :class:`ModelResponseStreamEvent` instances; the terminal outer step
-    drains and returns it.
+    Shared queue/funnel/telemetry slots come from :class:`IntakeState`. The
+    funnel slots are present for interface parity but stay inert: Perplexity's
+    SSE carries no per-request token usage (only subscription quota, exposed
+    via the ``pplx_usage`` MCP tool), and thread identifiers / step metadata
+    are surfaced through the dedicated pplx machinery (``pplx_addon`` /
+    ``pplx_steps``) rather than the generic ``raw_extras`` bag.
 
     The streaming state fields (``answer_seen``, ``reasoning_seen``, ``ids``,
     etc.) persist across feed calls so prefix-diffing and identifier capture
@@ -129,7 +131,6 @@ class _PerplexityIntakeState:
     :func:`flush_event_deltas`.
     """
 
-    parts_manager: ModelResponsePartsManager
     answer_seen: str = ""
     """Cumulative answer text seen so far — for prefix-diffing."""
 
@@ -147,16 +148,6 @@ class _PerplexityIntakeState:
 
     logged_unknown_intended_usages: set[str] = field(default_factory=set)
     """Per-stream dedup for the DEBUG log of unknown ``intended_usage`` values."""
-
-    events_queue: deque[Any] = field(default_factory=deque)
-    out_events: list[ModelResponseStreamEvent] = field(default_factory=list)
-
-    # ── Telemetry (never-silently-drop diagnostics) ───────────────────────────
-    frames_seen: int = 0
-    """Total parsed SSE event envelopes drained from the wire (across all feed calls)."""
-
-    emitted_events: int = 0
-    """Total IR ``ModelResponseStreamEvent`` instances emitted (across all feed calls)."""
 
     # ── Per-event scratch (reset by flush_event_deltas) ────────────────────
 
@@ -603,7 +594,7 @@ _intake_graph = _g.build()
 # ── Public class ───────────────────────────────────────────────────────────
 
 
-class PerplexityResponseIntakeFSM:
+class PerplexityResponseIntakeFSM(ResponseIntakeFSM[_PerplexityIntakeState]):
     """Async pydantic-graph-driven Perplexity Pro SSE intake.
 
     Behavioral twin of
@@ -617,39 +608,23 @@ class PerplexityResponseIntakeFSM:
     """
 
     name = "perplexity_pro"
+    _graph = _intake_graph
 
-    def __init__(self, *, model: str, request_params: ModelRequestParameters) -> None:
-        self._model = model
-        self._request_params = request_params
-        self._sse_buffer = bytearray()
-        self.upstream_raw_bytes = bytearray()
-        self._state = _PerplexityIntakeState(
+    def _initial_state(self, *, model: str, request_params: ModelRequestParameters) -> _PerplexityIntakeState:
+        del model  # Perplexity tracks no wire-updated model slug on state.
+        return _PerplexityIntakeState(
             parts_manager=ModelResponsePartsManager(model_request_parameters=request_params),
         )
 
-    @property
-    def parts_manager(self) -> ModelResponsePartsManager:
-        """Expose the underlying parts manager for tests and downstream renderers."""
-        return self._state.parts_manager
+    def _drain_events(self) -> Iterator[_PerplexityEventEnvelope]:
+        """Wrap each complete SSE frame's JSON payload into a dispatch envelope.
 
-    @property
-    def state(self) -> _PerplexityIntakeState:
-        """Expose the FSM state for tests reaching for identifier capture, seen-uuids, etc."""
-        return self._state
-
-    async def feed(self, data: bytes) -> list[ModelResponseStreamEvent]:
-        """Buffer bytes, frame SSE events, drive the FSM, return emitted IR events."""
-        if not data:
-            return []
-        self.upstream_raw_bytes.extend(data)
-        self._sse_buffer.extend(data)
-        for envelope in self._drain_sse_envelopes():
-            self._state.events_queue.append(envelope)
-            self._state.frames_seen += 1
-        if not self._state.events_queue:
-            return []
-        result = await _intake_graph.run(state=self._state)
-        return result
+        Non-JSON payloads and ``[DONE]`` sentinels are skipped silently.
+        """
+        for frame in self._split_sse_frames():
+            event_dict = _parse_frame(frame)
+            if event_dict is not None:
+                yield _PerplexityEventEnvelope(event=event_dict)
 
     async def close(self) -> list[ModelResponseStreamEvent]:
         """Stream end. No trailing events required — parts_manager keeps state.
@@ -667,28 +642,6 @@ class PerplexityResponseIntakeFSM:
                 sorted(s.ids.keys()),
             )
         return []
-
-    def _drain_sse_envelopes(self) -> Iterator[_PerplexityEventEnvelope]:
-        """Frame SSE events from ``self._sse_buffer``; wrap each into a dispatch envelope.
-
-        Handles both ``\\r\\n\\r\\n`` (industry standard) and ``\\n\\n`` (some servers)
-        separators; partial frames remain buffered for the next ``feed`` call.
-        Non-JSON payloads and ``[DONE]`` sentinels are skipped silently.
-        """
-        while True:
-            crlf = self._sse_buffer.find(b"\r\n\r\n")
-            lf = self._sse_buffer.find(b"\n\n")
-            if crlf == -1 and lf == -1:
-                return
-            if crlf != -1 and (lf == -1 or crlf < lf):
-                sep_idx, sep_len = crlf, 4
-            else:
-                sep_idx, sep_len = lf, 2
-            frame = bytes(self._sse_buffer[:sep_idx])
-            del self._sse_buffer[: sep_idx + sep_len]
-            event_dict = _parse_frame(frame)
-            if event_dict is not None:
-                yield _PerplexityEventEnvelope(event=event_dict)
 
 
 def _parse_frame(frame: bytes) -> dict[str, Any] | None:

@@ -33,9 +33,9 @@ import json
 import logging
 import time
 import uuid
-from collections import deque
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, cast
 
 from pydantic_ai.messages import (
     FinalResultEvent,
@@ -55,6 +55,11 @@ from pydantic_ai.messages import (
 from pydantic_graph import GraphBuilder, StepContext, TypeExpression
 
 import ccproxy.lightllm.graph._subgraph_patch  # noqa: F401  -- installs GraphBuilder.add_subgraph
+from ccproxy.lightllm.graph import _usage
+from ccproxy.lightllm.graph._base import RenderState, ResponseRenderFSM
+
+if TYPE_CHECKING:
+    from pydantic_ai.usage import RequestUsage
 
 logger = logging.getLogger(__name__)
 
@@ -127,17 +132,14 @@ class _OpenItemState:
 
 
 @dataclass
-class _OpenAIResponsesRenderState:
+class _OpenAIResponsesRenderState(RenderState):
     """FSM state for one Responses render graph run.
 
-    Persists across :meth:`render` calls so the stream-level lifecycle
-    (sequence_number monotonicity, item open/close state, response_id)
-    stays consistent. ``pending_events`` holds the single
-    :class:`ModelResponseStreamEvent` pushed by :meth:`render` before
-    each graph run; the FSM router pops from it. ``out`` accumulates
-    SSE bytes emitted by handler steps. ``current_ir_index`` and
-    ``current_delta`` are transient scratch fields written by the
-    inner-subgraph open steps.
+    Shared queue/output/telemetry slots come from :class:`RenderState`. The
+    remaining fields persist across :meth:`render` calls so the stream-level
+    lifecycle (sequence_number monotonicity, item open/close state,
+    response_id) stays consistent. ``current_ir_index`` is a transient
+    scratch field written by the inner-subgraph open steps.
     """
 
     response_id: str
@@ -145,9 +147,6 @@ class _OpenAIResponsesRenderState:
 
     created_at: int
     """Unix seconds — stamped in the prelude snapshot."""
-
-    model: str
-    """Model slug — stamped in the prelude snapshot."""
 
     sequence_number: int = 0
     """Monotonic per-event counter, reset to 0 on construction."""
@@ -169,18 +168,6 @@ class _OpenAIResponsesRenderState:
 
     current_ir_index: int = 0
     """Transient: the IR event index, stashed by the inner-subgraph open step."""
-
-    pending_events: deque[ModelResponseStreamEvent] = field(default_factory=deque)
-    """Single-event queue popped by the FSM router."""
-
-    out: bytearray = field(default_factory=bytearray)
-    """Accumulated SSE wire bytes; drained by the terminal step."""
-
-    events_received: int = 0
-    """Telemetry: total IR events dispatched through the render FSM (across all render calls)."""
-
-    bytes_emitted: int = 0
-    """Telemetry: total SSE bytes emitted by render steps (excludes the close postlude)."""
 
 
 class _RenderDone:
@@ -883,7 +870,7 @@ _render_graph = _g.build()
 # ── Public class ───────────────────────────────────────────────────────────
 
 
-class OpenAIResponsesRenderFSM:
+class OpenAIResponsesRenderFSM(ResponseRenderFSM[_OpenAIResponsesRenderState]):
     """Async pydantic-graph-driven OpenAI Responses SSE renderer.
 
     One :meth:`render` call dispatches one
@@ -894,39 +881,31 @@ class OpenAIResponsesRenderFSM:
     """
 
     name = "openai_responses"
+    _graph = _render_graph
 
-    def __init__(self, *, model: str = "unknown") -> None:
-        self._state = _OpenAIResponsesRenderState(
+    def _initial_state(self, *, model: str) -> _OpenAIResponsesRenderState:
+        return _OpenAIResponsesRenderState(
             response_id=f"resp_{uuid.uuid4().hex[:24]}",
             created_at=int(time.time()),
             model=model,
         )
 
-    @property
-    def state(self) -> _OpenAIResponsesRenderState:
-        """Expose FSM state for tests and telemetry inspection."""
-        return self._state
-
-    async def render(self, event: ModelResponseStreamEvent) -> bytes:
-        """One IR event → zero-or-more bytes of OpenAI Responses SSE wire output."""
-        self._state.pending_events.append(event)
-        result: bytes = await _render_graph.run(state=self._state)
-        return result
-
-    async def close(self) -> bytes:
+    async def close(
+        self,
+        *,
+        usage: RequestUsage | None = None,
+        raw_extras: Mapping[str, object] | None = None,
+    ) -> bytes:
         """Close any still-open items, then emit ``response.completed``.
 
-        Emits a telemetry warning when IR events arrived but no content bytes
-        were rendered — a silent empty Responses turn must be explainable from
-        logs.
+        When the intake captured usage, ``response.completed`` carries the real
+        token counts (funnel re-stamping) rather than zeros. Emits a telemetry
+        warning when IR events arrived but no content bytes were rendered — a
+        silent empty Responses turn must be explainable from logs.
         """
+        del raw_extras  # response envelope has no slot for arbitrary upstream metadata
         state = self._state
-        if state.events_received and not state.bytes_emitted:
-            logger.warning(
-                "openai_responses render received %d IR event(s) but emitted NO content bytes "
-                "before close — every event mapped to a no-op wire surface",
-                state.events_received,
-            )
+        self._log_silent_close()
         out = bytearray()
 
         # Drain any items left open (the upstream FSM may not have emitted
@@ -936,10 +915,15 @@ class OpenAIResponsesRenderFSM:
             _close_item(state, item, out)
 
         # Postlude — response.completed with the final envelope snapshot.
+        usage_block = (
+            {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+            if _usage.usage_is_empty(usage)
+            else _usage.to_openai_responses(cast("RequestUsage", usage))
+        )
         snapshot = _response_envelope_snapshot(
             state,
             status=state.finish_status,
-            usage={"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+            usage=usage_block,
         )
         out += _emit_event(
             "response.completed",

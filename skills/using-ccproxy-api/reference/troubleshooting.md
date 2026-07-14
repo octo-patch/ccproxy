@@ -119,12 +119,12 @@ The provider name after `sk-ant-oat-ccproxy-` must exactly match a key in `provi
 providers:
   anthropic:
     auth: "..."   # Matches: sk-ant-oat-ccproxy-anthropic
-    host: api.anthropic.com
+    base_url: https://api.anthropic.com
     path: /v1/messages
     type: anthropic
   gemini:
     auth: "..."   # Matches: sk-ant-oat-ccproxy-gemini
-    host: cloudcode-pa.googleapis.com
+    base_url: https://cloudcode-pa.googleapis.com
     path: "/v1internal:{action}"
     type: gemini
 ```

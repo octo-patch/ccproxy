@@ -6,7 +6,7 @@ repo_root="$(git rev-parse --show-toplevel)"
 cd "$repo_root"
 
 nix run .#sync-ccproxy-template
-git add src/ccproxy/templates/ccproxy.yaml
+git add src/ccproxy/templates/ccproxy.yaml src/ccproxy/templates/config.yaml
 
 if command -v pre-commit >/dev/null 2>&1; then
   exec pre-commit run --hook-stage pre-commit

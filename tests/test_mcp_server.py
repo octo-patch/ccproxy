@@ -220,11 +220,16 @@ def test_list_conversations_groups_by_metadata_key(mock_client: Any, fake_flows:
     }
 
 
-async def test_list_models_returns_static_floor() -> None:
+async def test_list_models_returns_configured_catalog() -> None:
     ctx = _mock_ctx()
-    result = await _registered_tool_fn("list_models")(ctx=ctx)
+    catalog = {
+        "object": "list",
+        "data": [{"id": "configured-model", "object": "model", "created": 1, "owned_by": "openai"}],
+    }
+    with patch("ccproxy.mcp.server.build_catalog", return_value=catalog):
+        result = await _registered_tool_fn("list_models")(ctx=ctx)
     assert result["object"] == "list"
-    assert any(entry["id"] == "claude-opus-4-7" for entry in result["data"])
+    assert [entry["id"] for entry in result["data"]] == ["configured-model"]
 
 
 async def test_list_models_refresh_emits_info() -> None:

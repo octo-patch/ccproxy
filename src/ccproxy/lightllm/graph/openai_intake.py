@@ -58,6 +58,8 @@ from pydantic_ai.messages import ModelResponseStreamEvent
 from pydantic_graph import GraphBuilder, StepContext
 
 import ccproxy.lightllm.graph._subgraph_patch  # noqa: F401  — installs GraphBuilder.add_subgraph
+from ccproxy.lightllm.graph import _usage
+from ccproxy.lightllm.graph._base import IntakeState, ResponseIntakeFSM
 
 if TYPE_CHECKING:
     from pydantic_ai.messages import FinishReason
@@ -114,50 +116,41 @@ type _RoutedEvent = _QueueEvent | _FeedDone
 
 
 @dataclass
-class _OpenAIIntakeState:
+class _OpenAIIntakeState(IntakeState[_QueueEvent]):
     """FSM state for one OpenAI intake graph run.
 
-    The ``events_queue`` is the queue of dispatch envelopes drained from the
-    SSE buffer *before* the graph run starts; the FSM router pops from it.
-    The ``out_events`` list accumulates :class:`ModelResponseStreamEvent`
-    instances emitted by handler steps; the terminal step returns it.
-    ``parts_manager`` and the stream-level metadata fields persist across
-    feed calls so multi-feed reassembly works. ``tool_calls_queue`` is
-    per-chunk scratch drained by the tool-calls subgraph.
+    Shared queue/funnel/telemetry slots come from :class:`IntakeState`;
+    usage reads off the terminal (``include_usage``) chunk. ``model`` and the
+    refusal fields persist across feed calls so multi-feed reassembly works.
+    ``tool_calls_queue`` is per-chunk scratch drained by the tool-calls
+    subgraph.
     """
 
-    parts_manager: ModelResponsePartsManager
     model: str
     has_refusal: bool = False
     refusal_text: str = ""
-    finish_reason: FinishReason | None = None
-    provider_response_id: str | None = None
     provider_details: dict[str, object] | None = None
-    events_queue: deque[_QueueEvent] = field(default_factory=deque)
-    out_events: list[ModelResponseStreamEvent] = field(default_factory=list)
     tool_calls_queue: deque[ChoiceDeltaToolCall] = field(default_factory=deque)
     """Per-chunk queue of tool-call deltas; drained by the tool-calls subgraph."""
-
-    # ── Telemetry (never-silently-drop diagnostics) ───────────────────────────
-    frames_seen: int = 0
-    """Total dispatch envelopes drained from the wire (across all feed calls)."""
-
-    frames_unparseable: int = 0
-    """SSE frames whose ``data:`` payload failed ``ChatCompletionChunk`` validation."""
-
-    emitted_events: int = 0
-    """Total IR ``ModelResponseStreamEvent`` instances emitted (across all feed calls)."""
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────
 
 
 def _absorb_chunk_metadata(state: _OpenAIIntakeState, chunk: ChatCompletionChunk) -> None:
-    """Update stream-level metadata (id, model) from any chunk."""
+    """Update stream-level metadata (id, model, usage) from any chunk.
+
+    OpenAI carries usage on the terminal empty-``choices`` chunk (emitted when
+    ``stream_options.include_usage`` is set, which pydantic-ai's own OpenAI model
+    always requests). Capture it into the funnel accumulator so a cross-format
+    transform re-stamps the token accounting instead of dropping it.
+    """
     if chunk.id:
         state.provider_response_id = chunk.id
     if chunk.model:
         state.model = chunk.model
+    if chunk.usage is not None:
+        state.usage = _usage.usage_from_openai_chat(chunk.usage)
 
 
 def _map_provider_details(choice: _ChunkChoice) -> dict[str, object] | None:
@@ -356,12 +349,12 @@ _intake_graph = _g.build()
 # ── Public class ───────────────────────────────────────────────────────────
 
 
-class OpenAIResponseIntakeFSM:
+class OpenAIResponseIntakeFSM(ResponseIntakeFSM[_OpenAIIntakeState]):
     """Async pydantic-graph-driven OpenAI Chat Completion SSE intake.
 
     Behavioral twin of
     :class:`ccproxy.lightllm.response.intake_openai.OpenAIResponseIntake`,
-    re-expressed as a :mod:`pydantic_graph.beta` ``GraphBuilder`` FSM. One
+    re-expressed as a :mod:`pydantic_graph` ``GraphBuilder`` FSM. One
     graph run per :meth:`feed` call drains all complete SSE frames buffered
     by that call into typed OpenAI chunks, wraps each in a dispatch envelope,
     dispatches each to a handler step, and returns the accumulated IR events.
@@ -370,29 +363,16 @@ class OpenAIResponseIntakeFSM:
     """
 
     name = "openai"
+    _graph = _intake_graph
 
-    def __init__(self, *, model: str, request_params: ModelRequestParameters) -> None:
-        self._request_params = request_params
-        self._sse_buffer = bytearray()
-        self.upstream_raw_bytes = bytearray()
-        self._terminated = False
+    def _initial_state(self, *, model: str, request_params: ModelRequestParameters) -> _OpenAIIntakeState:
         # Stream-level fields live on the FSM state but are surfaced under the
         # same private names the legacy intake exposes so tests reaching for
         # them work unchanged.
-        self._state = _OpenAIIntakeState(
+        return _OpenAIIntakeState(
             parts_manager=ModelResponsePartsManager(model_request_parameters=request_params),
             model=model,
         )
-
-    @property
-    def parts_manager(self) -> ModelResponsePartsManager:
-        """Expose the underlying parts manager for tests and downstream renderers."""
-        return self._state.parts_manager
-
-    @property
-    def state(self) -> _OpenAIIntakeState:
-        """Expose FSM state for tests and telemetry inspection."""
-        return self._state
 
     @property
     def _model(self) -> str:
@@ -408,31 +388,8 @@ class OpenAIResponseIntakeFSM:
         return self._state.refusal_text
 
     @property
-    def finish_reason(self) -> FinishReason | None:
-        return self._state.finish_reason
-
-    @property
-    def provider_response_id(self) -> str | None:
-        return self._state.provider_response_id
-
-    @property
     def provider_details(self) -> dict[str, object] | None:
         return self._state.provider_details
-
-    async def feed(self, data: bytes) -> list[ModelResponseStreamEvent]:
-        """Buffer bytes, frame SSE events, drive the FSM, return emitted IR events."""
-        self.upstream_raw_bytes.extend(data)
-        if self._terminated:
-            return []
-        self._sse_buffer.extend(data)
-        # Drain complete SSE frames into typed dispatch envelopes.
-        for envelope in self._drain_sse_envelopes():
-            self._state.events_queue.append(envelope)
-            self._state.frames_seen += 1
-        if not self._state.events_queue:
-            return []
-        result = await _intake_graph.run(state=self._state)
-        return result
 
     async def close(self) -> list[ModelResponseStreamEvent]:
         """Stream end. Refusal text is stashed on ``provider_details`` per pydantic-ai.
@@ -441,42 +398,19 @@ class OpenAIResponseIntakeFSM:
         IR output and no refusal — a silent empty OpenAI Chat turn must be
         explainable from logs.
         """
-        if self._state.refusal_text:
-            self._state.provider_details = {
-                **(self._state.provider_details or {}),
-                "refusal": self._state.refusal_text,
-            }
         s = self._state
-        if s.frames_seen and not s.emitted_events and not s.has_refusal:
-            logger.warning(
-                "openai intake produced NO IR events after %d chunk(s) "
-                "(unparseable=%d finish_reason=%s) — the upstream stream carried no renderable content",
-                s.frames_seen,
-                s.frames_unparseable,
-                s.finish_reason,
-            )
+        if s.refusal_text:
+            s.provider_details = {
+                **(s.provider_details or {}),
+                "refusal": s.refusal_text,
+            }
+        if not s.has_refusal:
+            self._log_no_ir_events(unit="chunk", extra=f" finish_reason={s.finish_reason}")
         return []
 
-    def _drain_sse_envelopes(self) -> Iterator[_QueueEvent]:
-        """Frame SSE events from ``self._sse_buffer``; flip ``_terminated`` on ``[DONE]``;
-        validate surviving frames into a dispatch envelope.
-
-        Handles both ``\\r\\n\\r\\n`` (industry standard) and ``\\n\\n`` (some servers)
-        separators; partial frames remain buffered for the next ``feed`` call.
-        """
-        while True:
-            if self._terminated:
-                return
-            crlf = self._sse_buffer.find(b"\r\n\r\n")
-            lf = self._sse_buffer.find(b"\n\n")
-            if crlf == -1 and lf == -1:
-                return
-            if crlf != -1 and (lf == -1 or crlf < lf):
-                sep_idx, sep_len = crlf, 4
-            else:
-                sep_idx, sep_len = lf, 2
-            frame = bytes(self._sse_buffer[:sep_idx])
-            del self._sse_buffer[: sep_idx + sep_len]
+    def _drain_events(self) -> Iterator[_QueueEvent]:
+        """Validate complete SSE frames into dispatch envelopes; flip ``_terminated`` on ``[DONE]``."""
+        for frame in self._split_sse_frames():
             payload = _extract_data_payload(frame)
             if payload is None:
                 continue

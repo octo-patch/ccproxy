@@ -25,10 +25,20 @@ search-flavored server-side tools should appear in this map. When
 pydantic-ai adds new kinds (e.g. ``'tool-browse'``, ``'tool-code'``),
 extend with the corresponding wire types here.
 
+**Promotion, not preservation** — this map only drives response-part
+promotion; wire fidelity for typed tools is the ``raw_extras['tools']``
+verbatim override in ``_parse_tools``. Note the bm25/regex tool-search
+entries are mostly redundant for *native* traffic: native tool-search calls
+arrive as ``server_tool_use`` blocks and are already typed by
+``_map_server_tool_use_block``. They matter for the local/client-flavored
+path, where a plain ``tool_use`` block needs name-keyed promotion — do not
+conclude the entries are dead.
+
 Currently shipped Anthropic dated tool variants per ``anthropic/types/``:
 
 - ``web_search_20250305`` (mapped)
 - ``web_search_20260209`` (mapped)
+- ``tool_search_tool_bm25_20251119`` / ``tool_search_tool_regex_20251119`` (mapped)
 - ``web_fetch_20250910`` / ``web_fetch_20260209`` / ``web_fetch_20260309`` — fetch, not search
 - ``bash_20241022`` / ``bash_20250124`` — bash, no ToolPartKind yet
 - ``code_execution_20250522`` / ``code_execution_20250825`` / ``code_execution_20260120`` — code, no ToolPartKind yet
@@ -54,6 +64,8 @@ if TYPE_CHECKING:
 ANTHROPIC_TYPED_TOOLS: dict[str, ToolPartKind] = {
     "web_search_20250305": "tool-search",
     "web_search_20260209": "tool-search",
+    "tool_search_tool_bm25_20251119": "tool-search",
+    "tool_search_tool_regex_20251119": "tool-search",
 }
 
 

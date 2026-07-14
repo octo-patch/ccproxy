@@ -91,6 +91,7 @@
         mkConfig =
           {
             settings ? { },
+            litellmConfig ? { },
             configDir ? ".ccproxy",
           }:
           let
@@ -102,24 +103,25 @@
               (defaultSettings.settings.providers or { })
               // (settings.providers or { });
             mergedSettings = deepMerged // { inherit providers; };
+            mergedLiteLLMConfig = lib.recursiveUpdate defaultSettings.litellmConfig litellmConfig;
             ccproxyYaml = yaml.generate "ccproxy.yaml" { ccproxy = mergedSettings; };
+            configYaml = yaml.generate "config.yaml" mergedLiteLLMConfig;
           in
           {
-            inherit ccproxyYaml;
+            inherit ccproxyYaml configYaml;
 
             shellHook = ''
               mkdir -p "${configDir}"
               ln -sfn ${ccproxyYaml} "${configDir}/ccproxy.yaml"
+              ln -sfn ${configYaml} "${configDir}/config.yaml"
               export CCPROXY_CONFIG_DIR="$PWD/${configDir}"
             '';
           };
 
-        # Bundled template installed at src/ccproxy/templates/ccproxy.yaml and
-        # served by `ccproxy init` to seed a user's first ccproxy.yaml. Built
-        # from nix/defaults.nix as-is (no dev overrides).
-        templateYaml = yaml.generate "ccproxy.yaml" {
+        templateCcproxyYaml = yaml.generate "ccproxy.yaml" {
           ccproxy = defaultSettings.settings;
         };
+        templateConfigYaml = yaml.generate "config.yaml" defaultSettings.litellmConfig;
 
         devConfig = mkConfig {
           settings = {
@@ -143,20 +145,6 @@
             otel = {
               enabled = false;
               endpoint = "http://localhost:4317";
-            };
-            # Dev affordance: route OpenAI-format /v1/chat/completions requests
-            # whose model matches ^claude through the cross-format transform to
-            # the anthropic provider (exercises anthropic_intake + openai_render
-            # end to end through the reverse listener).
-            lightllm = {
-              transforms = [
-                {
-                  match_path = "/v1/chat/completions";
-                  match_model = "^claude";
-                  action = "transform";
-                  dest_provider = "anthropic";
-                }
-              ];
             };
           };
         };
@@ -189,7 +177,8 @@
           ];
           text = ''
             repo_root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
-            install -m 644 ${templateYaml} "$repo_root/src/ccproxy/templates/ccproxy.yaml"
+            install -m 644 ${templateCcproxyYaml} "$repo_root/src/ccproxy/templates/ccproxy.yaml"
+            install -m 644 ${templateConfigYaml} "$repo_root/src/ccproxy/templates/config.yaml"
           '';
         };
         wslArtifactValidator = pkgs.writeShellApplication {
@@ -240,6 +229,7 @@
         apps.sync-ccproxy-template = {
           type = "app";
           program = "${syncCcproxyTemplate}/bin/sync-ccproxy-template";
+          meta.description = "Regenerate ccproxy's packaged YAML templates";
         };
 
         devShells = {
@@ -248,7 +238,6 @@
               python313
               uv
               ruff
-              mypy
               pyright
               pre-commit
               jq
@@ -260,6 +249,13 @@
             ++ releaseTestDeps;
 
             shellHook = ''
+              # Nix's python setup hook aggregates every python package in the
+              # shell (pre-commit, release-test python3, ...) into PYTHONPATH —
+              # a python 3.14 closure that shadows the project's 3.13 venv and
+              # breaks ABI-sensitive imports (mypy/librt). The uv venv owns the
+              # Python environment; nix supplies self-contained tool wrappers.
+              # mypy itself is a uv dev dependency, invoked via `uv run mypy`.
+              unset PYTHONPATH
               ${devConfig.shellHook}
               ${syncCcproxyTemplate}/bin/sync-ccproxy-template
               if git rev-parse --git-dir >/dev/null 2>&1; then
@@ -282,12 +278,14 @@
               export UV_PYTHON="${python}"
               uv sync --extra sdk --quiet 2>/dev/null || true
               export VIRTUAL_ENV="$PWD/.venv"
-              export PATH="$PWD/result/bin:$PWD/.venv/bin:$PATH"
+              export PATH="$PWD/.venv/bin:$PWD/result/bin:$PATH"
             '';
           };
         };
 
-        lib = { inherit mkConfig; };
+        lib = {
+          inherit defaultSettings mkConfig;
+        };
       });
     in
     {

@@ -14,13 +14,15 @@ a WireGuard tunnel for full transparent capture of arbitrary processes.
 ### Install configuration
 
 ```bash
-ccproxy init              # writes ~/.config/ccproxy/ccproxy.yaml
-ccproxy init --force      # overwrite existing config
+ccproxy init              # writes sibling ccproxy.yaml + config.yaml
+ccproxy init --force      # overwrite both existing files
 ```
 
-Edit `~/.config/ccproxy/ccproxy.yaml` to configure providers, transform
-overrides, and hooks. The config directory can be overridden with
-`--config PATH` or the `CCPROXY_CONFIG_DIR` environment variable.
+Edit `~/.config/ccproxy/ccproxy.yaml` for native providers, authentication,
+transform overrides, and hooks. Edit the sibling `config.yaml` for
+LiteLLM-compatible model aliases, endpoints, credentials, and request defaults.
+The config directory can be overridden with `--config PATH` or the
+`CCPROXY_CONFIG_DIR` environment variable.
 
 ### Start the server
 
@@ -339,7 +341,7 @@ lightllm:
 | `match_model` | all | Model regex (optional) |
 | `dest_provider` | redirect, transform | Provider name in `providers` — resolves host/path/auth/format |
 | `dest_model` | transform | Destination model name |
-| `dest_host` | redirect | Raw host override (bypasses Provider lookup) |
+| `dest_base_url` | redirect | Absolute destination base URL override (bypasses Provider lookup) |
 | `dest_path` | redirect | Raw path override |
 | `dest_vertex_project` | transform | GCP project ID (Vertex AI) |
 | `dest_vertex_location` | transform | GCP region (Vertex AI) |
@@ -378,7 +380,7 @@ providers:
     auth:
       type: command
       command: "cat ~/.anthropic/oauth_token"
-    host: api.anthropic.com
+    base_url: https://api.anthropic.com
     path: /v1/messages
     type: anthropic
 
@@ -386,7 +388,7 @@ providers:
     auth:
       type: file
       file: "~/.config/gemini/oauth_token"
-    host: cloudcode-pa.googleapis.com
+    base_url: https://cloudcode-pa.googleapis.com
     path: "/v1internal:{action}"
     type: gemini
 
@@ -395,7 +397,7 @@ providers:
       type: command
       command: "op read 'op://vault/openai/api_key'"
       header: "authorization"
-    host: api.openai.com
+    base_url: https://api.openai.com
     path: /v1/chat/completions
     type: openai
 ```
@@ -690,9 +692,12 @@ clients.
 
 ## 12. Configuration Reference
 
-Config file: `$CCPROXY_CONFIG_DIR/ccproxy.yaml` (default:
-`~/.config/ccproxy/ccproxy.yaml`). Individual fields can be overridden via `CCPROXY_`
-prefixed environment variables.
+Configuration directory: `$CCPROXY_CONFIG_DIR` (default:
+`~/.config/ccproxy`). `ccproxy.yaml` owns native runtime services;
+`config.yaml` supplies LiteLLM-compatible `model_list` bindings compiled into
+those services. Individual native fields can be overridden via `CCPROXY_`
+prefixed environment variables. See [docs/configuration.md](docs/configuration.md)
+for the compatibility surface and unsupported router semantics.
 
 ### Top-level
 
@@ -755,7 +760,7 @@ providers:
     auth:
       type: command
       command: "cat ~/.anthropic/oauth_token"
-    host: api.anthropic.com
+    base_url: https://api.anthropic.com
     path: /v1/messages
     type: anthropic
 
@@ -764,7 +769,7 @@ providers:
       type: command
       command: "printenv DEEPSEEK_API_KEY"
       header: x-api-key
-    host: api.deepseek.com
+    base_url: https://api.deepseek.com
     path: /anthropic/v1/messages
     type: anthropic
 ```

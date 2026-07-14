@@ -24,6 +24,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from ccproxy.auth.sources import EnvironmentAuthSource
+from ccproxy.config import Provider
 from ccproxy.inspector.auth_addon import AuthAddon
 
 
@@ -62,6 +64,14 @@ def _make_200_response() -> MagicMock:
     return mock_response
 
 
+def _provider(*, header: str | None = None, type: str = "anthropic") -> Provider:
+    return Provider(
+        auth=EnvironmentAuthSource(variable="UNUSED_TEST_TOKEN", header=header),
+        base_url="https://api.example.com",
+        type=type,
+    )
+
+
 @pytest.mark.asyncio
 async def test_default_authorization_header_is_rewritten_on_flow_request() -> None:
     """Default Bearer path: refreshed token is stamped onto flow.request.headers.
@@ -77,7 +87,7 @@ async def test_default_authorization_header_is_rewritten_on_flow_request() -> No
     )
     mock_config = MagicMock()
     mock_config.resolve_auth_token.return_value = "refreshed-token"
-    mock_config.get_auth_header.return_value = None
+    mock_config.get_provider.return_value = _provider()
     mock_config.provider_timeout = None
 
     mock_get_client = _make_mock_client(_make_200_response())
@@ -101,7 +111,7 @@ async def test_custom_auth_header_is_rewritten_raw_on_flow_request() -> None:
     )
     mock_config = MagicMock()
     mock_config.resolve_auth_token.return_value = "refreshed-token"
-    mock_config.get_auth_header.return_value = "x-api-key"
+    mock_config.get_provider.return_value = _provider(header="x-api-key", type="gemini")
     mock_config.provider_timeout = None
 
     mock_get_client = _make_mock_client(_make_200_response())

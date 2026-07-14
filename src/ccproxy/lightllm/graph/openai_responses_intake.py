@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-from collections import deque
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
@@ -15,6 +14,8 @@ from pydantic_ai.messages import ModelResponseStreamEvent
 from pydantic_graph import GraphBuilder, StepContext, TypeExpression
 
 import ccproxy.lightllm.graph._subgraph_patch  # noqa: F401  — installs GraphBuilder.add_subgraph
+from ccproxy.lightllm.graph import _usage
+from ccproxy.lightllm.graph._base import IntakeState, ResponseIntakeFSM
 
 if TYPE_CHECKING:
     from pydantic_ai.messages import FinishReason
@@ -178,27 +179,18 @@ type _ItemDoneDiscriminand = responses.ResponseReasoningItem | _ClientToolSearch
 
 
 @dataclass
-class _OpenAIResponsesIntakeState:
-    parts_manager: ModelResponsePartsManager
+class _OpenAIResponsesIntakeState(IntakeState[_QueueEvent]):
+    """FSM state for one OpenAI Responses intake graph run.
+
+    Shared queue/funnel/telemetry slots come from :class:`IntakeState`; usage
+    reads off the response envelope (``response.completed`` etc.).
+    """
+
     model: str
-    provider_response_id: str | None = None
     provider_details: dict[str, object] | None = None
-    finish_reason: FinishReason | None = None
     has_refusal: bool = False
     refusal_text: str = ""
     phase_by_item: dict[str, str] = field(default_factory=dict)
-    events_queue: deque[_QueueEvent] = field(default_factory=deque)
-    out_events: list[ModelResponseStreamEvent] = field(default_factory=list)
-
-    # ── Telemetry (never-silently-drop diagnostics) ───────────────────────────
-    frames_seen: int = 0
-    """Total dispatch envelopes drained from the wire (across all feed calls)."""
-
-    frames_unparseable: int = 0
-    """SSE frames whose ``data:`` payload failed ``ResponseStreamEvent`` validation."""
-
-    emitted_events: int = 0
-    """Total IR ``ModelResponseStreamEvent`` instances emitted (across all feed calls)."""
 
 
 _g: GraphBuilder[_OpenAIResponsesIntakeState, None, None, list[ModelResponseStreamEvent]] = GraphBuilder(
@@ -228,6 +220,11 @@ def _record_response_metadata(state: _OpenAIResponsesIntakeState, event: _Respon
         state.provider_response_id = response.id
     if response.model:
         state.model = response.model
+
+    # Funnel: the response envelope carries cumulative usage (populated on the
+    # terminal ``response.completed``); replace as it arrives.
+    if response.usage is not None:
+        state.usage = _usage.usage_from_openai_responses(response.usage)
 
     if response.conversation is not None and response.conversation.id:
         state.provider_details = {
@@ -648,29 +645,17 @@ _g.add(
 _intake_graph = _g.build()
 
 
-class OpenAIResponsesIntakeFSM:
+class OpenAIResponsesIntakeFSM(ResponseIntakeFSM[_OpenAIResponsesIntakeState]):
     """Async pydantic-graph-driven OpenAI Responses SSE intake."""
 
     name = "openai_responses"
+    _graph = _intake_graph
 
-    def __init__(self, *, model: str, request_params: ModelRequestParameters) -> None:
-        self._request_params = request_params
-        self._sse_buffer = bytearray()
-        self.upstream_raw_bytes = bytearray()
-        self._terminated = False
-        self._state = _OpenAIResponsesIntakeState(
+    def _initial_state(self, *, model: str, request_params: ModelRequestParameters) -> _OpenAIResponsesIntakeState:
+        return _OpenAIResponsesIntakeState(
             parts_manager=ModelResponsePartsManager(model_request_parameters=request_params),
             model=model,
         )
-
-    @property
-    def parts_manager(self) -> ModelResponsePartsManager:
-        return self._state.parts_manager
-
-    @property
-    def state(self) -> _OpenAIResponsesIntakeState:
-        """Expose FSM state for tests and telemetry inspection."""
-        return self._state
 
     @property
     def _model(self) -> str:
@@ -685,61 +670,24 @@ class OpenAIResponsesIntakeFSM:
         return self._state.refusal_text
 
     @property
-    def provider_response_id(self) -> str | None:
-        return self._state.provider_response_id
-
-    @property
     def provider_details(self) -> dict[str, object] | None:
         return self._state.provider_details
 
-    @property
-    def finish_reason(self) -> FinishReason | None:
-        return self._state.finish_reason
-
-    async def feed(self, data: bytes) -> list[ModelResponseStreamEvent]:
-        self.upstream_raw_bytes.extend(data)
-        if self._terminated:
-            return []
-        self._sse_buffer.extend(data)
-        for envelope in self._drain_sse_envelopes():
-            self._state.events_queue.append(envelope)
-            self._state.frames_seen += 1
-        if not self._state.events_queue:
-            return []
-        result = await _intake_graph.run(state=self._state)
-        return result
-
     async def close(self) -> list[ModelResponseStreamEvent]:
-        if self._state.refusal_text:
-            self._state.provider_details = {
-                **(self._state.provider_details or {}),
-                "refusal": self._state.refusal_text,
-            }
+        """Stream end. Refusal text is stashed on ``provider_details``; warn on silent-empty."""
         s = self._state
-        if s.frames_seen and not s.emitted_events and not s.has_refusal:
-            logger.warning(
-                "openai responses intake produced NO IR events after %d frame(s) "
-                "(unparseable=%d finish_reason=%s) — the upstream stream carried no renderable content",
-                s.frames_seen,
-                s.frames_unparseable,
-                s.finish_reason,
-            )
+        if s.refusal_text:
+            s.provider_details = {
+                **(s.provider_details or {}),
+                "refusal": s.refusal_text,
+            }
+        if not s.has_refusal:
+            self._log_no_ir_events(extra=f" finish_reason={s.finish_reason}")
         return []
 
-    def _drain_sse_envelopes(self) -> Iterator[_QueueEvent]:
-        while True:
-            if self._terminated:
-                return
-            crlf = self._sse_buffer.find(b"\r\n\r\n")
-            lf = self._sse_buffer.find(b"\n\n")
-            if crlf == -1 and lf == -1:
-                return
-            if crlf != -1 and (lf == -1 or crlf < lf):
-                sep_idx, sep_len = crlf, 4
-            else:
-                sep_idx, sep_len = lf, 2
-            frame = bytes(self._sse_buffer[:sep_idx])
-            del self._sse_buffer[: sep_idx + sep_len]
+    def _drain_events(self) -> Iterator[_QueueEvent]:
+        """Validate complete SSE frames into dispatch envelopes; flip ``_terminated`` on ``[DONE]``."""
+        for frame in self._split_sse_frames():
             payload = _extract_data_payload(frame)
             if payload is None:
                 continue

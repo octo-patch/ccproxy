@@ -20,6 +20,7 @@ e2e-packaged-mflows:
     tmp=$(mktemp -d); \
     trap 'CCPROXY_CONFIG_DIR="'"$tmp"'" process-compose down >/dev/null 2>&1 || true; rm -rf "'"$tmp"'"' EXIT; \
     cp src/ccproxy/templates/ccproxy.yaml "$tmp/ccproxy.yaml"; \
+    cp src/ccproxy/templates/config.yaml "$tmp/config.yaml"; \
     mkdir -p "$tmp/shapes"; \
     uv run python -c 'import sys, yaml; p=sys.argv[1]; shapes=sys.argv[2]; data=yaml.safe_load(open(p)); cc=data["ccproxy"]; cc["port"]=4001; cc["inspector"]["port"]=8084; cc["mcp"]["http"]["port"]=4031; cc["inspector"]["cert_dir"]=sys.argv[3]; cc["shaping"]["shapes_dir"]=shapes; open(p, "w").write(yaml.safe_dump(data, sort_keys=False))' "$tmp/ccproxy.yaml" "$tmp/shapes" "$tmp"; \
     CCPROXY_CONFIG_DIR="$tmp" process-compose down >/dev/null 2>&1 || true; \
@@ -34,6 +35,17 @@ e2e-openai-conversations:
     # fresh cookies). The tests self-skip when creds/proxy are absent.
     CCPROXY_E2E_URL=${CCPROXY_E2E_URL:-http://127.0.0.1:4001} uv run pytest --no-cov -rs -m e2e tests/e2e/test_openai_conversations_e2e.py
 
+e2e-litellm-config-frontend:
+    tmp=$(mktemp -d); \
+    trap 'PC_SOCKET_PATH="'"$tmp"'/process-compose.sock" CCPROXY_CONFIG_DIR="'"$tmp"'" process-compose down >/dev/null 2>&1 || true; rm -rf "'"$tmp"'"' EXIT; \
+    cp tests/e2e/fixtures/litellm_config_frontend/ccproxy.yaml "$tmp/ccproxy.yaml"; \
+    cp tests/e2e/fixtures/litellm_config_frontend/config.yaml "$tmp/config.yaml"; \
+    uv run python -c 'import sys, yaml; p=sys.argv[1]; data=yaml.safe_load(open(p)); data["ccproxy"]["inspector"]["cert_dir"]=sys.argv[2]; open(p, "w").write(yaml.safe_dump(data, sort_keys=False))' "$tmp/ccproxy.yaml" "$tmp"; \
+    PC_SOCKET_PATH="$tmp/process-compose.sock" CCPROXY_CONFIG_DIR="$tmp" CCPROXY_E2E_LOCAL_KEY=local-e2e-secret process-compose up --detached; \
+    for i in $(seq 1 60); do PC_SOCKET_PATH="$tmp/process-compose.sock" CCPROXY_CONFIG_DIR="$tmp" uv run ccproxy status --proxy >/dev/null 2>&1 && break; sleep 1; done; \
+    PC_SOCKET_PATH="$tmp/process-compose.sock" CCPROXY_CONFIG_DIR="$tmp" uv run ccproxy status --proxy; \
+    CCPROXY_E2E_LITELLM_FRONTEND=1 CCPROXY_E2E_URL=http://127.0.0.1:4011 uv run pytest --no-cov -rs -m e2e tests/e2e/test_litellm_config_frontend_e2e.py
+
 e2e-namespace-observe:
     command -v slirp4netns >/dev/null
     command -v unshare >/dev/null
@@ -45,6 +57,7 @@ e2e-namespace-observe:
     tmp=$(mktemp -d); \
     trap 'CCPROXY_CONFIG_DIR="'"$tmp"'" process-compose down >/dev/null 2>&1 || true; rm -rf "'"$tmp"'"' EXIT; \
     cp src/ccproxy/templates/ccproxy.yaml "$tmp/ccproxy.yaml"; \
+    cp src/ccproxy/templates/config.yaml "$tmp/config.yaml"; \
     mkdir -p "$tmp/shapes"; \
     uv run python -c 'import sys, yaml; p=sys.argv[1]; shapes=sys.argv[2]; data=yaml.safe_load(open(p)); cc=data["ccproxy"]; cc["port"]=4001; cc["inspector"]["port"]=8084; cc["mcp"]["http"]["port"]=4031; cc["inspector"]["cert_dir"]=sys.argv[3]; cc["shaping"]["shapes_dir"]=shapes; open(p, "w").write(yaml.safe_dump(data, sort_keys=False))' "$tmp/ccproxy.yaml" "$tmp/shapes" "$tmp"; \
     CCPROXY_CONFIG_DIR="$tmp" process-compose down >/dev/null 2>&1 || true; \

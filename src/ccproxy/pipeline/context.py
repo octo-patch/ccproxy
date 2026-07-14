@@ -287,6 +287,7 @@ class CcproxyMetadata(MetadataSection):
     otel_span_ended: bool = metadata_field(default=False)
     auth_provider: str = metadata_field(default="")
     auth_injected: bool = metadata_field(default=False)
+    auth_query_param: str = metadata_field(default="")
     session_id: str = metadata_field(default="")
     inbound_format: str = metadata_field(default="unknown")
     request_parameters: ModelRequestParameters | None = metadata_field(key="parsed_request_parameters", default=None)

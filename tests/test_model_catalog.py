@@ -1,167 +1,232 @@
-"""Tests for ccproxy.specs.model_catalog (static + live merge)."""
+"""Tests for the configuration-derived model catalog."""
 
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from pathlib import Path
+from typing import cast
+from unittest.mock import MagicMock, patch
 
 import httpx
 import pytest
+from mitmproxy.http import Response
 
-from ccproxy.config import CCProxyConfig, set_config_instance
-from ccproxy.specs.model_catalog import (
-    STATIC_MODEL_CATALOG,
-    build_catalog,
-)
+from ccproxy.config import CCProxyConfig, Provider, set_config_instance
+from ccproxy.constants import AuthConfigError
+from ccproxy.inspector.router import InspectorRouter
+from ccproxy.inspector.routes.models import register_models_routes
+from ccproxy.litellm_config import load_litellm_config
+from ccproxy.specs.model_catalog import build_catalog
 
 
-def test_static_floor_returns_openai_shape() -> None:
-    """Default (no refresh) returns the OpenAI-shaped floor list."""
+def _configure(tmp_path: Path, text: str, providers: dict[str, Provider] | None = None) -> CCProxyConfig:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(text)
+    config = CCProxyConfig(providers=providers or {})
+    frontend = load_litellm_config(config_path, config.providers)
+    config.model_bindings = frontend.bindings
+    config.deployment_providers = frontend.deployment_providers
+    config.litellm_diagnostics = frontend.diagnostics
+    set_config_instance(config)
+    return config
+
+
+def test_empty_config_has_no_fabricated_models() -> None:
+    set_config_instance(CCProxyConfig())
+
+    assert build_catalog() == {"object": "list", "data": []}
+
+
+def test_concrete_aliases_are_the_offline_catalog(tmp_path: Path) -> None:
+    _configure(
+        tmp_path,
+        """
+model_list:
+  - model_name: claude
+    litellm_params:
+      model: anthropic/claude-sonnet-4-6
+      api_base: https://api.anthropic.com
+    model_info:
+      tier: paid
+""",
+    )
+
     catalog = build_catalog()
+
     assert catalog["object"] == "list"
-    assert isinstance(catalog["data"], list)
-    assert len(catalog["data"]) > 0
-    for entry in catalog["data"]:
-        assert entry["object"] == "model"
-        assert isinstance(entry["id"], str)
-        assert isinstance(entry["owned_by"], str)
-        assert isinstance(entry["created"], int)
+    assert len(catalog["data"]) == 1
+    assert catalog["data"][0]["id"] == "claude"
+    assert catalog["data"][0]["owned_by"] == "anthropic"
+    assert catalog["data"][0]["model_info"] == {"tier": "paid"}
 
 
-def test_static_floor_contains_known_anthropic_models() -> None:
-    """The floor includes known production Claude IDs."""
-    catalog = build_catalog()
-    ids = {entry["id"] for entry in catalog["data"]}
-    assert "claude-opus-4-7" in ids
-    assert "claude-haiku-4-5-20251001" in ids
+def test_wildcards_are_not_fabricated_without_discovery(tmp_path: Path) -> None:
+    _configure(
+        tmp_path,
+        """
+model_list:
+  - model_name: requesty/*
+    litellm_params:
+      model: requesty/*
+      api_base: https://router.requesty.ai/v1
+""",
+    )
+
+    assert build_catalog()["data"] == []
 
 
-def test_static_floor_contains_known_gemini_models() -> None:
-    catalog = build_catalog()
-    ids = {entry["id"] for entry in catalog["data"]}
-    assert "gemini-3-pro-preview" in ids
-    assert "gemini-2.5-flash" in ids
-
-
-def test_static_floor_contains_minimax_models() -> None:
-    assert {"MiniMax-M3", "MiniMax-M2.7"} <= set(STATIC_MODEL_CATALOG["minimax"])
-
-
-def test_owned_by_matches_provider_keys() -> None:
-    """Each entry's ``owned_by`` is one of the provider keys in STATIC_MODEL_CATALOG."""
-    catalog = build_catalog()
-    valid_owners = set(STATIC_MODEL_CATALOG.keys())
-    for entry in catalog["data"]:
-        assert entry["owned_by"] in valid_owners
-
-
-def test_no_refresh_does_not_call_http() -> None:
-    """Without ``refresh=True``, no HTTP calls are made."""
+def test_refresh_expands_wildcard_from_configured_endpoint(tmp_path: Path) -> None:
+    _configure(
+        tmp_path,
+        """
+model_list:
+  - model_name: requesty/*
+    litellm_params:
+      model: requesty/*
+      api_base: https://router.requesty.ai/v1
+      api_key: test-key
+""",
+    )
 
     def handler(request: httpx.Request) -> httpx.Response:
-        raise AssertionError(f"Unexpected HTTP call: {request.url}")
-
-    catalog = build_catalog(refresh=False, transport=httpx.MockTransport(handler))
-    assert len(catalog["data"]) > 0
-
-
-def test_refresh_merges_live_anthropic_models() -> None:
-    """``refresh=True`` unions live anthropic models with the static floor (deduped)."""
-    set_config_instance(CCProxyConfig())
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        if "anthropic.com" in str(request.url):
-            return httpx.Response(
-                200,
-                json={
-                    "data": [
-                        # one new model not in the floor
-                        {"id": "claude-future-9-1", "type": "model", "created": 1700000000},
-                        # one duplicate of a floor entry
-                        {"id": "claude-opus-4-7", "type": "model"},
-                    ],
-                },
-            )
-        return httpx.Response(404)
+        assert str(request.url) == "https://router.requesty.ai/v1/models"
+        assert request.headers["authorization"] == "Bearer test-key"
+        return httpx.Response(
+            200,
+            json={
+                "data": [
+                    {"id": "anthropic/claude-sonnet", "created": 1700000000},
+                    {"id": "openai/gpt-5"},
+                ]
+            },
+        )
 
     catalog = build_catalog(refresh=True, transport=httpx.MockTransport(handler))
-    ids = [entry["id"] for entry in catalog["data"]]
-    assert "claude-future-9-1" in ids
-    # No duplicates of the floor entry — the live anthropic block runs first
-    # so the floor copy is skipped via the (owned_by, id) dedup set.
-    assert ids.count("claude-opus-4-7") == 1
+
+    assert [entry["id"] for entry in catalog["data"]] == [
+        "requesty/anthropic/claude-sonnet",
+        "requesty/openai/gpt-5",
+    ]
+    assert catalog["data"][0]["created"] == 1700000000
 
 
-def test_refresh_provider_failure_falls_back_to_floor() -> None:
-    """A provider HTTP failure does not remove its floor entries from the result."""
-    set_config_instance(CCProxyConfig())
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        if "anthropic.com" in str(request.url):
-            return httpx.Response(503, text="upstream broken")
-        return httpx.Response(404)
-
-    catalog = build_catalog(refresh=True, transport=httpx.MockTransport(handler))
-    ids = {entry["id"] for entry in catalog["data"]}
-    assert "claude-opus-4-7" in ids
-
-
-def test_refresh_network_error_falls_back_to_floor() -> None:
-    """Connection errors don't propagate out of build_catalog."""
-    set_config_instance(CCProxyConfig())
+def test_refresh_derives_models_url_from_exact_completion_endpoint(tmp_path: Path) -> None:
+    _configure(
+        tmp_path,
+        """
+model_list:
+  - model_name: local/*
+    litellm_params:
+      model: openai/*
+      api_base: https://router.example/v1/chat/completions
+""",
+    )
 
     def handler(request: httpx.Request) -> httpx.Response:
-        raise httpx.ConnectError("dns down")
+        assert str(request.url) == "https://router.example/v1/models"
+        return httpx.Response(200, json={"data": [{"id": "qwen"}]})
 
     catalog = build_catalog(refresh=True, transport=httpx.MockTransport(handler))
-    ids = {entry["id"] for entry in catalog["data"]}
-    assert "claude-opus-4-7" in ids
+
+    assert [entry["id"] for entry in catalog["data"]] == ["local/qwen"]
 
 
-@dataclass
-class CatalogShapeCase:
-    name: str
-    """Descriptive name for the test scenario."""
+def test_refresh_inverts_upstream_wildcard_and_filters_nonmatches(tmp_path: Path) -> None:
+    _configure(
+        tmp_path,
+        """
+model_list:
+  - model_name: local/*
+    litellm_params:
+      model: openai/qwen-*
+      api_base: https://router.example/v1
+""",
+    )
 
-    refresh: bool
-    """Whether to enable live merge."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"data": [{"id": "qwen-7b"}, {"id": "llama-8b"}]})
 
-    expected_min_data_count: int
-    """Lower bound on the number of returned entries."""
+    catalog = build_catalog(refresh=True, transport=httpx.MockTransport(handler))
 
-
-CATALOG_SHAPE_CASES: list[CatalogShapeCase] = [
-    CatalogShapeCase(name="static_floor_only", refresh=False, expected_min_data_count=8),
-    CatalogShapeCase(name="refresh_returns_at_least_floor", refresh=True, expected_min_data_count=8),
-]
-
-
-@pytest.mark.parametrize(
-    "case",
-    [pytest.param(c, id=c.name) for c in CATALOG_SHAPE_CASES],
-)
-def test_catalog_shape_invariants(case: CatalogShapeCase) -> None:
-    """Refresh and non-refresh both return at least the floor count."""
-    if case.refresh:
-        set_config_instance(CCProxyConfig())
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            return httpx.Response(200, json={"data": []})
-
-        catalog = build_catalog(refresh=True, transport=httpx.MockTransport(handler))
-    else:
-        catalog = build_catalog()
-    assert len(catalog["data"]) >= case.expected_min_data_count
+    assert [entry["id"] for entry in catalog["data"]] == ["local/7b"]
 
 
-def test_models_route_handler_returns_openai_shape() -> None:
-    """The xepor route handler crafts a 200 JSON response with the OpenAI shape."""
-    from unittest.mock import MagicMock
+def test_refresh_failure_keeps_concrete_aliases(tmp_path: Path) -> None:
+    _configure(
+        tmp_path,
+        """
+model_list:
+  - model_name: fixed
+    litellm_params:
+      model: openai/fixed
+      api_base: https://router.example/v1
+  - model_name: dynamic/*
+    litellm_params:
+      model: openai/*
+      api_base: https://router.example/v1
+""",
+    )
 
-    from ccproxy.inspector.router import InspectorRouter
-    from ccproxy.inspector.routes.models import register_models_routes
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(503)
 
-    set_config_instance(CCProxyConfig())
+    catalog = build_catalog(refresh=True, transport=httpx.MockTransport(handler))
+
+    assert [entry["id"] for entry in catalog["data"]] == ["fixed"]
+
+
+def test_refresh_fails_when_configured_credential_is_empty(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("MISSING_API_KEY", raising=False)
+    _configure(
+        tmp_path,
+        """
+model_list:
+  - model_name: dynamic/*
+    litellm_params:
+      model: openai/*
+      api_base: https://router.example/v1
+      api_key: os.environ/MISSING_API_KEY
+""",
+    )
+
+    with pytest.raises(AuthConfigError, match="credential resolved to an empty value"):
+        build_catalog(refresh=True, transport=httpx.MockTransport(lambda request: httpx.Response(200)))
+
+
+def test_duplicate_discovery_ids_are_deduplicated(tmp_path: Path) -> None:
+    _configure(
+        tmp_path,
+        """
+model_list:
+  - model_name: local/*
+    litellm_params:
+      model: openai/*
+      api_base: http://127.0.0.1:8000/v1
+""",
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"data": [{"id": "qwen"}, {"id": "qwen"}]})
+
+    catalog = build_catalog(refresh=True, transport=httpx.MockTransport(handler))
+
+    assert [entry["id"] for entry in catalog["data"]] == ["local/qwen"]
+
+
+def test_models_route_handler_returns_configured_catalog(tmp_path: Path) -> None:
+    _configure(
+        tmp_path,
+        """
+model_list:
+  - model_name: local
+    litellm_params:
+      model: openai/qwen
+      api_base: http://127.0.0.1:8000/v1
+""",
+    )
     router = InspectorRouter(name="test_models", request_passthrough=True, response_passthrough=True)
     register_models_routes(router)
 
@@ -171,25 +236,17 @@ def test_models_route_handler_returns_openai_shape() -> None:
     flow.request.query = {}
     flow.response = None
 
-    assert len(router.request_routes) == 1
     handler = router.request_routes[0][2]
     handler(flow)
 
-    assert flow.response is not None
-    assert flow.response.status_code == 200
-    assert flow.response.headers["Content-Type"] == "application/json"
-    payload = json.loads(flow.response.content)
-    assert payload["object"] == "list"
-    assert isinstance(payload["data"], list)
+    response = cast(Response, flow.response)
+    assert response.status_code == 200
+    assert response.content is not None
+    payload = json.loads(response.content)
+    assert [entry["id"] for entry in payload["data"]] == ["local"]
 
 
 def test_models_route_handler_skips_non_get() -> None:
-    """POST/PUT to /v1/models is a no-op (lets the rest of the chain handle it)."""
-    from unittest.mock import MagicMock
-
-    from ccproxy.inspector.router import InspectorRouter
-    from ccproxy.inspector.routes.models import register_models_routes
-
     router = InspectorRouter(name="test_models_post", request_passthrough=True, response_passthrough=True)
     register_models_routes(router)
 
@@ -204,12 +261,6 @@ def test_models_route_handler_skips_non_get() -> None:
 
 
 def test_models_route_handler_honors_refresh_query() -> None:
-    """``?refresh=true`` triggers a live merge."""
-    from unittest.mock import MagicMock, patch
-
-    from ccproxy.inspector.router import InspectorRouter
-    from ccproxy.inspector.routes.models import register_models_routes
-
     router = InspectorRouter(name="test_models_refresh", request_passthrough=True, response_passthrough=True)
     register_models_routes(router)
 

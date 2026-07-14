@@ -82,6 +82,9 @@ class TestAnthropicBufferedToOpenAI:
         assert out["choices"][0]["message"]["content"] == "Hello world"
         assert out["choices"][0]["finish_reason"] == "stop"
         assert out["choices"][0]["message"]["role"] == "assistant"
+        # Funnel: the upstream usage (10 in / 5 out) is projected into the
+        # OpenAI usage block rather than dropped.
+        assert out["usage"] == {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
 
     def test_tool_call_extraction(self) -> None:
         raw = _make_anthropic_tool_body()
@@ -104,20 +107,37 @@ class TestAnthropicBufferedToOpenAI:
         # Text-and-tool answer carries text + tool_calls; finish_reason is tool_calls.
         assert "weather" in (choice["message"]["content"] or "")
         assert choice["finish_reason"] == "tool_calls"
+        # Funnel: upstream usage (20 in / 15 out) is projected, not dropped.
+        assert out["usage"] == {"prompt_tokens": 20, "completion_tokens": 15, "total_tokens": 35}
 
     def test_alias_providers(self) -> None:
-        """The Anthropic synthesizer applies to every registered alias."""
-        raw = _make_anthropic_text_body("via alias", model="test-model")
-        for alias in ("deepseek", "zai", "minimax"):
+        """The Anthropic synthesizer applies to ``deepseek`` and ``zai`` too."""
+        raw = _make_anthropic_text_body("via deepseek", model="deepseek-chat")
+        for alias in ("deepseek", "zai"):
             out_bytes = transform_buffered_response_sync(
                 raw_bytes=raw,
                 provider_type=alias,
                 inbound_format=InboundFormat.OPENAI_CHAT,
-                model="test-model",
+                model="deepseek-chat",
                 request_params=ModelRequestParameters(),
             )
             out = json.loads(out_bytes)
-            assert out["choices"][0]["message"]["content"] == "via alias"
+            assert out["choices"][0]["message"]["content"] == "via deepseek"
+
+    def test_minimax_provider(self) -> None:
+        """The Anthropic synthesizer applies to the MiniMax provider."""
+        raw = _make_anthropic_text_body("via MiniMax", model="MiniMax-M3")
+
+        out_bytes = transform_buffered_response_sync(
+            raw_bytes=raw,
+            provider_type="minimax",
+            inbound_format=InboundFormat.OPENAI_CHAT,
+            model="MiniMax-M3",
+            request_params=ModelRequestParameters(),
+        )
+
+        out = json.loads(out_bytes)
+        assert out["choices"][0]["message"]["content"] == "via MiniMax"
 
 
 # ── Anthropic buffered → OpenAI Responses ──────────────────────────────────

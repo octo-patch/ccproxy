@@ -60,7 +60,7 @@ providers:
     auth:
       type: file
       file: ~/.config/ccproxy/perplexity-session-token
-    host: www.perplexity.ai
+    base_url: https://www.perplexity.ai
     path: /rest/sse/perplexity_ask
     type: perplexity_pro
     fingerprint_profile: chrome131         # curl-cffi TLS impersonation
@@ -98,8 +98,10 @@ ccproxy translates OpenAI ↔ Perplexity transparently.
 
 ### 4. Available models
 
-22 models in the catalog (`src/ccproxy/specs/perplexity_models.json`), addressable
-by their OpenAI-style ID:
+The packaged `config.yaml` declares 22 Perplexity modes, sourced from
+`src/ccproxy/specs/perplexity_models.json`. The synthetic `/v1/models` catalog
+is derived from those effective model bindings; each is addressable by its
+OpenAI-style ID:
 
 | Model ID | Tier | Notes |
 |---|---|---|
@@ -419,7 +421,7 @@ providers:
     auth:
       type: file                           # or `command` (any shell that prints the cookie)
       file: ~/.config/ccproxy/perplexity-session-token
-    host: www.perplexity.ai
+    base_url: https://www.perplexity.ai
     path: /rest/sse/perplexity_ask
     type: perplexity_pro                   # ccproxy-internal provider id
     fingerprint_profile: chrome131         # curl-cffi impersonation (recommended)

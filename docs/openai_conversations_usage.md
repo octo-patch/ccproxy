@@ -34,7 +34,7 @@ Add this to your `ccproxy.yaml` under `providers:` (it is also shipped as a pack
 ```yaml
 providers:
   openai_conversations:
-    host: chatgpt.com
+    base_url: https://chatgpt.com
     type: openai_conversations
     fingerprint_profile: chrome136          # browser TLS+HTTP/2 impersonation
     auth:
@@ -223,8 +223,10 @@ Pass the ChatGPT model slug as the `model`:
 | `gpt-5-5-pro` | deeper-reasoning default |
 | `gpt-5-5` | faster |
 
-There is no `/v1/models` catalog for this provider — just pass the slug your account has access
-to. An unknown slug is rejected by ChatGPT upstream.
+ChatGPT exposes no compatible upstream discovery endpoint for wildcard refresh.
+Declare account-supported slugs in sibling `config.yaml` to advertise them from
+ccproxy's synthetic `/v1/models`, or pass a supported slug directly when using
+sentinel routing. An unknown slug is rejected by ChatGPT upstream.
 
 ---
 

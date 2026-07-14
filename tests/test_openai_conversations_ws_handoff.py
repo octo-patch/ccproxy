@@ -944,7 +944,7 @@ class TestTransportOverrideAddonContinuationHeader:
 
     async def test_openai_conversations_provider_stamps_continuation_header(self) -> None:
         provider = Provider(
-            host="chatgpt.com",
+            base_url="https://chatgpt.com",
             type="openai_conversations",
             fingerprint_profile="chrome136",
         )
@@ -964,7 +964,7 @@ class TestTransportOverrideAddonContinuationHeader:
 
     async def test_non_openai_conversations_provider_no_continuation_header(self) -> None:
         provider = Provider(
-            host="api.anthropic.com",
+            base_url="https://api.anthropic.com",
             type="anthropic",
             fingerprint_profile="chrome131",
         )

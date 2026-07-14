@@ -27,6 +27,7 @@ from ccproxy.lightllm.adapters.openai_chat import OpenAIChatAdapter
 from ccproxy.lightllm.adapters.openai_conversations import OpenAIConversationsAdapter
 from ccproxy.lightllm.adapters.openai_responses import OpenAIResponsesAdapter
 from ccproxy.lightllm.adapters.perplexity import PerplexityAdapter
+from ccproxy.lightllm.adapters.promptast import PromptAstAdapter, parsed_request_from_alloy
 from ccproxy.lightllm.parsed import RawExtras
 
 if TYPE_CHECKING:
@@ -71,4 +72,6 @@ __all__ = [
     "OpenAIConversationsAdapter",
     "OpenAIResponsesAdapter",
     "PerplexityAdapter",
+    "PromptAstAdapter",
+    "parsed_request_from_alloy",
 ]

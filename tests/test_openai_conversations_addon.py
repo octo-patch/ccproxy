@@ -57,11 +57,14 @@ def _make_flow(
 ) -> MagicMock:
     flow = MagicMock()
     flow.id = "test-flow-id"
-    flow.metadata = {
+    # mitmproxy's Flow.metadata is heterogeneous (dict[str, Any]); mirror that
+    # so boolean ccproxy flags type-check alongside the string provider name.
+    metadata: dict[str, object] = {
         "ccproxy.auth_provider": provider,
     }
     if auth_injected:
-        flow.metadata["ccproxy.auth_injected"] = True
+        metadata["ccproxy.auth_injected"] = True
+    flow.metadata = metadata
     flow.request.method = method
     flow.request.path = path
     flow.request.pretty_url = f"https://{host}{path}"
@@ -100,6 +103,7 @@ def _make_config(
     provider.auth = MagicMock()
     provider.auth.file_path = credential_path
     cfg.providers = {provider_name: provider}
+    cfg.get_provider.side_effect = lambda name: cfg.providers.get(name)
     oaic_cfg = MagicMock()
     oaic_cfg.warmup_throttle_seconds = warmup_throttle_seconds
     oaic_cfg.sentinel_skew_seconds = sentinel_skew_seconds

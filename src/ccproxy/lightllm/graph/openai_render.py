@@ -35,10 +35,9 @@ import json
 import logging
 import time
 import uuid
-from collections import deque
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import TYPE_CHECKING, Literal, cast
 
 from pydantic_ai.messages import (
     FinalResultEvent,
@@ -57,6 +56,11 @@ from pydantic_ai.messages import (
 from pydantic_graph import GraphBuilder, StepContext, TypeExpression
 
 import ccproxy.lightllm.graph._subgraph_patch  # noqa: F401  -- installs GraphBuilder.add_subgraph
+from ccproxy.lightllm.graph import _usage
+from ccproxy.lightllm.graph._base import RenderState, ResponseRenderFSM
+
+if TYPE_CHECKING:
+    from pydantic_ai.usage import RequestUsage
 
 logger = logging.getLogger(__name__)
 
@@ -108,42 +112,53 @@ def _emit_chunk(
     return f"data: {json.dumps(chunk, separators=(',', ':'))}\n\n".encode()
 
 
+def _emit_usage_chunk(
+    *,
+    chunk_id: str,
+    created: int,
+    model: str,
+    usage: RequestUsage,
+) -> bytes:
+    """A terminal ``chat.completion.chunk`` carrying usage with empty ``choices``.
+
+    This is the OpenAI streaming usage-report shape (what ``stream_options.
+    include_usage`` requests). ccproxy always emits it when usage was captured,
+    so downstream billing never has to fall back to token estimation.
+    """
+    chunk: dict[str, object] = {
+        "id": chunk_id,
+        "object": "chat.completion.chunk",
+        "created": created,
+        "model": model,
+        "choices": [],
+        "usage": _usage.to_openai_chat(usage),
+    }
+    return f"data: {json.dumps(chunk, separators=(',', ':'))}\n\n".encode()
+
+
 # ── State ──────────────────────────────────────────────────────────────────
 
 
 @dataclass
-class _OpenAIRenderState:
+class _OpenAIRenderState(RenderState):
     """FSM state for one OpenAI render graph run.
 
-    The ``pending_events`` queue holds the single :class:`ModelResponseStreamEvent`
-    pushed by :meth:`OpenAIResponseRenderFSM.render` before each graph run; the
-    FSM router pops from it. ``out`` accumulates the SSE wire bytes emitted by
-    handler steps; the terminal step returns ``bytes(out)`` and resets the buffer.
-    The remaining fields (``chunk_id``, ``created``, ``model``, ``role_emitted``,
+    Shared queue/output/telemetry slots come from :class:`RenderState`. The
+    remaining fields (``chunk_id``, ``created``, ``role_emitted``,
     ``part_to_tool_call_index``, ``next_tool_call_index``, ``finish_reason``)
     persist across render calls so the stream-level lifecycle stays consistent.
-    ``current_ir_index`` and ``current_part``/``current_delta`` are transient
-    scratch fields written by the inner-subgraph open steps.
+    ``current_ir_index`` is a transient scratch field written by the
+    inner-subgraph open steps.
     """
 
     chunk_id: str
     created: int
-    model: str
     role_emitted: bool = False
     part_to_tool_call_index: dict[int, int] = field(default_factory=dict)
     next_tool_call_index: int = 0
     finish_reason: _FinishReason = "stop"
     current_ir_index: int = 0
     """Transient: the IR event index, stashed by the inner-subgraph open step."""
-    pending_events: deque[ModelResponseStreamEvent] = field(default_factory=deque)
-    out: bytearray = field(default_factory=bytearray)
-
-    # ── Telemetry (never-silently-drop diagnostics) ───────────────────────────
-    events_received: int = 0
-    """Total IR events dispatched through the render FSM (across all render calls)."""
-
-    bytes_emitted: int = 0
-    """Total content-SSE bytes emitted by render steps (excludes the close terminator)."""
 
 
 class _RenderDone:
@@ -448,12 +463,12 @@ _render_graph = _g.build()
 # ── Public class ───────────────────────────────────────────────────────────
 
 
-class OpenAIResponseRenderFSM:
+class OpenAIResponseRenderFSM(ResponseRenderFSM[_OpenAIRenderState]):
     """Async pydantic-graph-driven OpenAI Chat Completion SSE renderer.
 
     Behavioral twin of
     :class:`ccproxy.lightllm.response.render_openai.OpenAIResponseRender`,
-    re-expressed as a :mod:`pydantic_graph.beta` ``GraphBuilder`` FSM. One
+    re-expressed as a :mod:`pydantic_graph` ``GraphBuilder`` FSM. One
     graph run per :meth:`render` call drives a single
     :class:`ModelResponseStreamEvent` through the per-variant dispatch ladder
     and returns the emitted SSE bytes. :meth:`close` is imperative — the
@@ -461,40 +476,33 @@ class OpenAIResponseRenderFSM:
     """
 
     name = "openai_chat"
+    _graph = _render_graph
 
-    def __init__(self, *, model: str = "unknown") -> None:
-        self._state = _OpenAIRenderState(
+    def _initial_state(self, *, model: str) -> _OpenAIRenderState:
+        return _OpenAIRenderState(
             chunk_id=f"chatcmpl-{uuid.uuid4().hex[:24]}",
             created=int(time.time()),
             model=model,
         )
 
-    @property
-    def state(self) -> _OpenAIRenderState:
-        """Expose FSM state for tests and telemetry inspection."""
-        return self._state
+    async def close(
+        self,
+        *,
+        usage: RequestUsage | None = None,
+        raw_extras: Mapping[str, object] | None = None,
+    ) -> bytes:
+        """Emit the final ``finish_reason`` chunk, the usage chunk, then ``[DONE]``.
 
-    async def render(self, event: ModelResponseStreamEvent) -> bytes:
-        """One IR event → zero-or-more bytes of OpenAI Chat Completion SSE wire output."""
-        self._state.pending_events.append(event)
-        result: bytes = await _render_graph.run(state=self._state)
-        return result
-
-    async def close(self) -> bytes:
-        """Emit the final ``finish_reason`` chunk plus the ``[DONE]`` terminator.
-
-        Imperative (no FSM): the terminator sequence is a fixed two-step
-        emission with no per-event dispatch. Emits a telemetry warning when IR
-        events arrived but no content bytes were rendered — a silent empty
-        OpenAI Chat response must be explainable from logs.
+        Imperative (no FSM): the terminator sequence is fixed. When the intake
+        captured usage, a terminal usage-only chunk (empty ``choices``) is
+        emitted before ``[DONE]`` — the funnel re-stamping the token accounting
+        the cross-format transform would otherwise drop. Emits a telemetry
+        warning when IR events arrived but no content bytes were rendered — a
+        silent empty OpenAI Chat response must be explainable from logs.
         """
+        del raw_extras  # no OpenAI-chat wire slot for arbitrary upstream metadata
         state = self._state
-        if state.events_received and not state.bytes_emitted:
-            logger.warning(
-                "openai render received %d IR event(s) but emitted NO content bytes "
-                "before close — every event mapped to a no-op wire surface",
-                state.events_received,
-            )
+        self._log_silent_close()
         out = bytearray()
         out += _emit_chunk(
             chunk_id=state.chunk_id,
@@ -503,5 +511,12 @@ class OpenAIResponseRenderFSM:
             delta={},
             finish_reason=state.finish_reason,
         )
+        if not _usage.usage_is_empty(usage):
+            out += _emit_usage_chunk(
+                chunk_id=state.chunk_id,
+                created=state.created,
+                model=state.model,
+                usage=cast("RequestUsage", usage),
+            )
         out += b"data: [DONE]\n\n"
         return bytes(out)

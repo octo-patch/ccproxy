@@ -307,11 +307,7 @@ class TestErrorHandling:
 
 
 def _make_collect_pipeline(*, provider_type: str, inbound_format: InboundFormat, model: str) -> SSEPipeline:
-    from ccproxy.lightllm.graph.buffered import (
-        intake_finish_reason,
-        intake_provider_response_id,
-        render_parts_to_listener,
-    )
+    from ccproxy.lightllm.graph.buffered import render_parts_to_listener
 
     intake = dispatch_intake(provider_type=provider_type, model=model, request_params=ModelRequestParameters())
 
@@ -320,8 +316,8 @@ def _make_collect_pipeline(*, provider_type: str, inbound_format: InboundFormat,
             parts=parts,
             inbound_format=inbound_format,
             model=model,
-            provider_response_id=intake_provider_response_id(intake),
-            finish_reason=intake_finish_reason(intake),
+            provider_response_id=intake.provider_response_id,
+            finish_reason=intake.finish_reason,
         )
 
     return SSEPipeline(intake=intake, buffered_render=_buffered_render)

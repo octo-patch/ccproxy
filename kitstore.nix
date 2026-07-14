@@ -53,6 +53,7 @@
       node = "@repo:ty";
       mount = "lsp/ty";
     }
+    { node = "@repo:litellm"; mount = "litellm"; }
   ];
   config = {
     auto_mount = true;

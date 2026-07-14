@@ -136,7 +136,7 @@ def _is_oaic_flow(flow: http.HTTPFlow) -> bool:
     provider_name = metadata_from_flow(flow).auth_provider
     if not provider_name:
         return False
-    provider = get_config().providers.get(provider_name)
+    provider = get_config().get_provider(provider_name)
     return provider is not None and provider.type == "openai_conversations"
 
 
@@ -750,11 +750,11 @@ class OpenAIConversationsAddon:
 
         target_path = provider.path or _CONVERSATION_PATH
         flow.request.method = "POST"
-        flow.request.scheme = "https"
+        flow.request.scheme = provider.scheme
         flow.request.host = provider.host
-        flow.request.port = 443
+        flow.request.port = provider.port
         flow.request.path = target_path
-        flow.server_conn = Server(address=(provider.host, 443))
+        flow.server_conn = Server(address=(provider.host, provider.port))
         flow.request.headers["content-type"] = "application/json"
         flow.request.content = json.dumps(body).encode()
         logger.debug("oaic image render: op=%s → %s%s", operation, provider.host, target_path)
@@ -778,7 +778,7 @@ class OpenAIConversationsAddon:
             return
 
         config = get_config()
-        provider = config.providers.get(metadata.auth_provider)
+        provider = config.get_provider(metadata.auth_provider)
         if provider is None:
             self._fail_image(flow, status=502, message="image provider is not configured")
             return
@@ -880,7 +880,7 @@ class OpenAIConversationsAddon:
             return
 
         config = get_config()
-        provider = config.providers.get(provider_name)
+        provider = config.get_provider(provider_name)
         if provider is None or provider.type != "openai_conversations":
             return
 
@@ -990,7 +990,7 @@ class OpenAIConversationsAddon:
         provider_name = metadata.auth_provider
         if not provider_name:
             return
-        provider = get_config().providers.get(provider_name)
+        provider = get_config().get_provider(provider_name)
         if provider is None:
             return
         profile = provider.fingerprint_profile or transport.DEFAULT_PROFILE

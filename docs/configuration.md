@@ -2,12 +2,24 @@
 
 ## Overview
 
-ccproxy reads a single configuration file: `ccproxy.yaml`.
+ccproxy reads two sibling configuration files from the same directory:
+
+- `ccproxy.yaml` configures ccproxy-native services: providers, authentication,
+  hooks, inspection, shaping, and transport behavior.
+- `config.yaml` is a LiteLLM-compatible frontend for model aliases,
+  destinations, credentials, and per-model request defaults.
+
+`config.yaml` is compiled into ccproxy's existing provider, routing,
+authentication, transform, and model-discovery services. LiteLLM is not
+installed or executed, and the retired LiteLLM runtime router is not restored.
 
 **Discovery order** (highest to lowest precedence):
 
-1. `$CCPROXY_CONFIG_DIR/ccproxy.yaml`
-2. `~/.config/ccproxy/ccproxy.yaml`
+1. `$CCPROXY_CONFIG_DIR/{ccproxy.yaml,config.yaml}`
+2. `~/.config/ccproxy/{ccproxy.yaml,config.yaml}`
+
+Either file may be absent. Without `ccproxy.yaml`, native settings use their
+defaults. Without `config.yaml`, no model bindings are generated.
 
 ## Installation
 
@@ -17,13 +29,68 @@ Install ccproxy via uv:
 uv tool install ai-ccproxy
 ```
 
-Initialize the config file:
+Initialize both configuration files:
 
 ```bash
 ccproxy init
 ```
 
-This writes `~/.config/ccproxy/ccproxy.yaml` with defaults. Use `--force` to overwrite an existing file.
+This writes `~/.config/ccproxy/ccproxy.yaml` and the sibling
+`~/.config/ccproxy/config.yaml` with defaults. Use `--force` to overwrite
+existing files.
+
+## LiteLLM-compatible model configuration
+
+Existing LiteLLM model declarations can be placed in the sibling
+`config.yaml`. For example, Requesty needs only its normal OpenAI-compatible
+endpoint and bearer key:
+
+```yaml
+model_list:
+  - model_name: requesty/*
+    litellm_params:
+      model: requesty/*
+      api_base: https://router.requesty.ai/v1
+      api_key: os.environ/REQUESTY_API_KEY
+      temperature: 0.2
+```
+
+Clients can then request `requesty/openai/gpt-4o-mini` (or another model
+reported by Requesty). The public wildcard is matched to the upstream
+wildcard, the destination is injected as an existing ccproxy `Provider`, and
+an explicitly supplied client parameter overrides the configured default.
+
+The supported compatibility surface includes:
+
+- `model_list`, `model_name`, `litellm_params`, and opaque `model_info`;
+- exact aliases, one-wildcard aliases, and deterministic alias chains;
+- `model`, `custom_llm_provider`, `api_base`, and its `base_url` alias;
+- literal API keys and runtime `os.environ/NAME` API-key sources;
+- `extra_headers`, OpenAI `organization`, and per-model request defaults;
+- relative `include` files, with recursive include and cycle handling;
+- native-provider inheritance when no endpoint is supplied, allowing a model
+  declaration to reuse ccproxy OAuth, shaping, fingerprint, and transport
+  configuration.
+
+For safety, an explicit `api_base`/`base_url` does not inherit credentials,
+headers, query values, or fingerprint data from a native provider. Supply the
+deployment's `api_key` explicitly or let the client credential pass through.
+
+The compiler deliberately rejects active behavior that would require
+LiteLLM's runtime router, including duplicate deployments for the same
+`model_name`, load-balancing weights/order, RPM/TPM limits, parallel-request
+limits, retries, fallbacks, tag routing, budgets, and active
+`router_settings`. LiteLLM proxy-management and callback settings have no
+ccproxy runtime effect and produce compatibility diagnostics.
+
+Pricing fields that LiteLLM stores with deployment metadata remain catalog
+metadata; they are not inserted into provider request bodies. Arbitrary model
+capability databases are not reproduced inside ccproxy. Opaque `model_info`
+values are preserved without expanding `os.environ/NAME`, preventing an
+environment value from being exposed through `/v1/models`. LiteLLM behavior
+controls such as `drop_params` and `merge_reasoning_content_in_choices` are
+unsupported compatibility semantics and are never forwarded as inference
+parameters.
 
 ## Full Config Reference
 
@@ -42,7 +109,7 @@ ccproxy:
       auth:
         type: command
         command: "jq -r '.claudeAiOauth.accessToken' ~/.claude/.credentials.json"
-      host: api.anthropic.com
+      base_url: https://api.anthropic.com
       path: /v1/messages
       type: anthropic        # adapter-family name (drives wire-format dispatch)
 
@@ -155,7 +222,7 @@ This does NOT affect the main request/response forwarding path (mitmproxy handle
 
 ### providers
 
-`providers` maps a sentinel suffix to a `Provider` entry: an auth source, a single destination (`host` + `path`), and an adapter-family `type` identifier that names the wire format the destination speaks (one of `anthropic`, `openai`, `google` / `gemini` / `vertex_ai` / `vertex_ai_beta`, `perplexity_pro`; Anthropic-compatible forks like `deepseek`, `zai`, and `minimax` use `type: anthropic`). When ccproxy sees a sentinel key matching `sk-ant-oat-ccproxy-{name}`, the matching `Provider` drives both auth injection (`inject_auth`) and routing (auto-redirect or cross-format `transform` via lightllm).
+`providers` maps a sentinel suffix to a `Provider` entry: an auth source, a single destination (`base_url` + `path`), and an adapter-family `type` identifier that names the wire format the destination speaks (one of `anthropic`, `openai`, `google` / `gemini` / `vertex_ai` / `vertex_ai_beta`, `perplexity_pro`). Compatible providers use the closest wire-format family, such as `type: anthropic`. When ccproxy sees a sentinel key matching `sk-ant-oat-ccproxy-{name}`, the matching `Provider` drives both auth injection (`inject_auth`) and routing (auto-redirect or cross-format `transform` via lightllm).
 
 **Simple form** — auth dispatched as a bare shell command:
 
@@ -164,7 +231,7 @@ ccproxy:
   providers:
     anthropic:
       auth: "jq -r '.claudeAiOauth.accessToken' ~/.claude/.credentials.json"
-      host: api.anthropic.com
+      base_url: https://api.anthropic.com
       path: /v1/messages
       type: anthropic
 ```
@@ -178,7 +245,7 @@ ccproxy:
       auth:
         type: command
         command: "jq -r '.claudeAiOauth.accessToken' ~/.claude/.credentials.json"
-      host: api.anthropic.com
+      base_url: https://api.anthropic.com
       path: /v1/messages
       type: anthropic
 
@@ -186,7 +253,7 @@ ccproxy:
       auth:
         type: command
         command: "jq -r '.access_token' ~/.gemini/oauth_creds.json"
-      host: cloudcode-pa.googleapis.com
+      base_url: https://cloudcode-pa.googleapis.com
       path: "/v1internal:{action}"
       type: gemini
 
@@ -195,7 +262,7 @@ ccproxy:
         type: command
         command: "printenv DEEPSEEK_API_KEY"
         header: x-api-key      # send token as `x-api-key: <token>` (not `Authorization: Bearer …`)
-      host: api.deepseek.com
+      base_url: https://api.deepseek.com
       path: /anthropic/v1/messages
       type: anthropic          # DeepSeek's anthropic-compat endpoint speaks the anthropic format
 
@@ -203,28 +270,28 @@ ccproxy:
       auth:
         type: command
         command: "printenv MINIMAX_API_KEY"
-        header: x-api-key      # send token as `x-api-key: <token>` (not `Authorization: Bearer …`)
-      host: api.minimax.io
-      path: /anthropic/v1/messages
+        header: x-api-key      # send token as `x-api-key: <token>` (not `Authorization: Bearer ...`)
+      base_url: https://api.minimax.io/anthropic
+      path: /v1/messages
       type: anthropic          # MiniMax-M3 and MiniMax-M2.7 via the compatible endpoint
 ```
 
 The packaged template selects the global `anthropic` endpoint. A provider has one destination, so use the
 corresponding values below when selecting another MiniMax endpoint:
 
-| `type` | Region | `host` | `path` | `auth.header` |
+| `type` | Region | `base_url` | `path` | `auth.header` |
 |---|---|---|---|---|
-| `anthropic` | Global | `api.minimax.io` | `/anthropic/v1/messages` | `x-api-key` |
-| `anthropic` | China | `api.minimaxi.com` | `/anthropic/v1/messages` | `x-api-key` |
-| `openai` | Global | `api.minimax.io` | `/v1/chat/completions` | Omit to use the default Bearer header |
-| `openai` | China | `api.minimaxi.com` | `/v1/chat/completions` | Omit to use the default Bearer header |
+| `anthropic` | Global | `https://api.minimax.io/anthropic` | `/v1/messages` | `x-api-key` |
+| `anthropic` | China | `https://api.minimaxi.com/anthropic` | `/v1/messages` | `x-api-key` |
+| `openai` | Global | `https://api.minimax.io/v1` | `/chat/completions` | Omit to use the default Bearer header |
+| `openai` | China | `https://api.minimaxi.com/v1` | `/chat/completions` | Omit to use the default Bearer header |
 
 **Provider entry fields:**
 
 | Field | Description |
 |---|---|
 | `auth` | Discriminated auth source. Bare strings coerce to `{type: command, command: <str>}`. |
-| `host` | Single destination hostname (e.g. `api.anthropic.com`). |
+| `base_url` | Absolute destination URL, including an optional base path (e.g. `https://api.minimax.io/anthropic`). |
 | `path` | Destination path. Supports `{model}` and `{action}` templating substituted from the body / URL at routing time. Defaults to `/`. |
 | `type` | Wire-format identifier (`anthropic`, `gemini`, `openai`, `openai_responses`, `perplexity_pro`, …). When the incoming format matches `type`, the routing handler just rewrites the destination; when they differ, the body is rewritten via `lightllm`. |
 
@@ -351,7 +418,7 @@ ccproxy:
         client_id: <gemini-cli installed-app client_id>
         client_secret: <gemini-cli installed-app client_secret>
         header: authorization
-      host: cloudcode-pa.googleapis.com
+      base_url: https://cloudcode-pa.googleapis.com
       path: "/v1internal:{action}"
       type: gemini
 ```
@@ -371,7 +438,7 @@ ccproxy:
         refresh_path: claudeAiOauth.refreshToken
         expiry_path: claudeAiOauth.expiresAt
         header: authorization
-      host: api.anthropic.com
+      base_url: https://api.anthropic.com
       path: /v1/messages
       type: anthropic
 ```
@@ -552,7 +619,7 @@ ccproxy:
 | `match_model` | regex | — | Matched against `glom(body, "model")`. |
 | `dest_provider` | string | — | ccproxy provider name. Resolves to a `providers` entry for host/path/auth/format. The provider's auth is applied automatically — no separate api-key field is required. |
 | `dest_model` | string | — | Rewrites `body['model']`. Only used in `transform` mode. |
-| `dest_host` | string | — | Raw host override. Bypasses Provider lookup. |
+| `dest_base_url` | string | — | Absolute destination base URL override. Bypasses Provider lookup. |
 | `dest_path` | string | — | Raw path override. Bypasses Provider lookup. |
 | `dest_vertex_project` | string | — | GCP project ID for Vertex AI transforms. Required for context caching with `vertex_ai`/`vertex_ai_beta` providers. |
 | `dest_vertex_location` | string | — | GCP region for Vertex AI transforms (e.g. `us-central1`). |

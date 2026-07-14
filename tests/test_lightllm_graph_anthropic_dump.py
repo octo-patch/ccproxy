@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -455,3 +455,171 @@ def test_metadata_preserved_via_raw_extras(parse: Parse, render: Render) -> None
     parsed = parse(body)
     rendered = json.loads(render(parsed))
     assert rendered.get("metadata") == {"user_id": "alice"}
+
+
+# ---------------------------------------------------------------------------
+# Tool cache_control + defer_loading (deferment-aware stamping)
+# ---------------------------------------------------------------------------
+
+
+def _tool_body(tools: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "model": "claude-3-5-haiku-20241022",
+        "max_tokens": 16,
+        "messages": [{"role": "user", "content": "hi"}],
+        "tools": tools,
+    }
+
+
+def test_dump_knob_stamps_last_tool_only(parse: Parse, render: Render) -> None:
+    parsed = parse(
+        _tool_body(
+            [
+                {"name": "a", "input_schema": {"type": "object"}},
+                {"name": "b", "input_schema": {"type": "object"}},
+                {"name": "c", "input_schema": {"type": "object"}},
+            ]
+        )
+    )
+    cast(dict[str, Any], parsed.settings)["anthropic_cache_tool_definitions"] = "5m"
+    tools = json.loads(render(parsed))["tools"]
+    assert [("cache_control" in t) for t in tools] == [False, False, True]
+    assert tools[2]["cache_control"] == {"type": "ephemeral", "ttl": "5m"}
+
+
+def test_dump_knob_stamps_last_nondeferred_tool(parse: Parse, render: Render) -> None:
+    parsed = parse(
+        _tool_body(
+            [
+                {"name": "a", "input_schema": {"type": "object"}},
+                {"name": "b", "input_schema": {"type": "object"}},
+                {"name": "c", "input_schema": {"type": "object"}, "defer_loading": True},
+                {"name": "d", "input_schema": {"type": "object"}, "defer_loading": True},
+            ]
+        )
+    )
+    cast(dict[str, Any], parsed.settings)["anthropic_cache_tool_definitions"] = "1h"
+    tools = json.loads(render(parsed))["tools"]
+    assert [("cache_control" in t) for t in tools] == [False, True, False, False]
+    assert tools[1]["cache_control"] == {"type": "ephemeral", "ttl": "1h"}
+    assert [t.get("defer_loading") for t in tools] == [None, None, True, True]
+
+
+def test_dump_knob_all_deferred_emits_no_marker(parse: Parse, render: Render) -> None:
+    parsed = parse(
+        _tool_body(
+            [
+                {"name": "a", "input_schema": {"type": "object"}, "defer_loading": True},
+                {"name": "b", "input_schema": {"type": "object"}, "defer_loading": True},
+            ]
+        )
+    )
+    cast(dict[str, Any], parsed.settings)["anthropic_cache_tool_definitions"] = "5m"
+    tools = json.loads(render(parsed))["tools"]
+    assert all("cache_control" not in t for t in tools)
+    assert all(t["defer_loading"] is True for t in tools)
+
+
+def test_roundtrip_last_nondeferred_marker_byte_faithful(parse: Parse, render: Render) -> None:
+    body = _tool_body(
+        [
+            {"name": "a", "input_schema": {"type": "object"}},
+            {
+                "name": "b",
+                "input_schema": {"type": "object"},
+                "cache_control": {"type": "ephemeral", "ttl": "1h"},
+            },
+            {"name": "c", "input_schema": {"type": "object"}, "defer_loading": True},
+        ]
+    )
+    parsed = parse(body)
+    assert "tools" not in parsed.raw_extras
+    assert cast(dict[str, Any], parsed.settings).get("anthropic_cache_tool_definitions") == "1h"
+    tools = json.loads(render(parsed))["tools"]
+    assert [_canonicalize_block(t) for t in tools] == [_canonicalize_block(t) for t in body["tools"]]
+
+
+def test_roundtrip_all_stamped_via_override(parse: Parse, render: Render) -> None:
+    """Regression for the retired all-uniform lift rule: all-stamped now overrides."""
+    body = _tool_body(
+        [
+            {"name": "a", "input_schema": {}, "cache_control": {"type": "ephemeral", "ttl": "5m"}},
+            {"name": "b", "input_schema": {}, "cache_control": {"type": "ephemeral", "ttl": "5m"}},
+        ]
+    )
+    parsed = parse(body)
+    assert parsed.raw_extras["tools"] == body["tools"]
+    assert "anthropic_cache_tool_definitions" not in dict(parsed.settings)
+    assert json.loads(render(parsed))["tools"] == body["tools"]
+
+
+def test_roundtrip_marker_on_deferred_tool_via_override(parse: Parse, render: Render) -> None:
+    """Fidelity over correction: Anthropic would reject this, ccproxy preserves it."""
+    body = _tool_body(
+        [
+            {"name": "a", "input_schema": {}},
+            {
+                "name": "b",
+                "input_schema": {},
+                "defer_loading": True,
+                "cache_control": {"type": "ephemeral", "ttl": "5m"},
+            },
+        ]
+    )
+    parsed = parse(body)
+    assert parsed.raw_extras["tools"] == body["tools"]
+    assert json.loads(render(parsed))["tools"] == body["tools"]
+
+
+def test_roundtrip_deferred_no_markers(parse: Parse, render: Render) -> None:
+    body = _tool_body(
+        [
+            {"name": "a", "input_schema": {"type": "object"}},
+            {"name": "b", "input_schema": {"type": "object"}, "defer_loading": True},
+        ]
+    )
+    parsed = parse(body)
+    assert "tools" not in parsed.raw_extras
+    tools = json.loads(render(parsed))["tools"]
+    assert [_canonicalize_block(t) for t in tools] == [_canonicalize_block(t) for t in body["tools"]]
+
+
+def test_roundtrip_server_tool_byte_faithful(parse: Parse, render: Render) -> None:
+    """Typed tools (versioned `type`, side fields like max_uses) ride the verbatim override."""
+    body = _tool_body(
+        [
+            {"name": "read", "input_schema": {"type": "object"}},
+            {"type": "web_search_20250305", "name": "web_search", "max_uses": 5},
+        ]
+    )
+    parsed = parse(body)
+    assert parsed.raw_extras["tools"] == body["tools"]
+    assert json.loads(render(parsed))["tools"] == body["tools"]
+
+
+def test_roundtrip_tool_search_pseudo_tool_byte_faithful(parse: Parse, render: Render) -> None:
+    body = _tool_body(
+        [
+            {"type": "tool_search_tool_bm25_20251119", "name": "tool_search_tool_bm25"},
+            {"name": "get_weather", "input_schema": {"type": "object"}, "defer_loading": True},
+        ]
+    )
+    parsed = parse(body)
+    assert json.loads(render(parsed))["tools"] == body["tools"]
+
+
+def test_roundtrip_typed_tool_with_canonical_marker_byte_faithful(parse: Parse, render: Render) -> None:
+    """Typed override wins over the canonical-marker lift; wire rides verbatim, knob unset."""
+    body = _tool_body(
+        [
+            {"type": "web_search_20250305", "name": "web_search"},
+            {
+                "name": "read",
+                "input_schema": {"type": "object"},
+                "cache_control": {"type": "ephemeral", "ttl": "5m"},
+            },
+        ]
+    )
+    parsed = parse(body)
+    assert "anthropic_cache_tool_definitions" not in dict(parsed.settings)
+    assert json.loads(render(parsed))["tools"] == body["tools"]

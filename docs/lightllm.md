@@ -97,6 +97,12 @@ src/ccproxy/lightllm/
 └── graph/                ← FSM modules for streaming responses
     ├── __init__.py       dispatch_dump_sync, dispatch_intake, dispatch_render
     │
+    ├── _base.py          IntakeState / ResponseIntakeFSM + RenderState /
+    │                      ResponseRenderFSM — shared state slots (funnel,
+    │                      telemetry), feed()/render() templates, SSE framing
+    │
+    ├── _usage.py         usage_from_* capture + to_* projection helpers
+    │
     ├── _subgraph_patch.py Monkey-patch installing GraphBuilder.add_subgraph
     │                      (temporary until pydantic_graph ships it natively)
     │
@@ -218,24 +224,28 @@ to is a separate decision (made by the transform router via sentinel-key or
 
 ## The FSM pattern (response side only)
 
-The four `lightllm/graph/*_intake.py` modules and two `*_render.py` modules
-share a single shape. These handle **streaming SSE** transformations and are
-the only place ccproxy still uses pydantic-graph at runtime — the request
-side is procedural adapter classmethods, not graphs. Reading
-`anthropic_intake.py` end-to-end is the fastest way to understand the idiom;
-the other modules echo it.
+The six `lightllm/graph/*_intake.py` modules and three `*_render.py` modules
+share a single shape, anchored by the base classes in `graph/_base.py`
+(`IntakeState` / `ResponseIntakeFSM` for intakes, `RenderState` /
+`ResponseRenderFSM` for renders). These handle **streaming SSE**
+transformations and are the only place ccproxy still uses pydantic-graph at
+runtime — the request side is procedural adapter classmethods, not graphs.
+Reading `anthropic_intake.py` end-to-end is the fastest way to understand the
+idiom; the other modules echo it.
 
 ```python
 from pydantic_graph import GraphBuilder, StepContext  # canonical, not .beta
 
-# 1. State — a mutable dataclass carrying everything the FSM needs across steps.
+from ccproxy.lightllm.graph._base import IntakeState, ResponseIntakeFSM
+
+# 1. State — a mutable dataclass inheriting the shared slots from
+#    IntakeState[EventT] (parts_manager, events_queue, out_events, the funnel
+#    slots usage/raw_extras/finish_reason/provider_response_id, and the
+#    telemetry counters). The subclass carries only provider-specific fields.
 @dataclass
-class _AnthropicIntakeState:
-    parts_manager: ModelResponsePartsManager
+class _AnthropicIntakeState(IntakeState[BetaRawMessageStreamEvent]):
     provider_name: str
     current_block: BetaContentBlock | None = None
-    events_queue: deque[BetaRawMessageStreamEvent] = field(default_factory=deque)
-    out_events: list[ModelResponseStreamEvent] = field(default_factory=list)
     # ... per-FSM extra fields
 
 # 2. Marker classes — sentinel values the decision routes on.
@@ -306,29 +316,38 @@ _g.add(
 # 8. Build once at import time.
 _intake_graph = _g.build()
 
-# 9. Public FSM wrapper — drives the graph per chunk of SSE bytes.
-class AnthropicResponseIntakeFSM:
-    def __init__(self, *, model: str, request_params: ModelRequestParameters):
-        self._state = _AnthropicIntakeState(
+# 9. Public FSM wrapper — ResponseIntakeFSM owns the SSE buffering, the
+#    byte tee, feed() (frame → enqueue → run graph), the funnel properties
+#    (usage / raw_extras / finish_reason / provider_response_id), and the
+#    shared _split_sse_frames() framer. The subclass provides the graph, the
+#    state, and the provider-specific payload parsing.
+class AnthropicResponseIntakeFSM(ResponseIntakeFSM[_AnthropicIntakeState]):
+    name = "anthropic"
+    _graph = _intake_graph
+
+    def _initial_state(self, *, model, request_params):
+        return _AnthropicIntakeState(
             parts_manager=ModelResponsePartsManager(model_request_parameters=request_params),
             provider_name="anthropic",
         )
 
-    async def feed(self, data: bytes) -> list[ModelResponseStreamEvent]:
-        # parse SSE frames out of the buffer, push typed events onto the
-        # state's events_queue, then run the graph
-        ...
-        self._state.out_events = []
-        result = await _intake_graph.run(state=self._state)
-        return result
+    def _drain_events(self):
+        # per-provider ``data:`` payload semantics — validate each complete
+        # frame into a typed event (or dispatch envelope)
+        for frame in self._split_sse_frames():
+            ...
 ```
 
 The render side (`anthropic_render.py`, `openai_render.py`,
-`openai_responses_render.py`) is symmetric: state owns an
-`events_queue: deque[ModelResponseStreamEvent]` and an `out: bytearray`; the
-outer router dispatches each IR event kind, with the `part` / `delta`
-type-switches handled by inner no-loop subgraphs; the terminal step returns
-`bytes(state.out)`.
+`openai_responses_render.py`) is symmetric: state inherits `RenderState`
+(`pending_events` deque, `out: bytearray`, telemetry counters) and the wrapper
+inherits `ResponseRenderFSM` (shared `render()` = push event → run graph, an
+`_initial_state` hook for the per-listener id generation, and the
+`_log_silent_close()` telemetry helper); the outer router dispatches each IR
+event kind, with the `part` / `delta` type-switches handled by inner no-loop
+subgraphs; the terminal step returns `bytes(state.out)`. Each `close()` stays
+wire-specific but shares the `close(*, usage=, raw_extras=)` keyword signature
+declared abstract on the base.
 
 ### Why this shape
 
@@ -417,6 +436,7 @@ one rename pass at the import sites suffices.
 | `openai_chat.py` | `OpenAIChatAdapter` — bidirectional wire ↔ IR for OpenAI Chat Completions |
 | `google.py` | `GoogleAdapter` — outbound-only IR → Google Gemini `generateContent` wire bytes. Direct dict construction with camelCase keys, base64-inline binary data, `generationConfig` hoist for sampling params. Does NOT wrap pydantic-ai's `GoogleModel` — too many ccproxy-specific tweaks (cloudcode-pa envelope, raw_extras passthrough). |
 | `perplexity.py` | `PerplexityAdapter` — outbound-only IR → Perplexity Pro wire bytes. Projects IR back to OpenAI-format dicts, then invokes `pplx.py:_build_pplx_payload` (the 28-field Perplexity payload builder) with `raw_extras["pplx"]` as the params block. |
+| `promptast.py` | `PromptAstAdapter` — **library-only, inbound-only** Alloy PromptAst JSON → IR. Not a listener wire format: no `InboundFormat`, no `Context`, no dispatch wiring. `parsed_request_from_alloy(prompt_ast, client_view)` builds a `ParsedRequest` a consumer hands to `dispatch_dump_sync`. See the Alloy PromptAst bridge section. |
 | `_envelope.py` | `parse_request_into_fields`, `parse_request`, `render_request` — test/inspector helpers |
 | `_anthropic_envelope.py` | Anthropic wire helpers |
 | `_openai_envelope.py` | OpenAI wire helpers |
@@ -425,6 +445,7 @@ one rename pass at the import sites suffices.
 
 | File | What its FSM does | Key marker classes |
 |---|---|---|
+| `_base.py` | Shared base classes. `IntakeState[EventT]` / `RenderState` carry the common state slots (queues, funnel slots `usage`/`raw_extras`/`finish_reason`/`provider_response_id`, telemetry counters); `ResponseIntakeFSM[StateT]` owns the byte tee, SSE buffering, the `feed()` template, `_split_sse_frames()`, the funnel properties, and the silent-empty telemetry helpers; `ResponseRenderFSM[StateT]` owns `render()` and the abstract `close(*, usage=, raw_extras=)` signature. Subclass hooks: `_initial_state`, `_drain_events`, `_graph`. | — |
 | `_subgraph_patch.py` | Installs `GraphBuilder.add_subgraph` via monkey-patch (tracks upstream TODO at `pydantic_graph/graph_builder.py:1469`). Registers a built `Graph` as a synthetic `Step` whose body awaits `subgraph.run(state=ctx.state, deps=ctx.deps, inputs=ctx.inputs)`. Shared `StateT` flows through unchanged; inner subgraph mutates the same state instance as the parent. Mermaid renders the subgraph as a single labelled node. Removable when upstream ships native subgraph composition. | — |
 | `anthropic_intake.py` | Anthropic SSE → IR `ModelResponseStreamEvent` (typed dispatch on `BetaRawMessageStreamEvent` union) | `_FeedDone`, `_IgnoredEvent` |
 | `anthropic_render.py` | IR `ModelResponseStreamEvent` → Anthropic SSE wire bytes | `_RenderDone` |
@@ -459,15 +480,17 @@ wire_bytes: bytes = dispatch_dump_sync(ctx, provider_type="anthropic")
 ```
 
 `dispatch_dump_sync` routes by upstream provider:
-* `anthropic` / `deepseek` / `zai` / `minimax` → `AnthropicAdapter.render(req)`
+* `anthropic` / `deepseek` / `zai` → `AnthropicAdapter.render(req)`
+* `minimax` -> `AnthropicAdapter.render(req)`
 * `openai` → `OpenAIChatAdapter.render(req)`
 * `google` / `gemini` / `vertex_ai` / `vertex_ai_beta` → `GoogleAdapter.render(req)`
 * `perplexity_pro` → `PerplexityAdapter.render(req)`
 * anything else → `UnsupportedUpstreamError`
 
-The Anthropic-compatible forks (`deepseek`, `zai`, `minimax`) deliberately share the
+The Anthropic-compatible forks (`deepseek`, `zai`) deliberately share the
 Anthropic adapter — their wire format is identical, only the upstream URL
-and auth differ (and those are handled by the `Provider` config).
+and auth differ (and those are handled by the `Provider` config). MiniMax
+uses the same adapter and is differentiated by its URL and authentication.
 
 ### Response side
 
@@ -624,7 +647,7 @@ outbound renderer (or response render) stitches it back onto the wire body.
 | `cc:msg:{i}:block:{j}` | Original `cache_control` dict from a content block | TTL wasn't `5m` or `1h` (the only values pydantic-ai's `CachePoint` accepts) — preserved so dump can re-apply verbatim |
 | `unknown_block:msg:{i}:idx:{j}` | Original wire-block dict | Block had a `type` we don't recognize — preserved so dump can emit it back |
 | `system` | The original `system` list from the body | Non-uniform `cache_control` across system blocks — can't be expressed via `settings['anthropic_cache_instructions']` (which is uniform-only) |
-| `tools` | The original `tools` list from the body | Non-uniform `cache_control` across tools — same reason |
+| `tools` | The original `tools` list from the body | Two independent triggers. **Typed tools**: any entry whose `type` is present and not `"custom"` (server/builtin tools — versioned `type`, side fields like `max_uses` — the IR can't model them; `ToolDefinition`s are still built for typed promotion, but the wire rides here verbatim). **Non-canonical cache markers**: the lift to `settings['anthropic_cache_tool_definitions']` fires only for exactly one marker, on the **last non-deferred** tool, with a supported TTL; every other pattern (all-stamped, mixed TTLs, marker on a deferred or non-boundary tool) rides here verbatim, and when the typed trigger fires the lift is skipped entirely (the marker already reaches the wire; the knob would double-count in the cache engine's census). `defer_loading` round-trips on `ToolDefinition.defer_loading` and is re-emitted only when `True` |
 | `metadata` | The body's `metadata` dict | Anthropic-specific; no IR slot |
 | Other unmodeled top-level keys | Copied verbatim under their wire name | E.g. `service_tier` |
 
@@ -707,16 +730,42 @@ the canonical Codex CLI path `/backend-api/codex/responses` (the
 `CHATGPT_CODEX_BASE_URL` base + `/responses` endpoint) in addition to
 the public-API `/v1/responses` form.
 
-### Response-side conventions
+### Response-side conventions — the usage/metadata funnel
 
-Streaming intakes drive `ModelResponsePartsManager` directly and don't
-currently surface per-message metadata via `raw_extras`. The buffered
-transform parses metadata into the listener-format envelope fields (usage,
-finish_reason, model) at serialization time. If you need response-side
-`raw_extras` (e.g., for citations, safety, groundingMetadata
-preservation), add a `state.raw_extras` field to the per-provider intake's
-FSM state and stitch it back on the buffered side — the pattern is
-symmetric with the request side.
+Streaming intakes drive `ModelResponsePartsManager` directly, which — like
+pydantic-ai's own parts manager — carries no token usage (in pydantic-ai
+proper, usage rides `StreamedResponse._usage` as side-channel state, never as a
+stream event). ccproxy replicates that accumulator: the shared state base
+(`graph/_base.py:IntakeState`) carries `usage: RequestUsage`,
+`raw_extras: dict`, `finish_reason`, and `provider_response_id` slots, exposed
+via same-named properties on `ResponseIntakeFSM` — so the funnel interface is
+guaranteed by type, and `buffered.py` / `sse_pipeline.py` /
+`inspector/addon.py` read the attributes directly (no `getattr` plumbing).
+Capture happens off the
+already-parsed wire events the IR has no slot for — Anthropic
+`message_start` / `message_delta`, the OpenAI terminal `include_usage` chunk,
+the OpenAI Responses `response.completed` envelope, Gemini `usageMetadata` —
+which the router would otherwise discard as ignored/skipped events. The mapping
+helpers live in `graph/_usage.py` (`usage_from_*` capture into the canonical
+`RequestUsage` where `input_tokens` excludes cache; `to_*` project back into
+each listener's native usage block).
+
+Usage is then re-stamped at every render seam so a cross-format transform never
+drops it: the buffered assemblers emit the listener's usage block (or omit it
+when the upstream reported none — never a fabricated zero), the OpenAI Chat
+stream appends a terminal `{choices: [], usage: {...}}` chunk before `[DONE]`,
+the OpenAI Responses stream fills `response.completed.usage`, and the Anthropic
+stream fills `message_delta.usage`. `raw_extras` additionally carries unmodeled
+per-message metadata (e.g. the upstream response id) rather than dropping it
+silently. All six intakes inherit the slots from the base, so the funnel
+interface is homogeneous; slots the wire never populates stay inert
+(`usage` empty, `finish_reason` / `provider_response_id` `None`) — Perplexity
+Pro and `openai_conversations` capture no token usage because their wire
+protocols report none (Perplexity's only usage is subscription quota, via the
+`pplx_usage` MCP tool), and only the OpenAI-family intakes populate
+`provider_response_id` (Anthropic carries its message id through
+`raw_extras["response_id"]`). If an upstream later exposes any of these,
+capture drops into the same seam.
 
 ### Round-trip contract
 
@@ -771,11 +820,23 @@ adapter's `_parse_tools` functions now consult
 # Anthropic — versioned wire-type discriminators
 ANTHROPIC_TYPED_TOOLS: dict[str, ToolPartKind] = {
     "web_search_20250305": "tool-search",
+    "web_search_20260209": "tool-search",
+    "tool_search_tool_bm25_20251119": "tool-search",
+    "tool_search_tool_regex_20251119": "tool-search",
 }
 
 # OpenAI — built-in server tools (Chat Completions sees these rarely)
 OPENAI_TYPED_TOOLS: dict[str, ToolPartKind] = {}
 ```
+
+**Promotion, not preservation.** This map only drives response-part
+promotion. Wire fidelity for typed tools is the `raw_extras["tools"]`
+verbatim override in `_parse_tools` (any `type` other than `"custom"`
+triggers it). The bm25/regex entries are mostly redundant for *native*
+traffic — native tool-search calls arrive as `server_tool_use` blocks
+already typed by `_map_server_tool_use_block` — but matter for the
+local/client-flavored path where a plain `tool_use` needs name-keyed
+promotion.
 
 `_anthropic_envelope._parse_tools` reads `tool["type"]` and looks up the
 kind; `_openai_envelope._parse_tools` does the same with its own table.
@@ -800,6 +861,37 @@ ships upstream (e.g. a new Anthropic dated web-search variant). Tests
 asserting typed parts go alongside the existing intake tests; see
 `tests/test_lightllm_graph_intake_anthropic.py::test_typed_search_tool_promotes_tool_call_part`
 for the canonical pattern.
+
+### Tool-search invariants
+
+The Anthropic intake FSM handles both sides of a native tool-search
+interaction: `server_tool_use` calls named `tool_search_tool_bm25` /
+`tool_search_tool_regex` map to `NativeToolSearchCallPart` (streamed args
+finalize to the canonical `{"queries": [...]}` shape at `content_block_stop`),
+and `tool_search_tool_result` blocks map to `NativeToolSearchReturnPart`
+(success → `discovered_tools`; error variant → `provider_details`).
+
+Constraints anything that touches these conversations must honor:
+
+- **Never orphan a call/result pair.** Anthropic 400s a replayed history
+  containing an unpaired `tool_search_tool_*` block. Hooks that reorder or
+  inject messages must not split or drop one side. Known hazard:
+  `inject_mcp_notifications` inserts its synthetic pair immediately before
+  the final message, which can split a trailing assistant-call/user-result
+  pair — harmless for plain tool_use (Anthropic tolerates the detached
+  result) but not for `tool_search_tool_*` blocks.
+- **Never strand a `tool_reference`.** `tool_reference` blocks inside a
+  `tool_result` may only name tools present in the same request's `tools`
+  array; hooks that filter or rewrite `tools` must keep referenced tools.
+- **Known dump-side limitation.** `dump_messages` does not re-emit
+  `server_tool_use` / `tool_search_tool_result` blocks from IR history:
+  native parts (`NativeToolSearchCallPart` / `NativeToolSearchReturnPart`)
+  are dropped, and client-flavored search parts degrade to plain
+  `tool_use` / `tool_result`. The same applies to the Anthropic render FSM
+  (IR → SSE), whose `NativeToolCallPart` branch emits plain `tool_use`.
+  Both must be revisited *together with* OpenAI Responses server-execution
+  intake support — they only matter as a pair, and doing render alone
+  invites the pairing/`tool_reference` 400s above.
 
 ---
 
@@ -926,6 +1018,123 @@ folded into `google_intake.py` for that path; the addon-installed
 
 ---
 
+## Alloy PromptAst bridge (library lane)
+
+`adapters/promptast.py` is a **library-only** cross-IR transform, not a proxy
+listener format. Alloy renders a typed prompt to its provider-specialized
+prompt AST (`alloy/baml/render_prompt {projection: "ast"}` →
+`prompt_ast_to_json`), and a Python consumer (first: talkstream) converts that
+AST **directly** to the pydantic-ai `list[ModelMessage]` IR — never
+PromptAst → wire bytes → `load_messages`, which would lower and re-raise
+through a wire format both ends already structure.
+
+```
+Alloy BAML source ──render_prompt{ast}──▶ PromptAst JSON
+                                              │
+                       PromptAstAdapter.load_messages   (AST → IR, directly)
+                                              ▼
+                                     list[ModelMessage]
+                                              │
+                        parsed_request_from_alloy(+ client_view)
+                                              ▼
+                                       ParsedRequest ──▶ dispatch_dump_sync ──▶ upstream
+```
+
+The AST arrives already provider-specialized (roles wrapped/merged/validated,
+text runs coalesced, `ctx.output_format` schema prose burned into message
+text — the SAP owns typing on the reply side, so `request_parameters` stays
+empty). Node mapping: `message` role `system`/`user` → `SystemPromptPart` /
+`UserPromptPart` accumulating into one `ModelRequest`; `assistant`/`model`
+closes the request and appends a `ModelResponse[TextPart]`; any other role
+fails loudly. Media maps to `ImageUrl`/`Audio`/`Video`/`DocumentUrl` (url) or
+`BinaryContent` (base64, no `media_type` fallback); a local `file` source or
+media inside a system/assistant message fails loudly. Message `metadata`
+follows the Alloy VM-003 forward contract: `cache_control` → `CachePoint`
+(supported TTL) or `raw_extras["cc:promptast:msg:{i}"]` (other TTL); any other
+metadata key stashes verbatim under `raw_extras["promptast_meta:msg:{i}"]`.
+
+**Boundary.** This module has no `InboundFormat` entry, no `Context`
+integration, and no `dispatch_dump_sync`/`dispatch_intake`/`dispatch_render`
+branch — the proxy pipeline is untouched. It is a first-party consumer entry
+point that produces an `LLMRenderInput` (`ParsedRequest`), reusing the same
+outbound adapters the proxy uses.
+
+## Cache-breakpoint policy engine (`cache_policy.py`)
+
+`ccproxy.lightllm.cache_policy` is a pure placement engine for Anthropic
+prompt-cache breakpoints over the pydantic-ai IR. Division of labor:
+BAML/Alloy owns *content* — statically authored markers arrive in-body
+(VM-003 → `cache_control` → `CachePoint`s / `cc:` raw_extras via the inbound
+adapters); cache *placement* is transport policy, and this engine computes
+the dynamic placements an author can't know at blueprint time.
+
+```python
+from ccproxy.lightllm import CachePolicy, apply_cache_policy
+
+policy = CachePolicy(tools="1h", system="1h", user_tail=2, user_tail_ttl="5m")
+new_messages, new_settings, report = apply_cache_policy(
+    messages, settings, policy, raw_extras=raw_extras
+)
+```
+
+Pure function: inputs are never mutated (settings copied, touched message
+parts rebuilt). Placements:
+
+- `tools` → sets `anthropic_cache_tool_definitions` on the returned settings
+  (there is no IR slot for tool markers; the dump side stamps the wire —
+  exactly one marker, on the last non-deferred tool, matching pydantic-ai's
+  contract; Anthropic rejects `cache_control` on `defer_loading` tools. An
+  all-deferred tool set makes the placement a wire no-op — the engine can't
+  see tools, so it still counts 1 breakpoint, a safe overestimate).
+- `system` → appends the sentinel `UserPromptPart([CachePoint(ttl=…)])`
+  after the last `SystemPromptPart` (the `dump_system` convention). No
+  system parts → skipped, reported.
+- `user_tail=N` → `CachePoint` appended to the final `UserPromptPart` of the
+  last N user-content-bearing `ModelRequest`s, newest first (`str` content
+  promoted to `[str, CachePoint]`). Shortfall → placed where possible,
+  reported.
+
+**Budget arbitration** — Anthropic allows at most 4 breakpoints per request;
+the engine owns that invariant. It first censuses every marker that will
+reach the wire, then admits policy placements in order `tools` → `system` →
+`user_tail` newest-first; the first placement that would exceed 4 is dropped
+along with everything after it.
+
+| Marker source | Census | Removable by policy |
+|---|---|---|
+| Authored `CachePoint`s in messages (VM-003 / prior run) | 1 each | never |
+| Sentinel system markers | 1 each | never |
+| `cc:`-family `raw_extras` (`cc:msg:*`, `cc:promptast:msg:*`) | 1 each | never |
+| `cache_control` on `raw_extras["tools"]` entries (verbatim override) | 1 each | never |
+| `anthropic_cache_tool_definitions` / `_instructions` / `_messages` | 1 each | never |
+| `anthropic_cache` shorthand | 1 | never |
+| Policy placements | admitted while budget holds | yielded first |
+
+When `raw_extras` contains a `"tools"` override, the `tools` placement is
+always skipped (marker or not): the verbatim array overwrites the dump
+side's formatted tools at stitch time, so a knob placement would burn
+budget for a wire no-op.
+
+Authored always wins: the engine never removes or re-TTLs an existing
+marker. Idempotent: re-running a policy over its own output places nothing —
+a target position that already carries a marker (any TTL) is skipped, never
+stacked. `CacheBudgetReport` (`existing`, `placed`, `dropped`, `skipped` —
+labels `"tools"`, `"system"`, `"user[-1]"`, …) accounts for every decision;
+nothing is dropped silently.
+
+Scope: Anthropic semantics only; callers gate on provider (the
+`cache_breakpoints` hook guards on the anthropic-compatible family; library
+callers — e.g. talkstream via `parsed_request_from_alloy(...)` — know their
+upstream).
+
+Wire-side, the `ccproxy.hooks.cache_breakpoints` outbound hook exposes the
+engine per-request via the `x-ccproxy-cache-policy` header or per-instance
+via hook `params`. Header DSL: comma-separated `key[=value]` pairs —
+`tools[=ttl]`, `system[=ttl]`, `user_tail=N[:ttl]`; bare `tools`/`system`
+default `5m`; e.g. `x-ccproxy-cache-policy: tools=1h,system=1h,user_tail=2:5m`.
+Header beats config params; parse errors surface as an error `HookResult`
+naming the bad token; the control header is stripped before egress.
+
 ## Adding a new provider
 
 Suppose you're adding a new upstream provider — say "MyVendor" — that
@@ -941,7 +1150,7 @@ providers:
     auth:
       type: file
       file: ~/.myvendor/token
-    host: api.myvendor.com
+    base_url: https://api.myvendor.com
     path: /v1/messages
     type: anthropic        # ← wire format = anthropic-compatible
 ```
@@ -1217,6 +1426,8 @@ envelope without unwrap).
 | Perplexity adapter | `src/ccproxy/lightllm/adapters/perplexity.py` |
 | Envelope helpers | `src/ccproxy/lightllm/adapters/_envelope.py`, `_anthropic_envelope.py`, `_openai_envelope.py` |
 | Typed-tool wire-type mapping | `src/ccproxy/lightllm/adapters/_tool_kinds.py` |
+| Shared FSM base classes | `src/ccproxy/lightllm/graph/_base.py` |
+| Usage capture/projection helpers | `src/ccproxy/lightllm/graph/_usage.py` |
 | `GraphBuilder.add_subgraph` patch | `src/ccproxy/lightllm/graph/_subgraph_patch.py` |
 | Anthropic response FSMs | `src/ccproxy/lightllm/graph/anthropic_{intake,render}.py` |
 | OpenAI response FSMs | `src/ccproxy/lightllm/graph/openai_{intake,render}.py` |

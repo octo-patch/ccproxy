@@ -45,7 +45,7 @@ class TransportOverrideAddon:
         if not provider_name:
             return
 
-        provider = get_config().providers.get(provider_name)
+        provider = get_config().get_provider(provider_name)
         if provider is None:
             return
 

@@ -157,7 +157,7 @@ providers:
       client_id: <gemini-cli installed-app client_id>
       client_secret: <gemini-cli installed-app client_secret>
       header: authorization
-    host: cloudcode-pa.googleapis.com
+    base_url: https://cloudcode-pa.googleapis.com
     path: "/v1internal:{action}"
     type: gemini
 ```

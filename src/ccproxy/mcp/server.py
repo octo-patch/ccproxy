@@ -297,8 +297,8 @@ def list_conversations() -> dict[str, list[str]]:
 async def list_models(ctx: Context, refresh: bool = False) -> dict[str, Any]:
     """Return ccproxy's OpenAI-compatible model catalog.
 
-    With ``refresh=True``, ccproxy queries configured upstream providers and
-    unions those ids with the static floor catalog.
+    With ``refresh=True``, ccproxy expands wildcard bindings from configured
+    upstream model-discovery endpoints.
     """
     if refresh:
         await ctx.info("refreshing model catalog from upstream providers")

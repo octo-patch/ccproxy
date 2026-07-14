@@ -39,9 +39,26 @@ Provider API directly
 
 ---
 
-## ccproxy.yaml configuration
+## Configuration files
 
-All configuration lives in a single file: `~/.config/ccproxy/ccproxy.yaml` (or `$CCPROXY_CONFIG_DIR/ccproxy.yaml`).
+Configuration files are siblings beneath `~/.config/ccproxy/` or
+`$CCPROXY_CONFIG_DIR`: `ccproxy.yaml` owns native providers, authentication,
+hooks, shaping, inspection, and transform overrides; `config.yaml` owns
+LiteLLM-compatible model aliases and destinations.
+
+```yaml
+# config.yaml
+model_list:
+  - model_name: requesty/*
+    litellm_params:
+      model: requesty/*
+      api_base: https://router.requesty.ai/v1
+      api_key: os.environ/REQUESTY_API_KEY
+```
+
+Routing order is explicit transform override, exact compiled model binding,
+wildcard compiled model binding, then sentinel Provider fallback. See
+`docs/configuration.md` for the complete compatibility boundary.
 
 ### Full OAuth configuration
 
@@ -56,7 +73,7 @@ ccproxy:
       auth:
         type: command
         command: "jq -r '.claudeAiOauth.accessToken' ~/.claude/.credentials.json"
-      host: api.anthropic.com
+      base_url: https://api.anthropic.com
       path: /v1/messages
       type: anthropic
 
@@ -117,7 +134,7 @@ The default `lightllm.transforms` list is empty: sentinel-keyed flows route thro
 | `match_model` | `str?` | Regex matched against the `model` field in the request body. |
 | `dest_provider` | `str?` | ccproxy provider name — resolves to a `providers[name]` entry (host/path/auth/format). |
 | `dest_model` | `str?` | Rewrites `body['model']`. |
-| `dest_host` | `str?` | Raw host override. Bypasses provider lookup. |
+| `dest_base_url` | `str?` | Absolute destination base URL override. Bypasses provider lookup. |
 | `dest_path` | `str?` | Raw path override. |
 | `dest_vertex_project` | `str?` | GCP project ID for Vertex AI transforms. |
 | `dest_vertex_location` | `str?` | GCP region for Vertex AI transforms. |
@@ -163,7 +180,7 @@ A `Provider` entry binds an auth source, a single destination (host + path), and
 providers:
   anthropic:
     auth: "jq -r '.claudeAiOauth.accessToken' ~/.claude/.credentials.json"
-    host: api.anthropic.com
+    base_url: https://api.anthropic.com
     path: /v1/messages
     type: anthropic
 ```
@@ -175,7 +192,7 @@ providers:
     auth:
       type: command
       command: "jq -r '.claudeAiOauth.accessToken' ~/.claude/.credentials.json"
-    host: api.anthropic.com
+    base_url: https://api.anthropic.com
     path: /v1/messages
     type: anthropic
 
@@ -184,7 +201,7 @@ providers:
       type: command
       command: "printenv DEEPSEEK_API_KEY"
       header: x-api-key       # custom auth header — defaults to Authorization: Bearer
-    host: api.deepseek.com
+    base_url: https://api.deepseek.com
     path: /anthropic/v1/messages
     type: anthropic           # destination format for lightllm dispatch
 ```
@@ -192,7 +209,7 @@ providers:
 Provider fields:
 - `auth` — discriminated union: `command`, `file`, `anthropic_oauth`, `google_oauth`. A bare string is coerced to `{type: command, command: <string>}`.
 - `auth.header` — target header name; omit for the default `Authorization: Bearer {token}`.
-- `host` — single destination hostname.
+- `base_url` — absolute HTTP(S) destination base URL, including an optional port and base path.
 - `path` — destination path. Supports `{model}` and `{action}` templating substituted from glom-read body fields and URL captures.
 - `type` — adapter-family identifier (`anthropic`, `gemini`, `openai`, `openai_responses`, `perplexity_pro`, …). Drives lightllm dispatch when the incoming format differs from what the destination speaks.
 
@@ -202,4 +219,8 @@ OAuth-source providers (`anthropic_oauth`, `google_oauth`) refresh in-process vi
 
 ### Provider resolution
 
-Provider resolution is sentinel-driven, not destination-driven. `inject_auth` reads the `x-api-key` / `Authorization` header, parses the `sk-ant-oat-ccproxy-{name}` suffix, and looks up `providers[name]`. When no sentinel is present, it walks `config.providers` in dict insertion order and uses the first entry with a cached token as a fallback. `Provider.host` is a single value — there is no destinations-pattern matching layer. (`inspector.provider_map` is unrelated: it's a hostname → `gen_ai.system` mapping for OTel attribution only.)
+Provider resolution can come from a compiled `config.yaml` model binding or a
+sentinel key. `inject_auth` parses `sk-ant-oat-ccproxy-{name}` and looks up
+`providers[name]`; model bindings inject their effective Provider through the
+same authentication service. `inspector.provider_map` is unrelated: it maps
+hostnames to OTel `gen_ai.system` attribution only.

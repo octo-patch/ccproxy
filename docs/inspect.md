@@ -119,7 +119,7 @@ ReadySignal → InspectorAddon → FingerprintCaptureAddon → MultiHARSaver →
 | `MultiHARSaver` | `MultiHARSaver` | Implements the `ccproxy.dump` mitmproxy command — builds a multi-page HAR 1.2 (`entries[2i]` = forwarded request + provider response, `entries[2i+1]` = client request + client response). |
 | `ShapeCaptureAddon` | `ShapeCaptureAddon` | Implements the `ccproxy.shape` mitmproxy command — validates a flow against the provider's `capture.path_pattern`, then writes either a provider patch queue or an explicit request-only `.mflow` override. |
 | `ccproxy_inbound` | `InspectorRouter` (pipeline) | DAG executor for `hooks.inbound` entries — auth sentinel substitution (`inject_auth`), session ID extraction (`extract_session_id`). Skipped if no inbound hooks configured. |
-| `ccproxy_transform` | `InspectorRouter` (transform) | lightllm dispatch — matches `lightllm.transforms` rules and falls back to sentinel-driven `Provider` routing. Rewrites destination (always) and body (cross-format). Handles non-streaming response transform back to OpenAI shape. |
+| `ccproxy_transform` | `InspectorRouter` (transform) | Native dispatch — matches `lightllm.transforms`, then exact/wildcard compiled `config.yaml` model bindings, then sentinel-driven `Provider` routing. Rewrites destination (always) and body (cross-format). Handles non-streaming response transform back to the listener shape. |
 | `ccproxy_outbound` | `InspectorRouter` (pipeline) | DAG executor for `hooks.outbound` entries — `gemini_cli` (cloudcode-pa envelope wrap), `inject_mcp_notifications`, `verbose_mode` (strip `redact-thinking-*`), `shape` (replay packaged/local compliance envelope), `commitbee_compat`. Skipped if no outbound hooks configured. |
 | `TransportOverrideAddon` | `TransportOverrideAddon` | Redirects provider-bound flows through the in-process curl-cffi sidecar when the resolved `Provider` declares `fingerprint_profile` or the active shape carries a captured fingerprint. |
 | `AuthAddon` | `AuthAddon` | 401-detect → refresh → replay. Triggered by `metadata_from_flow(flow).auth_injected` set by `inject_auth`. Re-resolves the credential source via `config.resolve_auth_token(provider)` and replays the request with the fresh token. |
@@ -389,6 +389,9 @@ handle_transform (RouteType.REQUEST)
       → match_host: checked against pretty_host, Host header, X-Forwarded-Host
       → match_path: prefix match against request path
       → match_model: substring match against body["model"]
+      → exact compiled config.yaml model binding
+      → wildcard compiled config.yaml model binding
+      → sentinel-selected native Provider
   → target is None
       → ReverseMode flow: respond 501 (no default upstream)
       → WireGuard flow: pass through to original destination

@@ -39,8 +39,8 @@ class TestInitConfig:
         templates_dir = tmp_path / "templates"
         templates_dir.mkdir()
 
-        # Only ccproxy.yaml is initialized; ccproxy.py is auto-generated on start
         (templates_dir / "ccproxy.yaml").write_text("test: config")
+        (templates_dir / "config.yaml").write_text("model_list: []")
 
         mock_get_templates.return_value = templates_dir
 
@@ -48,6 +48,7 @@ class TestInitConfig:
         init_config(config_dir)
 
         assert (config_dir / "ccproxy.yaml").exists()
+        assert (config_dir / "config.yaml").exists()
 
         captured = capsys.readouterr()
         assert "Configuration installed to:" in captured.out
@@ -61,12 +62,14 @@ class TestInitConfig:
         templates_dir = tmp_path / "templates"
         templates_dir.mkdir()
         (templates_dir / "ccproxy.yaml").write_text("template content")
+        (templates_dir / "config.yaml").write_text("model_list: []")
 
         mock_get_templates.return_value = templates_dir
 
         config_dir = tmp_path / "config"
         config_dir.mkdir()
         (config_dir / "ccproxy.yaml").write_text("existing content")
+        (config_dir / "config.yaml").write_text("existing models")
 
         init_config(config_dir, force=False)
 
@@ -84,16 +87,19 @@ class TestInitConfig:
         templates_dir = tmp_path / "templates"
         templates_dir.mkdir()
         (templates_dir / "ccproxy.yaml").write_text("new: config")
+        (templates_dir / "config.yaml").write_text("model_list: []")
 
         mock_get_templates.return_value = templates_dir
 
         config_dir = tmp_path / "config"
         config_dir.mkdir()
         (config_dir / "ccproxy.yaml").write_text("old: config")
+        (config_dir / "config.yaml").write_text("old models")
 
         init_config(config_dir, force=True)
 
         assert (config_dir / "ccproxy.yaml").read_text() == "new: config"
+        assert (config_dir / "config.yaml").read_text() == "model_list: []"
         captured = capsys.readouterr()
         assert "Installed ccproxy.yaml" in captured.out
 
@@ -113,6 +119,7 @@ class TestInitConfig:
 
         captured = capsys.readouterr()
         assert "Warning: Template ccproxy.yaml not found" in captured.err
+        assert "Warning: Template config.yaml not found" in captured.err
 
     def test_init_template_dir_error(self, tmp_path: Path) -> None:
         """Test init when get_templates_dir raises RuntimeError."""
@@ -128,10 +135,12 @@ class TestInitConfig:
         templates_dir = tmp_path / "templates"
         templates_dir.mkdir()
         (templates_dir / "ccproxy.yaml").write_text("template content")
+        (templates_dir / "config.yaml").write_text("model_list: []")
 
         config_dir = tmp_path / "config"
         config_dir.mkdir()
         (config_dir / "ccproxy.yaml").write_text("existing content")
+        (config_dir / "config.yaml").write_text("existing models")
 
         with patch("ccproxy.cli.get_templates_dir", return_value=templates_dir):
             init_config(config_dir)
@@ -178,6 +187,27 @@ ccproxy:
         env = call_args[1]["env"]
         assert env["OPENAI_API_BASE"] == "http://192.168.1.1:8888"
         assert env["ANTHROPIC_BASE_URL"] == "http://192.168.1.1:8888"
+
+    @patch("subprocess.run")
+    def test_run_accepts_config_yaml_only(
+        self,
+        mock_run: Mock,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        (tmp_path / "config.yaml").write_text("model_list: []\n")
+        monkeypatch.setenv("CCPROXY_CONFIG_DIR", str(tmp_path))
+        monkeypatch.delenv("CCPROXY_PORT", raising=False)
+        monkeypatch.delenv("CCPROXY_HOST", raising=False)
+        clear_config_instance()
+        mock_run.return_value = Mock(returncode=0)
+
+        with pytest.raises(SystemExit) as exc_info:
+            run_with_proxy(tmp_path, ["echo", "test"])
+
+        assert exc_info.value.code == 0
+        env = mock_run.call_args.kwargs["env"]
+        assert env["OPENAI_API_BASE"] == "http://127.0.0.1:4000"
 
     @patch("subprocess.run")
     def test_run_with_env_override(self, mock_run: Mock, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

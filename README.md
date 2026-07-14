@@ -148,7 +148,7 @@ ccproxy status --proxy --inspect    # exit 3 = both down (expected, nothing runn
 ## Quick Start
 
 ```bash
-# Initialize config template at ~/.config/ccproxy/ccproxy.yaml
+# Initialize ccproxy.yaml + LiteLLM-compatible config.yaml
 ccproxy init
 
 # Start the proxy and inspector stack (foreground)
@@ -199,7 +199,9 @@ chain on 429/503) and cloudcode-pa envelope unwrapping.
 **lightllm** converts request and response bodies through ccproxy's own
 adapter layer and streaming FSMs. URL rewriting and auth injection are owned by
 the inspector route and `Provider` config, while `lightllm` owns wire-format
-conversion.
+conversion. LiteLLM itself is not a runtime dependency: sibling `config.yaml`
+model declarations are compiled into ccproxy-native bindings before requests
+enter this path.
 
 **SSE streaming**: `SSEPipeline` handles cross-provider streaming by parsing
 SSE events into ccproxy's response IR and rendering each chunk back to the
@@ -207,8 +209,23 @@ listener's wire format.
 
 ## Configuration
 
-`ccproxy init` writes a template to `~/.config/ccproxy/ccproxy.yaml`. Config is
-also read from `$CCPROXY_CONFIG_DIR/ccproxy.yaml`.
+`ccproxy init` writes sibling `ccproxy.yaml` and `config.yaml` templates under
+`~/.config/ccproxy/`. Both are also discovered beneath
+`$CCPROXY_CONFIG_DIR`.
+
+- `ccproxy.yaml` owns native runtime services: providers, authentication,
+  hooks, inspection, shaping, and explicit transform overrides.
+- `config.yaml` is a LiteLLM-compatible frontend for model definitions,
+  aliases, endpoints, credentials, metadata, and supported request defaults.
+
+The frontend compiles into the existing `CCProxyConfig`/`Provider` runtime; it
+does not restore LiteLLM's proxy process or router. Routing precedence is
+explicit `lightllm.transforms`, exact then wildcard compiled model bindings,
+sentinel-selected providers, then no match. See
+[Configuration](docs/configuration.md) for the supported compatibility subset
+and trust-boundary rules.
+
+`ccproxy.yaml`:
 
 ```yaml
 ccproxy:
@@ -222,7 +239,7 @@ ccproxy:
       auth:
         type: command
         command: "jq -r '.claudeAiOauth.accessToken' ~/.claude/.credentials.json"
-      host: api.anthropic.com
+      base_url: https://api.anthropic.com
       path: /v1/messages
       type: anthropic
 
@@ -231,7 +248,7 @@ ccproxy:
         type: command
         command: "printenv DEEPSEEK_API_KEY"
         header: x-api-key
-      host: api.deepseek.com
+      base_url: https://api.deepseek.com
       path: /anthropic/v1/messages
       type: anthropic
 
@@ -302,7 +319,7 @@ ccproxy:
         refresh_path: claudeAiOauth.refreshToken
         expiry_path: claudeAiOauth.expiresAt
         header: authorization
-      host: api.anthropic.com
+      base_url: https://api.anthropic.com
       path: /v1/messages
       type: anthropic
 
@@ -311,7 +328,7 @@ ccproxy:
         type: command
         command: "printenv DEEPSEEK_API_KEY"
         header: x-api-key
-      host: api.deepseek.com
+      base_url: https://api.deepseek.com
       path: /anthropic/v1/messages
       type: anthropic
 ```
@@ -348,7 +365,7 @@ ccproxy:
         refresh_path: claudeAiOauth.refreshToken
         expiry_path: claudeAiOauth.expiresAt
         header: authorization
-      host: api.anthropic.com
+      base_url: https://api.anthropic.com
       path: /v1/messages
       type: anthropic
 ```

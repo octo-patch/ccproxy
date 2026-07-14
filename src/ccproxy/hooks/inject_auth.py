@@ -1,11 +1,9 @@
 """Inject auth hook — sentinel key substitution and token injection.
 
-Detects ``sk-ant-oat-ccproxy-{provider}`` sentinel keys on any inbound
-auth header (``x-api-key``, ``x-goog-api-key``, or ``Authorization: Bearer``),
-resolves the real auth token from ``CCProxyConfig.providers[provider]``,
-and injects it via the header named on that Provider's ``auth.header``
-(defaulting to ``Authorization: Bearer`` when unset). All non-target inbound
-auth headers are cleared so the sentinel never leaks upstream.
+Detects ``sk-ant-oat-ccproxy-{provider}`` sentinel keys on inbound auth
+headers and applies the selected Provider's static request fields and
+credential placement. LiteLLM model bindings use the same injection service,
+so sentinel and model-selected routes share one auth implementation.
 """
 
 from __future__ import annotations
@@ -13,7 +11,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any
 
-from ccproxy.config import get_config
+from ccproxy.config import Provider, get_config
 from ccproxy.constants import AUTH_SENTINEL_PREFIX, AuthConfigError
 from ccproxy.pipeline.hook import hook
 
@@ -23,7 +21,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-_INBOUND_AUTH_HEADERS: tuple[str, ...] = ("x-api-key", "x-goog-api-key", "authorization")
+_INBOUND_AUTH_HEADERS: tuple[str, ...] = ("x-api-key", "x-goog-api-key", "api-key", "authorization")
 """Headers checked inbound for a sentinel key, in priority order. ``authorization``
 is matched against its bare token after stripping a ``Bearer `` prefix."""
 
@@ -51,8 +49,8 @@ def _extract_sentinel(ctx: Context) -> str | None:
 
 
 @hook(
-    reads=["authorization", "x-api-key", "x-goog-api-key"],
-    writes=["authorization", "x-api-key", "x-goog-api-key"],
+    reads=["authorization", "x-api-key", "x-goog-api-key", "api-key"],
+    writes=["authorization", "x-api-key", "x-goog-api-key", "api-key"],
 )
 def inject_auth(ctx: Context, _: dict[str, Any]) -> Context:
     """Forward an auth token to the provider, substituting a sentinel key."""
@@ -61,56 +59,93 @@ def inject_auth(ctx: Context, _: dict[str, Any]) -> Context:
         return ctx
 
     provider = sentinel[len(AUTH_SENTINEL_PREFIX) :]
-    token = _get_auth_token(provider)
-
-    if not token:
-        raise AuthConfigError(
-            f"Sentinel key for provider '{provider}' but no matching providers entry. "
-            f"Add 'providers.{provider}' to ccproxy.yaml."
-        )
-
-    _inject_token(ctx, provider, token)
-    ctx.metadata.auth_provider = provider
+    inject_provider_auth(ctx, provider, require_auth=True)
     logger.info("Auth token injected for provider '%s' (sentinel)", provider)
     return ctx
 
 
-def _get_auth_token(provider: str) -> str | None:
-    """Resolve the provider's token; config failures are fatal, not silent.
+def inject_provider_auth(
+    ctx: Context,
+    provider_name: str,
+    provider: Provider | None = None,
+    *,
+    token: str | None = None,
+    force: bool = False,
+    require_auth: bool = False,
+) -> None:
+    """Apply one resolved Provider's static request fields and credentials.
 
-    A config that cannot load or resolve must surface as ``AuthConfigError``
-    (the one exception the pipeline executor propagates) rather than letting
-    the request continue unauthenticated toward a deferred upstream 401.
+    Sentinel-selected and LiteLLM-model-selected routes share this function.
+    Header and query placement are both supported; all inbound credential
+    headers are cleared before the configured value is stamped.
     """
+    config = None
+    if provider is None or token is None:
+        try:
+            config = get_config()
+        except AuthConfigError:
+            raise
+        except Exception as exc:
+            raise AuthConfigError(f"Failed to load auth config for provider '{provider_name}': {exc}") from exc
+    resolved_provider = provider or (config.get_provider(provider_name) if config is not None else None)
+    if resolved_provider is None:
+        raise AuthConfigError(
+            f"No provider configuration for '{provider_name}'. Add a matching provider to ccproxy.yaml."
+        )
+    if ctx.metadata.auth_injected and not force and ctx.metadata.auth_provider == provider_name:
+        return
+
+    previous_query_param = ctx.metadata.auth_query_param
+    if previous_query_param and ctx.flow is not None:
+        ctx.flow.request.query.pop(previous_query_param, None)
+        ctx.metadata.auth_query_param = ""
+
+    for header, value in resolved_provider.headers.items():
+        ctx.set_header(header, value)
+    if ctx.flow is not None:
+        for key, value in resolved_provider.query.items():
+            ctx.flow.request.query[key] = value
+
+    if resolved_provider.auth is None:
+        if ctx.metadata.auth_injected:
+            for header in _INBOUND_AUTH_HEADERS:
+                ctx.set_header(header, "")
+            ctx.metadata.auth_injected = False
+        if require_auth:
+            raise AuthConfigError(f"Provider '{provider_name}' has no auth source for sentinel substitution")
+        ctx.metadata.auth_provider = provider_name
+        return
+    resolved_token: str | None
     try:
-        config = get_config()
-        return config.resolve_auth_token(provider)
+        if token is not None:
+            resolved_token = token
+        else:
+            assert config is not None
+            resolved_token = config.resolve_provider_auth(provider_name, resolved_provider)
     except AuthConfigError:
         raise
     except Exception as exc:
-        raise AuthConfigError(f"Failed to load auth config for provider '{provider}': {exc}") from exc
-
-
-def _inject_token(ctx: Context, provider: str, token: str) -> None:
-    """Inject ``token`` into the configured outbound auth header.
-
-    The provider's ``auth.header`` (None defaults to ``authorization``) wins.
-    All other inbound auth headers are cleared so the sentinel never leaks
-    upstream alongside the real token.
-    """
-    config = get_config()
-    target_header = (config.get_auth_header(provider) or "authorization").lower()
-
-    if target_header == "authorization":
-        ctx.set_header("authorization", f"Bearer {token}")
-    else:
-        ctx.set_header(target_header, token)
-
-    for header, value in config.get_auth_extra_headers(provider).items():
-        ctx.set_header(header, value)
+        raise AuthConfigError(f"Failed to resolve auth for provider '{provider_name}': {exc}") from exc
+    if not resolved_token:
+        raise AuthConfigError(f"Provider '{provider_name}' has an auth source but it resolved no credential")
 
     for header in _INBOUND_AUTH_HEADERS:
-        if header != target_header:
-            ctx.set_header(header, "")
+        ctx.set_header(header, "")
 
+    target_header = resolved_provider.auth.header
+    target_query = resolved_provider.auth.query_param
+    if target_query is not None:
+        if ctx.flow is None:
+            raise AuthConfigError(f"Provider '{provider_name}' uses query auth without an HTTP flow")
+        ctx.flow.request.query[target_query] = resolved_token
+        ctx.metadata.auth_query_param = target_query
+    elif target_header is None or target_header.lower() == "authorization":
+        ctx.set_header("authorization", f"Bearer {resolved_token}")
+    else:
+        ctx.set_header(target_header, resolved_token)
+
+    for header, value in resolved_provider.auth.extra_headers(f"Auth/{provider_name}").items():
+        ctx.set_header(header, value)
+
+    ctx.metadata.auth_provider = provider_name
     ctx.metadata.auth_injected = True

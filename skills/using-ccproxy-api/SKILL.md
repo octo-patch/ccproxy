@@ -31,7 +31,9 @@ programs.ccproxy = {
 };
 ```
 
-This installs the `ccproxy` binary, generates `~/.config/ccproxy/ccproxy.yaml` from Nix, and creates a `systemd --user` service that auto-restarts on config changes.
+This installs the `ccproxy` binary, generates sibling `ccproxy.yaml` and
+LiteLLM-compatible `config.yaml` files from Nix, and creates a `systemd --user`
+service that auto-restarts when either changes.
 
 ### Standalone (any Linux)
 
@@ -42,11 +44,12 @@ cd ccproxy
 nix develop   # or: direnv allow
 
 # Initialize config
-ccproxy init          # copies template to ~/.config/ccproxy/ccproxy.yaml
-ccproxy init --force  # overwrites existing config
+ccproxy init          # copies both templates to ~/.config/ccproxy/
+ccproxy init --force  # overwrites both existing files
 
-# Edit config
+# Edit native services and model declarations
 $EDITOR ~/.config/ccproxy/ccproxy.yaml
+$EDITOR ~/.config/ccproxy/config.yaml
 
 # Start
 ccproxy start
@@ -80,7 +83,7 @@ Each project can run its own ccproxy with isolated config, port, and transforms 
             lightllm = {
               transforms = [
                 { match_path = "/v1/messages"; action = "redirect";
-                  dest_provider = "anthropic"; dest_host = "api.anthropic.com";
+                  dest_provider = "anthropic"; dest_base_url = "https://api.anthropic.com";
                   dest_path = "/v1/messages"; }
               ] ++ defaults.lightllm.transforms;
             };
@@ -98,7 +101,9 @@ Each project can run its own ccproxy with isolated config, port, and transforms 
 }
 ```
 
-`mkConfig` generates a Nix store `ccproxy.yaml`, and its `shellHook` symlinks it into `.ccproxy/` and exports `CCPROXY_CONFIG_DIR`. The `.envrc` just needs `use flake`.
+`mkConfig` generates Nix-store `ccproxy.yaml` and `config.yaml` files; its
+`shellHook` symlinks both into `.ccproxy/` and exports `CCPROXY_CONFIG_DIR`.
+The `.envrc` just needs `use flake`.
 
 Add `.ccproxy/` to `.gitignore` — the directory contains a Nix-generated symlink that is machine-specific and regenerated on `nix develop`:
 
@@ -187,7 +192,9 @@ export ANTHROPIC_API_KEY="sk-ant-oat-ccproxy-anthropic"
 
 ## Configuration
 
-All config lives in `$CCPROXY_CONFIG_DIR/ccproxy.yaml` (default `~/.config/ccproxy/ccproxy.yaml`).
+Configuration lives under `$CCPROXY_CONFIG_DIR` (default
+`~/.config/ccproxy/`): `ccproxy.yaml` owns native services and `config.yaml`
+owns LiteLLM-compatible model declarations.
 
 ```yaml
 ccproxy:
@@ -199,14 +206,14 @@ ccproxy:
       auth:
         type: command
         command: "jq -r '.claudeAiOauth.accessToken' ~/.claude/.credentials.json"
-      host: api.anthropic.com
+      base_url: https://api.anthropic.com
       path: /v1/messages
       type: anthropic
     gemini:
       auth:
         type: command
         command: "jq -r '.access_token' ~/.gemini/oauth_creds.json"
-      host: cloudcode-pa.googleapis.com
+      base_url: https://cloudcode-pa.googleapis.com
       path: "/v1internal:{action}"
       type: gemini
 
@@ -232,7 +239,7 @@ ccproxy:
       - match_path: /v1/messages
         action: redirect
         dest_provider: anthropic
-        dest_host: api.anthropic.com
+        dest_base_url: https://api.anthropic.com
         dest_path: /v1/messages
 ```
 
@@ -432,7 +439,12 @@ curl http://localhost:4000/v1/messages \
 
 ## Model routing
 
-Model routing is configured via `lightllm.transforms` in `ccproxy.yaml` when an explicit override is needed. Each transform rule matches by `match_host`, `match_path`, and/or `match_model`, then rewrites to `dest_provider`/`dest_model` via the lightllm dispatch. First match wins. Requests without an override normally route through sentinel-key Provider resolution. Unmatched reverse proxy flows get a 501 error; unmatched WireGuard flows pass through unchanged.
+Normal model routing comes from LiteLLM-compatible `model_list` declarations in
+`config.yaml`. Selection order is: explicit `lightllm.transforms` override,
+exact compiled model binding, wildcard compiled binding, then sentinel-key
+Provider fallback. Transform overrides remain the edge-case escape hatch for
+host/path/model regex matching. Unmatched reverse proxy flows get a 501 error;
+unmatched WireGuard flows pass through unchanged.
 
 See [reference/routing-and-config.md](reference/routing-and-config.md) for transform configuration patterns.
 

@@ -21,6 +21,7 @@ from ccproxy.config import (
     CCProxyConfig,
     GeminiCapacityFallbackConfig,
     Provider,
+    TransformOverride,
     clear_config_instance,
     get_config,
     get_config_dir,
@@ -38,7 +39,7 @@ def _make_provider(
     """Build a Provider with a CommandAuthSource for tests."""
     return Provider(
         auth=CommandAuthSource(command=command, header=header) if command else None,
-        host=host,
+        base_url=f"https://{host}",
         path=path,
         type=type,
     )
@@ -57,6 +58,24 @@ class TestCCProxyConfig:
         assert config.port == 4000
         assert config.provider_max_connections == 256
         assert config.ccproxy_config_path == Path("./ccproxy.yaml")
+
+    def test_legacy_provider_host_migrates_to_https_base_url(self, tmp_path: Path) -> None:
+        yaml_path = tmp_path / "ccproxy.yaml"
+        yaml_path.write_text(
+            """
+ccproxy:
+  providers:
+    anthropic:
+      host: api.anthropic.com
+      path: /v1/messages
+      type: anthropic
+"""
+        )
+
+        config = CCProxyConfig.from_yaml(yaml_path, litellm_path=tmp_path / "absent.yaml")
+
+        assert config.providers["anthropic"].base_url == "https://api.anthropic.com"
+        assert config.providers["anthropic"].host == "api.anthropic.com"
 
     def test_from_yaml_no_project_section(self) -> None:
         """Test loading ccproxy.yaml without ccproxy section."""
@@ -133,6 +152,10 @@ ccproxy:
 
         finally:
             yaml_path.unlink()
+
+    def test_legacy_transform_destination_host_is_rejected(self) -> None:
+        with pytest.raises(ValueError, match="dest_host"):
+            TransformOverride.model_validate({"dest_host": "api.anthropic.com"})
 
     def test_inspector_transforms_rejected(self) -> None:
         """Test that the old inspector.transforms location fails clearly."""
@@ -466,7 +489,7 @@ class TestResolveAuthToken:
             providers={
                 "prov": Provider(
                     auth=FileAuthSource(file=str(f)),
-                    host="api.example.com",
+                    base_url="https://api.example.com",
                     path="/v1/messages",
                     type="anthropic",
                 ),
@@ -642,8 +665,8 @@ class TestMiniMaxProviderDefault:
         provider = self._load_packaged_config().providers.get("minimax")
         assert provider is not None
         assert provider.type == "anthropic"
-        assert provider.host == "api.minimax.io"
-        assert provider.path == "/anthropic/v1/messages"
+        assert provider.base_url == "https://api.minimax.io/anthropic"
+        assert provider.path == "/v1/messages"
 
     def test_packaged_template_uses_minimax_api_key(self) -> None:
         """The MiniMax provider sends its configured key in ``x-api-key``."""
@@ -651,3 +674,14 @@ class TestMiniMaxProviderDefault:
         assert isinstance(provider.auth, CommandAuthSource)
         assert provider.auth.command == "printenv MINIMAX_API_KEY"
         assert provider.auth.header == "x-api-key"
+
+    def test_packaged_template_exposes_minimax_models(self) -> None:
+        """The generated model bindings expose the supported MiniMax models."""
+        config = self._load_packaged_config()
+        bindings = {binding.model_name: binding for binding in config.model_bindings}
+
+        for model_id in ("MiniMax-M3", "MiniMax-M2.7"):
+            binding = bindings[model_id]
+            assert binding.owned_by == "minimax"
+            assert binding.upstream_model == model_id
+            assert binding.provider.type == "minimax"

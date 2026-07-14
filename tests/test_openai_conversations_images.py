@@ -612,6 +612,8 @@ def _provider() -> MagicMock:
     provider = MagicMock()
     provider.type = "openai_conversations"
     provider.host = "chatgpt.com"
+    provider.scheme = "https"
+    provider.port = 443
     provider.path = "/backend-api/f/conversation"
     provider.fingerprint_profile = "chrome136"
     return provider
@@ -620,6 +622,7 @@ def _provider() -> MagicMock:
 def _config(provider: MagicMock) -> MagicMock:
     cfg = MagicMock()
     cfg.providers = {"openai_conversations": provider}
+    cfg.get_provider.side_effect = lambda name: cfg.providers.get(name)
     cfg.lightllm.openai_conversations = OpenAIConversationsConfig()
     return cfg
 

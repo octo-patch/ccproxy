@@ -1,139 +1,163 @@
-"""OpenAI-compatible ``GET /v1/models`` catalog.
-
-Defined by OpenAI; adopted by Anthropic, Google Gemini, OpenRouter, vLLM,
-Ollama, etc. Response shape::
-
-    {
-      "object": "list",
-      "data": [
-        {"id": "<model-id>", "object": "model", "created": <unix-ts>, "owned_by": "<provider>"},
-        ...
-      ]
-    }
-
-ccproxy serves the union of models routable through configured ``providers``
-+ ``lightllm.transforms``. The static catalog below is the offline floor;
-when ``refresh=True`` is requested, providers' upstream ``/v1/models`` are
-queried and unioned in (with provider failures falling back to the floor).
-"""
+"""OpenAI-compatible catalog derived from LiteLLM model bindings."""
 
 from __future__ import annotations
 
-import json
 import logging
 import time
-from importlib.resources import files
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 import httpx
+
+from ccproxy.config import ModelBinding, Provider, get_config
+from ccproxy.constants import AuthConfigError
 
 logger = logging.getLogger(__name__)
 
 
-def _perplexity_model_ids() -> list[str]:
-    """Read Perplexity model IDs from the vendored static catalog."""
-    raw: bytes = files("ccproxy.specs").joinpath("perplexity_models.json").read_bytes()  # type: ignore[arg-type]
-    return [m["id"] for m in json.loads(raw)]
-
-
-STATIC_MODEL_CATALOG: dict[str, list[str]] = {
-    "anthropic": [
-        "claude-opus-4-7",
-        "claude-sonnet-4-6",
-        "claude-sonnet-4-5-20250929",
-        "claude-haiku-4-5-20251001",
-    ],
-    "gemini": [
-        "gemini-3-pro-preview",
-        "gemini-3-flash-preview",
-        "gemini-2.5-pro",
-        "gemini-2.5-flash",
-    ],
-    "deepseek": [
-        "deepseek-v4",
-    ],
-    "minimax": [
-        "MiniMax-M3",
-        "MiniMax-M2.7",
-    ],
-    "perplexity": _perplexity_model_ids(),
-}
-"""Provider → model IDs floor list. Updated alongside provider releases."""
-
-
-_PROVIDER_ENDPOINTS: dict[str, str] = {
-    "anthropic": "https://api.anthropic.com/v1/models",
-    "openrouter": "https://openrouter.ai/api/v1/models",
-}
-"""Provider → upstream ``/v1/models`` URL for live merge. gemini is omitted
-because it requires GCP project context that ccproxy doesn't have at
-catalog-build time."""
-
-
-def _model_entry(model_id: str, owned_by: str, created: int | None = None) -> dict[str, Any]:
-    """Build one OpenAI-shaped model entry."""
-    return {
-        "id": model_id,
+def _model_entry(binding: ModelBinding, model_id: str | None = None) -> dict[str, Any]:
+    created = binding.model_info.get("created")
+    entry: dict[str, Any] = {
+        "id": model_id or binding.model_name,
         "object": "model",
-        "created": created if created is not None else int(time.time()),
-        "owned_by": owned_by,
+        "created": created if isinstance(created, int) else int(time.time()),
+        "owned_by": binding.owned_by,
     }
+    if binding.model_info:
+        entry["model_info"] = binding.model_info
+    return entry
+
+
+def _models_endpoint(provider: Provider) -> str | None:
+    if provider.type not in {
+        "anthropic",
+        "deepseek",
+        "openai",
+        "openai_responses",
+        "zai",
+    }:
+        return None
+    parsed = urlsplit(provider.base_url)
+    path = parsed.path.rstrip("/")
+    for endpoint_suffix in ("/chat/completions", "/responses", "/messages"):
+        if path.endswith(endpoint_suffix):
+            path = path.removesuffix(endpoint_suffix)
+            break
+    models_path = f"{path}/models" if path.endswith("/v1") else f"{path}/v1/models"
+    return urlunsplit(parsed._replace(path=models_path))
+
+
+def _auth_request_parts(
+    provider_name: str,
+    provider: Provider,
+) -> tuple[dict[str, str], dict[str, str]]:
+    headers = {"accept": "application/json", **provider.headers}
+    query = dict(provider.query)
+    if provider.auth is None:
+        return headers, query
+
+    config = get_config()
+    token = config.resolve_provider_auth(
+        provider_name,
+        provider,
+        label=f"Catalog/{provider_name}",
+    )
+    if not token:
+        raise AuthConfigError(f"Catalog/{provider_name} credential resolved to an empty value")
+
+    if provider.auth.query_param is not None:
+        query[provider.auth.query_param] = token
+    elif provider.auth.header is None or provider.auth.header.lower() == "authorization":
+        headers["authorization"] = f"Bearer {token}"
+    else:
+        headers[provider.auth.header] = token
+    headers.update(provider.auth.extra_headers(f"Catalog/{provider_name}"))
+    if provider.type in {"anthropic", "deepseek", "zai"}:
+        headers.setdefault("anthropic-version", "2023-06-01")
+    return headers, query
 
 
 def _fetch_provider_models(
-    provider: str,
+    provider_name: str,
+    provider: Provider,
     endpoint: str,
     *,
-    token: str | None,
     transport: httpx.BaseTransport | None = None,
 ) -> list[dict[str, Any]] | None:
-    """Fetch ``GET /v1/models`` from ``endpoint``. Returns None on any failure."""
-    headers: dict[str, str] = {"Accept": "application/json"}
-    if token:
-        if provider == "anthropic":
-            headers["x-api-key"] = token
-            headers["anthropic-version"] = "2023-06-01"
-        else:
-            headers["Authorization"] = f"Bearer {token}"
-
+    headers, query = _auth_request_parts(provider_name, provider)
     try:
         client_kwargs: dict[str, Any] = {"timeout": 5.0}
         if transport is not None:
             client_kwargs["transport"] = transport
         with httpx.Client(**client_kwargs) as client:
-            resp = client.get(endpoint, headers=headers)
+            response = client.get(endpoint, headers=headers, params=query)
     except httpx.HTTPError as exc:
-        logger.warning("Live catalog fetch for %s failed: %s", provider, exc)
+        logger.warning("Model discovery for %s failed: %s", provider_name, exc)
         return None
 
-    if resp.status_code != 200:
-        logger.warning("Live catalog fetch for %s returned %d", provider, resp.status_code)
+    if response.status_code != 200:
+        logger.warning(
+            "Model discovery for %s returned %d",
+            provider_name,
+            response.status_code,
+        )
         return None
-
     try:
-        payload = resp.json()
-    except (ValueError, Exception) as exc:
-        logger.warning("Live catalog fetch for %s returned non-JSON: %s", provider, exc)
+        payload = response.json()
+    except ValueError as exc:
+        logger.warning("Model discovery for %s returned non-JSON: %s", provider_name, exc)
         return None
 
     data = payload.get("data") if isinstance(payload, dict) else None
     if not isinstance(data, list):
         return None
+    return [item for item in data if isinstance(item, dict) and isinstance(item.get("id"), str)]
 
-    entries: list[dict[str, Any]] = []
-    for item in data:
-        if not isinstance(item, dict):
-            continue
-        model_id = item.get("id")
-        if isinstance(model_id, str):
-            entries.append(
-                _model_entry(
-                    model_id,
-                    owned_by=provider,
-                    created=item.get("created") if isinstance(item.get("created"), int) else None,
-                )
+
+def _configured_entries(bindings: list[ModelBinding]) -> list[dict[str, Any]]:
+    return [_model_entry(binding) for binding in bindings if "*" not in binding.model_name]
+
+
+def _discovered_entries(
+    bindings: list[ModelBinding],
+    *,
+    transport: httpx.BaseTransport | None,
+) -> list[dict[str, Any]]:
+    discovered: list[dict[str, Any]] = []
+    by_provider: dict[str, list[ModelBinding]] = {}
+    for binding in bindings:
+        if "*" in binding.model_name:
+            by_provider.setdefault(binding.provider_name, []).append(binding)
+
+    for provider_name, wildcard_bindings in by_provider.items():
+        provider = wildcard_bindings[0].provider
+        endpoint = _models_endpoint(provider)
+        if endpoint is None:
+            logger.warning(
+                "Model discovery is unavailable for provider type %s",
+                provider.type,
             )
-    return entries
+            continue
+        upstream = _fetch_provider_models(
+            provider_name,
+            provider,
+            endpoint,
+            transport=transport,
+        )
+        if upstream is None:
+            continue
+        for binding in wildcard_bindings:
+            for item in upstream:
+                upstream_id = item["id"]
+                public_id = binding.public_model_for_upstream(upstream_id)
+                if public_id is None:
+                    continue
+                entry = _model_entry(binding, public_id)
+                created = item.get("created")
+                if isinstance(created, int):
+                    entry["created"] = created
+                discovered.append(entry)
+    return discovered
 
 
 def build_catalog(
@@ -141,41 +165,18 @@ def build_catalog(
     refresh: bool = False,
     transport: httpx.BaseTransport | None = None,
 ) -> dict[str, Any]:
-    """Return the full OpenAI-shaped ``/v1/models`` payload.
-
-    With ``refresh=False`` (default), returns the static floor only. With
-    ``refresh=True``, additionally fetches each provider's upstream
-    ``/v1/models`` (using configured provider auth tokens) and unions the results
-    deduplicated by ``(owned_by, id)``. Any provider failure silently
-    falls back to its static floor for that provider.
-    """
-    seen: set[tuple[str, str]] = set()
-    entries: list[dict[str, Any]] = []
-
-    floor_entries: dict[str, list[dict[str, Any]]] = {}
-    for provider, model_ids in STATIC_MODEL_CATALOG.items():
-        floor_entries[provider] = [_model_entry(mid, owned_by=provider) for mid in model_ids]
-
+    """Return models that are actually selectable through compiled bindings."""
+    bindings = get_config().model_bindings
+    candidates = _configured_entries(bindings)
     if refresh:
-        from ccproxy.config import get_config
+        candidates.extend(_discovered_entries(bindings, transport=transport))
 
-        config = get_config()
-        for provider, endpoint in _PROVIDER_ENDPOINTS.items():
-            token = config.resolve_auth_token(provider)
-            live = _fetch_provider_models(provider, endpoint, token=token, transport=transport)
-            if live is None:
-                continue
-            for entry in live:
-                key = (entry["owned_by"], entry["id"])
-                if key not in seen:
-                    seen.add(key)
-                    entries.append(entry)
-
-    for floor in floor_entries.values():
-        for entry in floor:
-            key = (entry["owned_by"], entry["id"])
-            if key not in seen:
-                seen.add(key)
-                entries.append(entry)
-
+    seen: set[str] = set()
+    entries: list[dict[str, Any]] = []
+    for entry in candidates:
+        model_id = entry["id"]
+        if model_id in seen:
+            continue
+        seen.add(model_id)
+        entries.append(entry)
     return {"object": "list", "data": entries}

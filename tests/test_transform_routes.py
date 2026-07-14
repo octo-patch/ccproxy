@@ -8,10 +8,11 @@ from unittest.mock import MagicMock, patch
 
 from mitmproxy.proxy.mode_specs import ProxyMode
 
-from ccproxy.auth.sources import CommandAuthSource
+from ccproxy.auth.sources import CommandAuthSource, EnvironmentAuthSource
 from ccproxy.config import (
     CCProxyConfig,
     LightllmConfig,
+    ModelBinding,
     Provider,
     TransformOverride,
     set_config_instance,
@@ -82,7 +83,7 @@ def _make_provider(
     """Build a Provider with a CommandAuthSource for tests."""
     return Provider(
         auth=CommandAuthSource(command=command, header=header) if command else None,
-        host=host,
+        base_url=f"https://{host}",
         path=path,
         type=type,
     )
@@ -512,7 +513,7 @@ class TestSafetyNet:
                     "match_host": "proxy.local",
                     "match_path": "/v1/",
                     "dest_provider": "anthropic",
-                    # dest_host intentionally missing — _handle_redirect falls back
+                    # dest_base_url intentionally missing — _handle_redirect falls back
                 }
             ]
         )
@@ -548,7 +549,7 @@ class TestHandleRedirect:
             "match_host": "proxy.local",
             "match_path": "/v1/",
             "dest_provider": "anthropic",
-            "dest_host": "api.anthropic.com",
+            "dest_base_url": "https://api.anthropic.com",
         }
         base.update(overrides or {})
         _make_config_with_transforms([base])
@@ -581,8 +582,8 @@ class TestHandleRedirect:
 
         assert flow.request.path == "/v2/override"
 
-    def test_redirect_missing_dest_host_passthrough(self) -> None:
-        # No dest_host AND no providers entry for "anthropic" → handler returns
+    def test_redirect_missing_dest_base_url_passthrough(self) -> None:
+        # No dest_base_url AND no providers entry for "anthropic" → handler returns
         # without rewriting; flow.request.host stays at the inbound value.
         _make_config_with_transforms(
             [
@@ -591,7 +592,7 @@ class TestHandleRedirect:
                     "match_host": "proxy.local",
                     "match_path": "/v1/",
                     "dest_provider": "anthropic",
-                    # dest_host intentionally missing
+                    # dest_base_url intentionally missing
                 }
             ]
         )
@@ -627,7 +628,7 @@ class TestHandleRedirect:
                         match_host="proxy.local",
                         match_path="/v1/",
                         dest_provider="anthropic",
-                        dest_host="api.anthropic.com",
+                        dest_base_url="https://api.anthropic.com",
                     )
                 ]
             ),
@@ -649,6 +650,185 @@ class TestHandleRedirect:
         router.request(flow)
 
         assert flow.request.headers.get("authorization") == "Bearer injected-token"
+
+
+class TestLiteLLMModelBindings:
+    def test_exact_binding_precedes_earlier_wildcard(self) -> None:
+        wildcard_provider = Provider(base_url="https://wildcard.example/v1", path="/chat/completions", type="openai")
+        exact_provider = Provider(base_url="https://exact.example/v1", path="/chat/completions", type="openai")
+        wildcard = ModelBinding.create(
+            model_name="*",
+            upstream_model="*",
+            owned_by="openai",
+            provider_name="wildcard",
+            provider=wildcard_provider,
+            request_defaults={},
+            model_info={},
+            source_index=0,
+        )
+        exact = ModelBinding.create(
+            model_name="special",
+            upstream_model="actual-special",
+            owned_by="openai",
+            provider_name="exact",
+            provider=exact_provider,
+            request_defaults={},
+            model_info={},
+            source_index=1,
+        )
+        set_config_instance(CCProxyConfig(model_bindings=[wildcard, exact]))
+
+        target = _resolve_transform_target(_make_flow(body={"model": "special"}), {"model": "special"})
+
+        assert target is exact
+
+    def test_gemini_path_model_selects_binding(self) -> None:
+        provider = Provider(
+            base_url="https://generativelanguage.googleapis.com/v1beta",
+            path="/models/{model}:{action}",
+            type="gemini",
+        )
+        binding = ModelBinding.create(
+            model_name="gemini-alias",
+            upstream_model="gemini-2.5-pro",
+            owned_by="gemini",
+            provider_name="gemini",
+            provider=provider,
+            request_defaults={},
+            model_info={},
+            source_index=0,
+        )
+        set_config_instance(CCProxyConfig(model_bindings=[binding]))
+        flow = _make_flow(
+            host="proxy.local",
+            path="/v1beta/models/gemini-alias:generateContent",
+            body={"contents": [{"role": "user", "parts": [{"text": "hello"}]}]},
+        )
+
+        target = _resolve_transform_target(flow, json.loads(flow.request.content))
+
+        assert target is binding
+
+    def test_wildcard_binding_routes_http_port_rewrites_model_and_applies_defaults(
+        self,
+        monkeypatch: Any,
+    ) -> None:
+        monkeypatch.setenv("LOCAL_LLM_KEY", "local-token")
+        provider = Provider(
+            auth=EnvironmentAuthSource(variable="LOCAL_LLM_KEY"),
+            base_url="http://127.0.0.1:18000/v1",
+            path="/chat/completions",
+            type="openai",
+        )
+        binding = ModelBinding.create(
+            model_name="local/*",
+            upstream_model="*",
+            owned_by="openai",
+            provider_name="litellm:0:local/*",
+            provider=provider,
+            request_defaults={"temperature": 0.25, "top_p": 0.9},
+            model_info={},
+            source_index=0,
+        )
+        config = CCProxyConfig(
+            model_bindings=[binding],
+            deployment_providers={binding.provider_name: provider},
+        )
+        set_config_instance(config)
+        router = InspectorRouter(name="test_binding", request_passthrough=True, response_passthrough=True)
+        register_transform_routes(router)
+        flow = _make_flow(
+            host="proxy.local",
+            body={
+                "model": "local/qwen3",
+                "messages": [{"role": "user", "content": "hello"}],
+                "temperature": 0.8,
+            },
+        )
+        flow.request.headers = {"authorization": "Bearer client-key"}
+
+        router.request(flow)
+
+        assert flow.request.scheme == "http"
+        assert flow.request.host == "127.0.0.1"
+        assert flow.request.port == 18000
+        assert flow.request.path == "/v1/chat/completions"
+        assert flow.request.headers["authorization"] == "Bearer local-token"
+        body = json.loads(flow.request.content)
+        assert body["model"] == "qwen3"
+        assert body["temperature"] == 0.8
+        assert body["top_p"] == 0.9
+        assert flow.metadata["ccproxy.auth_provider"] == binding.provider_name
+
+    @patch("ccproxy.lightllm.graph.dispatch_dump_sync")
+    def test_cross_format_binding_uses_native_provider_and_custom_auth_header(
+        self,
+        mock_render: MagicMock,
+    ) -> None:
+        provider = _make_provider(
+            command="printf '%s' anthropic-token",
+            header="x-api-key",
+            host="api.anthropic.com",
+            path="/v1/messages",
+            type="anthropic",
+        )
+        binding = ModelBinding.create(
+            model_name="claude",
+            upstream_model="claude-sonnet-4-6",
+            owned_by="anthropic",
+            provider_name="anthropic",
+            provider=provider,
+            request_defaults={"max_tokens": 2048},
+            model_info={},
+            source_index=0,
+        )
+        set_config_instance(CCProxyConfig(providers={"anthropic": provider}, model_bindings=[binding]))
+        mock_render.return_value = b'{"model":"claude-sonnet-4-6","messages":[]}'
+        router = InspectorRouter(name="test_binding_transform", request_passthrough=True, response_passthrough=True)
+        register_transform_routes(router)
+        flow = _make_flow(
+            host="proxy.local",
+            body={"model": "claude", "messages": [{"role": "user", "content": "hello"}]},
+        )
+
+        router.request(flow)
+
+        assert flow.request.host == "api.anthropic.com"
+        assert flow.request.path == "/v1/messages"
+        assert flow.request.headers["x-api-key"] == "anthropic-token"
+        assert "authorization" not in flow.request.headers
+        render_ctx = mock_render.call_args.args[0]
+        assert render_ctx.model == "claude-sonnet-4-6"
+        assert render_ctx.settings["max_tokens"] == 2048
+
+    @patch("ccproxy.lightllm.graph.dispatch_dump_sync")
+    def test_packaged_minimax_binding_routes_anthropic_endpoint(
+        self,
+        mock_render: MagicMock,
+        monkeypatch: Any,
+    ) -> None:
+        from importlib.resources import as_file, files
+        from pathlib import Path
+
+        monkeypatch.setenv("MINIMAX_API_KEY", "test-key")
+        with as_file(files("ccproxy.templates").joinpath("ccproxy.yaml")) as template_path:
+            config = CCProxyConfig.from_yaml(Path(template_path))
+        set_config_instance(config)
+        mock_render.return_value = b'{"model":"MiniMax-M3","messages":[]}'
+        router = InspectorRouter(name="test_minimax_binding", request_passthrough=True, response_passthrough=True)
+        register_transform_routes(router)
+        flow = _make_flow(
+            path="/v1/chat/completions",
+            body={"model": "MiniMax-M3", "messages": [{"role": "user", "content": "hello"}]},
+        )
+
+        router.request(flow)
+
+        assert flow.request.scheme == "https"
+        assert flow.request.host == "api.minimax.io"
+        assert flow.request.path == "/anthropic/v1/messages"
+        assert flow.request.headers["x-api-key"] == "test-key"
+        assert "authorization" not in flow.request.headers
 
 
 class TestGeminiTransform:

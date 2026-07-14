@@ -11,12 +11,11 @@ from ccproxy.specs.claude_code_constants import (
     LONG_CONTEXT_BETAS,
 )
 from ccproxy.specs.claude_code_request import APIRequestParams
-from ccproxy.specs.model_catalog import STATIC_MODEL_CATALOG, build_catalog
+from ccproxy.specs.model_catalog import build_catalog
 
 __all__ = [
     "BASE_BETAS",
     "LONG_CONTEXT_BETAS",
-    "STATIC_MODEL_CATALOG",
     "APIRequestParams",
     "build_catalog",
     "get_billing_cch_seed",
