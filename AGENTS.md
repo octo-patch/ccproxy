@@ -354,11 +354,11 @@ If a destination isn’t routable through a sentinel key, add a `providers` entr
 
 `providers` is a `dict[str, Provider]`. Each `Provider` carries `auth` (an `AnyAuthSource`
 discriminated union — `command` / `file` / `anthropic_oauth` / `google_oauth` / `codex_oauth`; bare
-YAML strings auto-coerce to `command`), `base_url` (absolute destination URL), `path` (with `{model}`
+YAML strings auto-coerce to `command`), `host` (single destination hostname), `path` (with `{model}`
 / `{action}` templating), `type` (an adapter-family name routed by
 `lightllm/graph/__init__.py:dispatch_dump_sync` — `anthropic` / `openai` / `google` / `gemini` /
-`vertex_ai` / `vertex_ai_beta` / `perplexity_pro`; compatible providers use the closest wire-format
-family, such as `type: anthropic`), and an optional `fingerprint_profile` (curl-cffi impersonate name,
+`vertex_ai` / `vertex_ai_beta` / `perplexity_pro`; Anthropic-compatible forks like `deepseek` and
+`zai` use `type: anthropic`), and an optional `fingerprint_profile` (curl-cffi impersonate name,
 e.g. `"chrome131"`, `"firefox144"`). `command` and `file` are static value loaders with no expiry
 awareness; `anthropic_oauth`, `google_oauth`, and `codex_oauth` own the in-process refresh lifecycle
 (60s headroom, atomic write-back to `file_path`). The optional `auth.header` field overrides the

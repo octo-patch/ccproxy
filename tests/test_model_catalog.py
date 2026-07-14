@@ -37,6 +37,22 @@ def test_empty_config_has_no_fabricated_models() -> None:
     assert build_catalog() == {"object": "list", "data": []}
 
 
+def test_packaged_minimax_entries_include_model_metadata() -> None:
+    from importlib.resources import as_file, files
+
+    with as_file(files("ccproxy.templates").joinpath("ccproxy.yaml")) as template_path:
+        set_config_instance(CCProxyConfig.from_yaml(Path(template_path)))
+
+    entries = {entry["id"]: entry for entry in build_catalog()["data"]}
+
+    assert entries["MiniMax-M3"]["model_info"]["context_window"] == 1000000
+    assert entries["MiniMax-M3"]["model_info"]["input_modalities"] == ["text", "image", "video"]
+    assert len(entries["MiniMax-M3"]["model_info"]["pricing_tiers_usd_per_million_tokens"]) == 4
+    assert entries["MiniMax-M3"]["model_info"]["thinking"] == ["adaptive", "disabled"]
+    assert entries["MiniMax-M2.7"]["model_info"]["context_window"] == 204800
+    assert entries["MiniMax-M2.7"]["model_info"]["thinking"] == ["always_on"]
+
+
 def test_concrete_aliases_are_the_offline_catalog(tmp_path: Path) -> None:
     _configure(
         tmp_path,

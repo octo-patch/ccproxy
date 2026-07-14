@@ -489,8 +489,10 @@ wire_bytes: bytes = dispatch_dump_sync(ctx, provider_type="anthropic")
 
 The Anthropic-compatible forks (`deepseek`, `zai`) deliberately share the
 Anthropic adapter — their wire format is identical, only the upstream URL
-and auth differ (and those are handled by the `Provider` config). MiniMax
-uses the same adapter and is differentiated by its URL and authentication.
+and auth differ (and those are handled by the `Provider` config).
+
+MiniMax uses the Anthropic adapter for its compatible endpoint, with the
+destination URL and authentication supplied by the `Provider` config.
 
 ### Response side
 

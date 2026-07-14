@@ -421,10 +421,73 @@ in
       {
         model_name = "MiniMax-M3";
         litellm_params.model = "minimax/MiniMax-M3";
+        model_info = {
+          context_window = 1000000;
+          pricing_usd_per_million_tokens = {
+            input = 0.3;
+            output = 1.2;
+            cache_read = 0.06;
+            cache_write = null;
+          };
+          pricing_tiers_usd_per_million_tokens = [
+            {
+              service_tier = "standard";
+              input_tokens_lte = 512000;
+              input = 0.3;
+              output = 1.2;
+              cache_read = 0.06;
+              cache_write = null;
+            }
+            {
+              service_tier = "standard";
+              input_tokens_gt = 512000;
+              input = 0.6;
+              output = 2.4;
+              cache_read = 0.12;
+              cache_write = null;
+            }
+            {
+              service_tier = "priority";
+              input_tokens_lte = 512000;
+              input = 0.45;
+              output = 1.8;
+              cache_read = 0.09;
+              cache_write = null;
+            }
+            {
+              service_tier = "priority";
+              input_tokens_gt = 512000;
+              input = 0.9;
+              output = 3.6;
+              cache_read = 0.18;
+              cache_write = null;
+            }
+          ];
+          input_modalities = [
+            "text"
+            "image"
+            "video"
+          ];
+          thinking = [
+            "adaptive"
+            "disabled"
+          ];
+        };
       }
       {
         model_name = "MiniMax-M2.7";
         litellm_params.model = "minimax/MiniMax-M2.7";
+        model_info = {
+          context_window = 204800;
+          pricing_usd_per_million_tokens = {
+            input = 0.3;
+            output = 1.2;
+            cache_read = 0.06;
+            cache_write = 0.375;
+          };
+          input_modalities = [ "text" ];
+          thinking = [ "always_on" ];
+        };
       }
     ] ++ perplexityModelBindings;
   };
