@@ -39,7 +39,7 @@ async def simple_request() -> None:
         # Dummy API key satisfies validation, proxy handles real auth
         response = await litellm.acompletion(
             messages=[{"role": "user", "content": "Hello, can you tell me a short joke?"}],
-            model="claude-haiku-4-5-20251001",  # Use model defined in proxy config
+            model="claude-haiku-4-5-20251001",  # Declared in sibling config.yaml
             max_tokens=100,
             api_base=BASE_URL,
             api_key="sk-ant-oat-ccproxy-anthropic",  # Sentinel key resolves to providers.anthropic
@@ -59,7 +59,7 @@ async def streaming_request() -> None:
     # Streaming with litellm.acompletion()
     response = await litellm.acompletion(
         messages=[{"role": "user", "content": "Count from 1 to 5."}],
-        model="claude-haiku-4-5-20251001",  # Use model defined in proxy config
+        model="claude-haiku-4-5-20251001",  # Declared in sibling config.yaml
         max_tokens=200,
         stream=True,
         api_base=BASE_URL,
@@ -88,7 +88,8 @@ async def main() -> None:
         console.print(
             "\n[yellow]Make sure:[/yellow]",
             "1. ccproxy is running: [cyan]ccproxy start[/cyan]",
-            "2. Credentials are configured in ccproxy.yaml",
+            "2. The model is declared in config.yaml",
+            "3. Credentials/native providers are configured in ccproxy.yaml",
             sep="\n",
         )
         raise

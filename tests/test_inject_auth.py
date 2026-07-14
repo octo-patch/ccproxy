@@ -30,6 +30,7 @@ def _make_ctx(headers: dict[str, str] | None = None) -> Context:
     flow.id = "test-flow"
     flow.request.content = json.dumps({"model": "test-model", "messages": []}).encode()
     flow.request.headers = dict(headers or {})
+    flow.request.query = {}
     flow.metadata = {}
     return Context.from_flow(flow)
 
@@ -270,3 +271,20 @@ class TestInjectProviderAuth:
         assert ctx.get_header("authorization") == ""
         assert ctx.get_header("x-api-key") == "second-token"
         assert _flow(ctx).metadata["ccproxy.auth_provider"] == "second"
+
+    def test_provider_switch_removes_prior_query_credential(self, clean_config: CCProxyConfig) -> None:
+        first = Provider(
+            auth=CommandAuthSource(command="printf first", query_param="key"),
+            base_url="https://first.example",
+            type="gemini",
+        )
+        second = _make_provider(header="x-api-key")
+        clean_config.providers = {"first": first, "second": second}
+        ctx = _make_ctx()
+
+        inject_provider_auth(ctx, "first", token=_literal("first-token"))
+        inject_provider_auth(ctx, "second", token=_literal("second-token"))
+
+        assert "key" not in _flow(ctx).request.query
+        assert ctx.get_header("x-api-key") == "second-token"
+        assert _flow(ctx).metadata["ccproxy.auth_query_param"] == ""

@@ -7,7 +7,7 @@ The proxy handles authentication via ZAI_API_KEY configured in ~/.config/ccproxy
 Requirements:
 - ccproxy running: `ccproxy start`
 - ZAI_API_KEY configured in environment (for ccproxy.yaml)
-- glm-4.7 model defined in ~/.config/ccproxy/ccproxy.yaml
+- glm-4.7 model declared in ~/.config/ccproxy/config.yaml
 
 Prompt Caching:
 - Z.AI accepts cache_control in requests but may not create/read cache entries

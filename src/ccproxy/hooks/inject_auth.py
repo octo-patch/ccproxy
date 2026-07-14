@@ -92,6 +92,13 @@ def inject_provider_auth(
         raise AuthConfigError(
             f"No provider configuration for '{provider_name}'. Add a matching provider to ccproxy.yaml."
         )
+    if ctx.metadata.auth_injected and not force and ctx.metadata.auth_provider == provider_name:
+        return
+
+    previous_query_param = ctx.metadata.auth_query_param
+    if previous_query_param and ctx.flow is not None:
+        ctx.flow.request.query.pop(previous_query_param, None)
+        ctx.metadata.auth_query_param = ""
 
     for header, value in resolved_provider.headers.items():
         ctx.set_header(header, value)
@@ -100,13 +107,14 @@ def inject_provider_auth(
             ctx.flow.request.query[key] = value
 
     if resolved_provider.auth is None:
+        if ctx.metadata.auth_injected:
+            for header in _INBOUND_AUTH_HEADERS:
+                ctx.set_header(header, "")
+            ctx.metadata.auth_injected = False
         if require_auth:
             raise AuthConfigError(f"Provider '{provider_name}' has no auth source for sentinel substitution")
         ctx.metadata.auth_provider = provider_name
         return
-    if ctx.metadata.auth_injected and not force and ctx.metadata.auth_provider == provider_name:
-        return
-
     resolved_token: str | None
     try:
         if token is not None:
@@ -130,6 +138,7 @@ def inject_provider_auth(
         if ctx.flow is None:
             raise AuthConfigError(f"Provider '{provider_name}' uses query auth without an HTTP flow")
         ctx.flow.request.query[target_query] = resolved_token
+        ctx.metadata.auth_query_param = target_query
     elif target_header is None or target_header.lower() == "authorization":
         ctx.set_header("authorization", f"Bearer {resolved_token}")
     else:

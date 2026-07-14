@@ -25,7 +25,7 @@ import json
 import logging
 import re
 from typing import TYPE_CHECKING, Literal
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 from glom import glom
 from mitmproxy.connection import Server
@@ -119,7 +119,7 @@ def _model_for_routing(body: dict[str, object], path: str) -> str:
 def _apply_path_template(template: str, *, model: str, action: str | None) -> str:
     out = template
     if "{model}" in out:
-        out = out.replace("{model}", model)
+        out = out.replace("{model}", quote(model, safe=""))
     if "{action}" in out:
         out = out.replace("{action}", action or "")
     return out
@@ -131,7 +131,7 @@ def _resolve_transform_target(
 ) -> Provider | TransformOverride | ModelBinding | None:
     """Pick the routing target. First match wins; None means no signal."""
     config = get_config()
-    request_model = str(glom(body or {}, "model", default=""))
+    request_model = _model_for_routing(body or {}, flow.request.path)
 
     for rule in config.lightllm.transforms:
         if rule.match_host_re and not _any_search(rule.match_host_re, _flow_hosts(flow)):
@@ -142,9 +142,13 @@ def _resolve_transform_target(
             continue
         return rule
 
-    for binding in config.model_bindings:
-        if binding.matches(request_model):
-            return binding
+    if request_model:
+        # LiteLLM resolves a concrete deployment before wildcard fallbacks,
+        # regardless of declaration order. Preserve order within each tier.
+        for wildcard in (False, True):
+            for binding in config.model_bindings:
+                if ("*" in binding.model_name) == wildcard and binding.matches(request_model):
+                    return binding
 
     auth_provider = metadata_from_flow(flow).auth_provider
     if auth_provider:

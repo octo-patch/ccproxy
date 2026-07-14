@@ -108,7 +108,10 @@ class AuthFields(BaseModel):
     A credential can be placed in one header or one query parameter.
     """
 
-    model_config = ConfigDict(extra="forbid")
+    # Older ccproxy.yaml files may carry retired placement hints such as
+    # ``user_agent`` or ``destinations``. They never affected token resolution,
+    # so continue ignoring them while validating the supported fields.
+    model_config = ConfigDict(extra="ignore")
 
     header: str | None = None
     """Target header name (e.g. ``x-api-key``). When set, the resolved token

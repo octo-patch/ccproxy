@@ -43,9 +43,10 @@ def test_dict_with_file_only_resolves_as_file_source() -> None:
     assert source.file == "/etc/example/token"
 
 
-def test_obsolete_auth_source_fields_are_rejected() -> None:
-    with pytest.raises(ValueError, match="Extra inputs are not permitted"):
-        parse_auth_source({"command": "echo tok", "user_agent": "Test/1.0"})
+def test_obsolete_auth_source_fields_remain_ignored() -> None:
+    source = parse_auth_source({"command": "echo tok", "user_agent": "Test/1.0", "destinations": ["api.test.com"]})
+    assert isinstance(source, CommandAuthSource)
+    assert source.command == "echo tok"
 
 
 def test_explicit_type_command_dispatches_correctly() -> None:

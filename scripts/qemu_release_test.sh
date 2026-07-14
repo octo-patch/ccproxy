@@ -273,6 +273,7 @@ export CCPROXY_CONFIG_DIR=\$HOME/.config/ccproxy
 mkdir -p "\$CCPROXY_CONFIG_DIR"
 ccproxy init
 test -f "\$CCPROXY_CONFIG_DIR/ccproxy.yaml"
+test -f "\$CCPROXY_CONFIG_DIR/config.yaml"
 
 echo '[vm] --- smoke: system tools on PATH'
 # Debian/Ubuntu put iptables/ip/sysctl in /usr/sbin which isn't in non-root PATH by default.

@@ -149,7 +149,9 @@ def _discovered_entries(
         for binding in wildcard_bindings:
             for item in upstream:
                 upstream_id = item["id"]
-                public_id = binding.model_name.replace("*", upstream_id)
+                public_id = binding.public_model_for_upstream(upstream_id)
+                if public_id is None:
+                    continue
                 entry = _model_entry(binding, public_id)
                 created = item.get("created")
                 if isinstance(created, int):

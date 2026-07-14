@@ -134,6 +134,79 @@ model_list:
     assert binding.provider.path == "/chat/completions"
 
 
+def test_upstream_wildcard_requires_public_wildcard(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path / "config.yaml",
+        """
+model_list:
+  - model_name: local
+    litellm_params:
+      model: openai/*
+      api_base: http://127.0.0.1:11434/v1
+""",
+    )
+
+    with pytest.raises(ValueError, match="wildcard requires a wildcard model_name"):
+        load_litellm_config(path, {})
+
+
+def test_base_url_alias_selects_destination_instead_of_becoming_request_default(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path / "config.yaml",
+        """
+model_list:
+  - model_name: local
+    litellm_params:
+      model: openai/qwen3
+      base_url: http://127.0.0.1:11434/v1
+      temperature: 0.25
+""",
+    )
+
+    frontend = load_litellm_config(path, {})
+    binding = frontend.bindings[0]
+
+    assert binding.provider.base_url == "http://127.0.0.1:11434/v1"
+    assert binding.provider.path == "/chat/completions"
+    assert binding.request_defaults == {"temperature": 0.25}
+
+
+def test_equal_api_base_and_base_url_are_accepted(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path / "config.yaml",
+        """
+model_list:
+  - model_name: local
+    litellm_params:
+      model: openai/qwen3
+      api_base: http://127.0.0.1:11434/v1
+      base_url: http://127.0.0.1:11434/v1
+""",
+    )
+
+    frontend = load_litellm_config(path, {})
+
+    assert frontend.bindings[0].provider.base_url == "http://127.0.0.1:11434/v1"
+    assert frontend.bindings[0].request_defaults == {}
+
+
+def test_conflicting_api_base_and_base_url_are_rejected(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path / "config.yaml",
+        """
+model_list:
+  - model_name: local
+    litellm_params:
+      model: openai/qwen3
+      api_base: http://one.test/v1
+      base_url: http://two.test/v1
+""",
+    )
+
+    with pytest.raises(LiteLLMConfigError, match="api_base and base_url must match"):
+        load_litellm_config(path, {})
+
+
 def test_compiles_extra_headers_as_destination_configuration(tmp_path: Path) -> None:
     path = _write(
         tmp_path / "config.yaml",
@@ -153,6 +226,102 @@ model_list:
 
     assert binding.provider.headers == {"x-tenant": "alpha"}
     assert "extra_headers" not in binding.request_defaults
+
+
+def test_explicit_endpoint_does_not_inherit_native_secrets_or_destination_metadata(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path / "config.yaml",
+        """
+model_list:
+  - model_name: hosted
+    litellm_params:
+      model: anthropic/claude-sonnet
+      api_base: https://third-party.example/v1
+""",
+    )
+    native = Provider(
+        auth=EnvironmentAuthSource(variable="ANTHROPIC_API_KEY"),
+        base_url="https://api.anthropic.com",
+        path="/v1/messages",
+        type="anthropic",
+        headers={"x-private-tenant": "native"},
+        query={"private": "native"},
+        fingerprint_profile="anthropic",
+    )
+
+    binding = load_litellm_config(path, {"anthropic": native}).bindings[0]
+
+    assert binding.provider.base_url == "https://third-party.example/v1"
+    assert binding.provider.auth is None
+    assert binding.provider.query == {}
+    assert "x-private-tenant" not in binding.provider.headers
+    assert binding.provider.headers["anthropic-version"] == "2023-06-01"
+    assert binding.provider.fingerprint_profile is None
+
+
+def test_explicit_deepseek_endpoint_uses_litellm_openai_dialect(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path / "config.yaml",
+        """
+model_list:
+  - model_name: deepseek
+    litellm_params:
+      model: deepseek/deepseek-chat
+      api_base: https://api.deepseek.com/v1
+      api_key: test-key
+""",
+    )
+
+    binding = load_litellm_config(path, {}).bindings[0]
+
+    assert binding.provider.type == "openai"
+    assert binding.provider.path == "/chat/completions"
+    assert binding.provider.auth is not None
+    assert binding.provider.auth.header is None
+
+
+def test_pricing_fields_move_to_model_info_not_request_defaults(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path / "config.yaml",
+        """
+model_list:
+  - model_name: local
+    litellm_params:
+      model: openai/qwen3
+      api_base: http://127.0.0.1:11434/v1
+      temperature: 0.25
+      input_cost_per_token: 0.000001
+      cache_read_input_token_cost: 0.0000001
+""",
+    )
+
+    binding = load_litellm_config(path, {}).bindings[0]
+
+    assert binding.request_defaults == {"temperature": 0.25}
+    assert binding.model_info["input_cost_per_token"] == 0.000001
+    assert binding.model_info["cache_read_input_token_cost"] == 0.0000001
+
+
+def test_model_info_environment_reference_is_not_expanded_for_catalog_exposure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SENSITIVE_VALUE", "do-not-expose")
+    path = _write(
+        tmp_path / "config.yaml",
+        """
+model_list:
+  - model_name: local
+    litellm_params:
+      model: openai/qwen3
+      api_base: http://127.0.0.1:11434/v1
+    model_info:
+      internal_value: os.environ/SENSITIVE_VALUE
+""",
+    )
+
+    binding = load_litellm_config(path, {}).bindings[0]
+
+    assert binding.model_info["internal_value"] == "os.environ/SENSITIVE_VALUE"
 
 
 def test_explicit_gemini_version_base_does_not_duplicate_version_path(tmp_path: Path) -> None:

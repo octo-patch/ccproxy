@@ -89,6 +89,7 @@ _STRUCTURAL_KEYS = frozenset(
     {
         "model",
         "api_base",
+        "base_url",
         "api_key",
         "custom_llm_provider",
         "extra_headers",
@@ -147,6 +148,21 @@ _UNSUPPORTED_CONFIG_KEYS = frozenset(
         "vertex_credentials",
         "vertex_location",
         "vertex_project",
+        "drop_params",
+        "merge_reasoning_content_in_choices",
+    }
+)
+
+_MODEL_INFO_KEYS = frozenset(
+    {
+        "input_cost_per_token",
+        "output_cost_per_token",
+        "input_cost_per_character",
+        "output_cost_per_character",
+        "cache_read_input_token_cost",
+        "cache_creation_input_token_cost",
+        "mode",
+        "supports_system_message",
     }
 )
 
@@ -228,7 +244,8 @@ def _resolve_environment(value: Any, *, path: str = "") -> Any:
         return {
             key: (
                 child
-                if key == "api_key" and isinstance(child, str) and child.startswith("os.environ/")
+                if key == "model_info"
+                or (key == "api_key" and isinstance(child, str) and child.startswith("os.environ/"))
                 else _resolve_environment(child, path=f"{path}.{key}" if path else key)
             )
             for key, child in value.items()
@@ -442,11 +459,21 @@ def load_litellm_config(path: Path, providers: dict[str, Any]) -> LiteLLMFronten
             raise LiteLLMConfigError(
                 f"model_list[{index}].litellm_params.model={raw_model!r} has no provider prefix or resolvable alias"
             )
-        adapter_type = _adapter_type(source_provider)
-        inherited = _native_provider(
-            providers,
-            source_provider=source_provider,
-            adapter_type=adapter_type,
+        has_explicit_endpoint = params.get("api_base") is not None or params.get("base_url") is not None
+        # LiteLLM's DeepSeek provider is OpenAI-compatible. ccproxy also has an
+        # intentionally Anthropic-compatible native DeepSeek service; retain
+        # that only when a declaration inherits the native endpoint.
+        adapter_type = (
+            "openai" if source_provider == "deepseek" and has_explicit_endpoint else _adapter_type(source_provider)
+        )
+        inherited = (
+            None
+            if has_explicit_endpoint
+            else _native_provider(
+                providers,
+                source_provider=source_provider,
+                adapter_type=adapter_type,
+            )
         )
 
         for key in _ROUTER_KEYS:
@@ -478,8 +505,16 @@ def load_litellm_config(path: Path, providers: dict[str, Any]) -> LiteLLMFronten
             raise LiteLLMConfigError(f"model_list[{index}].model_info.blocked requests LiteLLM deployment disabling")
 
         api_base = params.get("api_base")
+        base_url_alias = params.get("base_url")
         if api_base is not None and not isinstance(api_base, str):
             raise LiteLLMConfigError(f"model_list[{index}].litellm_params.api_base must be a string")
+        if base_url_alias is not None and not isinstance(base_url_alias, str):
+            raise LiteLLMConfigError(f"model_list[{index}].litellm_params.base_url must be a string")
+        if api_base is not None and base_url_alias is not None and api_base != base_url_alias:
+            raise LiteLLMConfigError(
+                f"model_list[{index}].litellm_params.api_base and base_url must match when both are set"
+            )
+        api_base = api_base or base_url_alias
         if api_base is None:
             if inherited is None:
                 raise LiteLLMConfigError(
@@ -499,7 +534,8 @@ def load_litellm_config(path: Path, providers: dict[str, Any]) -> LiteLLMFronten
             source_provider=source_provider,
             adapter_type=adapter_type,
         )
-        auth = explicit_auth or (inherited_provider.auth if inherited_provider is not None else None)
+        inherit_destination = inherited_provider is not None and not has_explicit_endpoint
+        auth = explicit_auth or (inherited_provider.auth if inherit_destination else None)
         if (
             explicit_auth is not None
             and api_base is None
@@ -509,8 +545,8 @@ def load_litellm_config(path: Path, providers: dict[str, Any]) -> LiteLLMFronten
             raise LiteLLMConfigError(
                 f"model_list[{index}] must set api_base when api_key overrides a native Gemini OAuth deployment"
             )
-        headers = dict(inherited_provider.headers) if inherited_provider is not None else {}
-        query = dict(inherited_provider.query) if inherited_provider is not None else {}
+        headers = dict(inherited_provider.headers) if inherit_destination else {}
+        query = dict(inherited_provider.query) if inherit_destination else {}
         extra_headers = params.get("extra_headers")
         if extra_headers is not None:
             if not isinstance(extra_headers, dict) or not all(
@@ -527,6 +563,8 @@ def load_litellm_config(path: Path, providers: dict[str, Any]) -> LiteLLMFronten
             headers["openai-organization"] = organization
         elif organization is not None:
             raise LiteLLMConfigError(f"model_list[{index}].litellm_params.organization must be a string")
+        if has_explicit_endpoint and adapter_type in _ANTHROPIC_TYPES:
+            headers.setdefault("anthropic-version", "2023-06-01")
         effective = Provider(
             base_url=base_url,
             path=endpoint_path,
@@ -534,7 +572,7 @@ def load_litellm_config(path: Path, providers: dict[str, Any]) -> LiteLLMFronten
             auth=auth,
             headers=headers,
             query=query,
-            fingerprint_profile=(inherited_provider.fingerprint_profile if inherited_provider is not None else None),
+            fingerprint_profile=(inherited_provider.fingerprint_profile if inherit_destination else None),
         )
         if inherited_provider is not None and effective == inherited_provider:
             provider_name = inherited_name
@@ -543,10 +581,18 @@ def load_litellm_config(path: Path, providers: dict[str, Any]) -> LiteLLMFronten
             provider_name = f"litellm:{index}:{deployment.model_name}"
             deployment_providers[provider_name] = effective
 
+        model_info = deepcopy(deployment.model_info)
+        for key in _MODEL_INFO_KEYS:
+            if key in params:
+                model_info.setdefault(key, params[key])
+
         defaults = {
             key: value
             for key, value in params.items()
-            if key not in _STRUCTURAL_KEYS and key not in _ROUTER_KEYS and key not in _UNSUPPORTED_CONFIG_KEYS
+            if key not in _STRUCTURAL_KEYS
+            and key not in _ROUTER_KEYS
+            and key not in _UNSUPPORTED_CONFIG_KEYS
+            and key not in _MODEL_INFO_KEYS
         }
         bindings.append(
             ModelBinding.create(
@@ -556,7 +602,7 @@ def load_litellm_config(path: Path, providers: dict[str, Any]) -> LiteLLMFronten
                 provider_name=provider_name,
                 provider=effective,
                 request_defaults=defaults,
-                model_info=deployment.model_info,
+                model_info=model_info,
                 source_index=index,
             )
         )

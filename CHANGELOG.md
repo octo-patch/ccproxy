@@ -3,6 +3,24 @@
 All notable changes to ccproxy are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Added
+
+- Added LiteLLM-compatible `config.yaml` model declarations compiled into
+  ccproxy's provider, authentication, transform, and `/v1/models` services.
+- Added exact and wildcard aliases, deterministic alias chains, includes,
+  `api_base`/`base_url`, runtime environment-key sources, metadata, headers,
+  organization, and client-wins request defaults for the faithfully supported
+  subset.
+
+### Security
+
+- Explicit model endpoints are isolated from native provider credentials,
+  headers, query parameters, and fingerprint profiles. Provider transitions
+  clear stale header and query credentials before applying the selected
+  provider.
+
 ## [2.0.0] — 2026-06-12
 
 ccproxy 2.0 is a clean break from 1.x: the LiteLLM proxy subprocess and

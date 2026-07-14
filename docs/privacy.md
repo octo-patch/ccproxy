@@ -292,13 +292,19 @@ The project dev shell may instead set:
 CCPROXY_CONFIG_DIR=$PWD/.ccproxy
 ```
 
-### `ccproxy.yaml`
+### Configuration files
 
 `ccproxy.yaml` can contain provider definitions, auth source commands, auth
-source file paths, model routing rules, shaping settings, and MCP settings.
+source file paths, explicit transform rules, shaping settings, and MCP settings.
+The sibling LiteLLM-compatible `config.yaml` can contain literal API keys,
+`os.environ/NAME` references, destinations, headers, organizations, model
+metadata, and request defaults.
 
 Even when credentials are loaded through commands or external files, the config
 can reveal where secrets live and which providers/accounts are in use.
+Protect both files with restrictive permissions. Environment references inside
+opaque `model_info` are deliberately left unexpanded so their values cannot be
+exposed through the synthetic `/v1/models` response.
 
 ### `.inspector-wireguard-client.conf`
 

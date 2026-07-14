@@ -2,8 +2,12 @@
 
 Config discovery precedence:
 
-1. ``CCPROXY_CONFIG_DIR`` env var → ``$CCPROXY_CONFIG_DIR/ccproxy.yaml``
-2. ``$XDG_CONFIG_HOME/ccproxy/ccproxy.yaml`` (defaults to ``~/.config/ccproxy/ccproxy.yaml``)
+1. ``CCPROXY_CONFIG_DIR`` env var → sibling ``ccproxy.yaml`` + ``config.yaml``
+2. ``$XDG_CONFIG_HOME/ccproxy/`` (defaults to ``~/.config/ccproxy/``)
+
+``ccproxy.yaml`` owns native services. LiteLLM-compatible ``config.yaml``
+model declarations compile into those existing services without importing
+LiteLLM.
 
 Individual fields can be overridden via ``CCPROXY_`` prefixed env vars
 (e.g. ``CCPROXY_PORT=4001``).
@@ -497,6 +501,19 @@ class Provider(BaseModel):
             return value.value
         return value
 
+    @model_validator(mode="before")
+    @classmethod
+    def _migrate_legacy_host(cls, value: Any) -> Any:
+        """Keep pre-``base_url`` ccproxy.yaml provider entries loadable."""
+        if not isinstance(value, dict) or "base_url" in value or "host" not in value:
+            return value
+        migrated = dict(value)
+        host = migrated.pop("host")
+        if not isinstance(host, str) or not host:
+            raise ValueError("provider host must be a non-empty string")
+        migrated["base_url"] = f"https://{host}"
+        return migrated
+
     @field_validator("base_url")
     @classmethod
     def _validate_base_url(cls, value: str) -> str:
@@ -562,7 +579,11 @@ class ModelBinding(BaseModel):
     ) -> "ModelBinding":
         if model_name.count("*") > 1:
             raise ValueError(f"model_list[{source_index}].model_name supports at most one wildcard")
-        pattern = "^" + re.escape(model_name).replace(r"\*", "(?P<wildcard>.*)") + "$"
+        if upstream_model.count("*") > 1:
+            raise ValueError(f"model_list[{source_index}].litellm_params.model supports at most one wildcard")
+        if "*" in upstream_model and "*" not in model_name:
+            raise ValueError(f"model_list[{source_index}].litellm_params.model wildcard requires a wildcard model_name")
+        pattern = "^" + re.escape(model_name).replace(r"\*", "(?P<wildcard>.+)") + "$"
         return cls(
             model_name=model_name,
             upstream_model=upstream_model,
@@ -584,6 +605,16 @@ class ModelBinding(BaseModel):
             raise ValueError(f"model {model!r} does not match binding {self.model_name!r}")
         wildcard = match.groupdict().get("wildcard", "")
         return self.upstream_model.replace("*", wildcard)
+
+    def public_model_for_upstream(self, upstream_model: str) -> str | None:
+        """Project one discovered upstream ID through paired wildcard templates."""
+        if "*" not in self.model_name or "*" not in self.upstream_model:
+            return None
+        pattern = "^" + re.escape(self.upstream_model).replace(r"\*", "(?P<wildcard>.+)") + "$"
+        match = re.fullmatch(pattern, upstream_model)
+        if match is None:
+            return None
+        return self.model_name.replace("*", match.group("wildcard"))
 
     def apply_defaults(self, body: dict[str, Any]) -> dict[str, Any]:
         merged = deepcopy(body)
@@ -825,7 +856,7 @@ def _default_hooks() -> dict[str, list[str | dict[str, Any]]]:
 
 
 class CCProxyConfig(BaseSettings):
-    """Main configuration for ccproxy that reads from ccproxy.yaml."""
+    """Existing ccproxy service configuration plus compiled model bindings."""
 
     model_config = SettingsConfigDict(
         case_sensitive=False,

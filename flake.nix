@@ -294,6 +294,7 @@
       devShells = lib.mapAttrs (_: v: v.devShells) perSystem;
       lib = lib.mapAttrs (_: v: v.lib) perSystem;
 
+      inherit defaultSettings;
       homeModules.ccproxy = import ./nix/module.nix;
       nixosConfigurations.ccproxy-wsl = nixpkgs.lib.nixosSystem {
         system = "x86_64-linux";

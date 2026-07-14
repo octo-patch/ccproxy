@@ -653,6 +653,62 @@ class TestHandleRedirect:
 
 
 class TestLiteLLMModelBindings:
+    def test_exact_binding_precedes_earlier_wildcard(self) -> None:
+        wildcard_provider = Provider(base_url="https://wildcard.example/v1", path="/chat/completions", type="openai")
+        exact_provider = Provider(base_url="https://exact.example/v1", path="/chat/completions", type="openai")
+        wildcard = ModelBinding.create(
+            model_name="*",
+            upstream_model="*",
+            owned_by="openai",
+            provider_name="wildcard",
+            provider=wildcard_provider,
+            request_defaults={},
+            model_info={},
+            source_index=0,
+        )
+        exact = ModelBinding.create(
+            model_name="special",
+            upstream_model="actual-special",
+            owned_by="openai",
+            provider_name="exact",
+            provider=exact_provider,
+            request_defaults={},
+            model_info={},
+            source_index=1,
+        )
+        set_config_instance(CCProxyConfig(model_bindings=[wildcard, exact]))
+
+        target = _resolve_transform_target(_make_flow(body={"model": "special"}), {"model": "special"})
+
+        assert target is exact
+
+    def test_gemini_path_model_selects_binding(self) -> None:
+        provider = Provider(
+            base_url="https://generativelanguage.googleapis.com/v1beta",
+            path="/models/{model}:{action}",
+            type="gemini",
+        )
+        binding = ModelBinding.create(
+            model_name="gemini-alias",
+            upstream_model="gemini-2.5-pro",
+            owned_by="gemini",
+            provider_name="gemini",
+            provider=provider,
+            request_defaults={},
+            model_info={},
+            source_index=0,
+        )
+        set_config_instance(CCProxyConfig(model_bindings=[binding]))
+        flow = _make_flow(
+            host="proxy.local",
+            path="/v1beta/models/gemini-alias:generateContent",
+            body={"contents": [{"role": "user", "parts": [{"text": "hello"}]}]},
+        )
+
+        target = _resolve_transform_target(flow, json.loads(flow.request.content))
+
+        assert target is binding
+
     def test_wildcard_binding_routes_http_port_rewrites_model_and_applies_defaults(
         self,
         monkeypatch: Any,

@@ -131,6 +131,26 @@ model_list:
     assert [entry["id"] for entry in catalog["data"]] == ["local/qwen"]
 
 
+def test_refresh_inverts_upstream_wildcard_and_filters_nonmatches(tmp_path: Path) -> None:
+    _configure(
+        tmp_path,
+        """
+model_list:
+  - model_name: local/*
+    litellm_params:
+      model: openai/qwen-*
+      api_base: https://router.example/v1
+""",
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"data": [{"id": "qwen-7b"}, {"id": "llama-8b"}]})
+
+    catalog = build_catalog(refresh=True, transport=httpx.MockTransport(handler))
+
+    assert [entry["id"] for entry in catalog["data"]] == ["local/7b"]
+
+
 def test_refresh_failure_keeps_concrete_aliases(tmp_path: Path) -> None:
     _configure(
         tmp_path,

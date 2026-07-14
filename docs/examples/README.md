@@ -90,7 +90,7 @@ Using LiteLLM's Python SDK with async completion API.
 # litellm is a client-side choice — install it where you're running the example
 uv pip install litellm
 
-# Configure credentials in ~/.config/ccproxy/ccproxy.yaml
+# Configure credentials in ccproxy.yaml and models in sibling config.yaml
 # Start ccproxy
 ccproxy start
 ```
@@ -135,7 +135,7 @@ uv run python docs/examples/zai_anthropic_sdk.py
 
 **Features:**
 - Routes through ccproxy at `http://127.0.0.1:4000`
-- Model: `glm-4.7` (resolved via `providers.zai` in `~/.config/ccproxy/ccproxy.yaml`)
+- Model: `glm-4.7` (declared in `config.yaml`, inheriting native `providers.zai`)
 - Sentinel API key — ccproxy substitutes the real auth token via `inject_auth`
 
 ---
@@ -289,7 +289,8 @@ ccproxy status
 Examples expect ccproxy running with:
 - **Proxy port**: 4000 (default)
 - **OAuth credentials**: Configured in `~/.config/ccproxy/ccproxy.yaml` under `providers`
-- **Model routing**: Driven by sentinel-key resolution against `providers`. Use `lightllm.transforms` (`TransformOverride` entries) only for edge cases — bypassing auth for a host or forcing a specific destination for a path/model combo.
+- **Model definitions**: Declared in sibling `~/.config/ccproxy/config.yaml`
+- **Model routing**: Explicit transform overrides win, followed by exact/wildcard compiled model bindings and sentinel Provider fallback.
 
 ### Example ccproxy.yaml Provider Configuration
 
@@ -300,7 +301,7 @@ ccproxy:
       auth:
         type: command
         command: "jq -r '.claudeAiOauth.accessToken' ~/.claude/.credentials.json"
-      host: api.anthropic.com
+      base_url: https://api.anthropic.com
       path: /v1/messages
       type: anthropic
 ```

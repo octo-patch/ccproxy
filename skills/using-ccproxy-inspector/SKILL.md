@@ -26,7 +26,8 @@ InspectorAddon -> FingerprintCaptureAddon -> MultiHARSaver -> ShapeCaptureAddon
 ```
 
 Use the `using-ccproxy-api` skill for provider auth, sentinel keys, SDK base URL
-configuration, and `ccproxy.yaml` setup.
+configuration, native `ccproxy.yaml` setup, and sibling `config.yaml` model
+routing when applicable.
 
 The ccproxy plugin does not install or register the ccproxy FastMCP server for
 the user. If an MCP-aware client should use ccproxy's flow-inspection tools,

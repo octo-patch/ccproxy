@@ -1148,7 +1148,7 @@ providers:
     auth:
       type: file
       file: ~/.myvendor/token
-    host: api.myvendor.com
+    base_url: https://api.myvendor.com
     path: /v1/messages
     type: anthropic        # ← wire format = anthropic-compatible
 ```

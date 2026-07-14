@@ -59,6 +59,24 @@ class TestCCProxyConfig:
         assert config.provider_max_connections == 256
         assert config.ccproxy_config_path == Path("./ccproxy.yaml")
 
+    def test_legacy_provider_host_migrates_to_https_base_url(self, tmp_path: Path) -> None:
+        yaml_path = tmp_path / "ccproxy.yaml"
+        yaml_path.write_text(
+            """
+ccproxy:
+  providers:
+    anthropic:
+      host: api.anthropic.com
+      path: /v1/messages
+      type: anthropic
+"""
+        )
+
+        config = CCProxyConfig.from_yaml(yaml_path, litellm_path=tmp_path / "absent.yaml")
+
+        assert config.providers["anthropic"].base_url == "https://api.anthropic.com"
+        assert config.providers["anthropic"].host == "api.anthropic.com"
+
     def test_from_yaml_no_project_section(self) -> None:
         """Test loading ccproxy.yaml without ccproxy section."""
         yaml_content = """
