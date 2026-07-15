@@ -286,6 +286,10 @@ corresponding values below when selecting another MiniMax endpoint:
 | `openai` | Global | `https://api.minimax.io/v1` | `/chat/completions` | Omit to use the default Bearer header |
 | `openai` | China | `https://api.minimaxi.com/v1` | `/chat/completions` | Omit to use the default Bearer header |
 
+MiniMax-M3 supports adaptive and disabled thinking. The Anthropic-compatible API defaults thinking off,
+while the OpenAI-compatible API defaults adaptive thinking on; set the mode explicitly for portable behavior.
+MiniMax-M2.7 always uses interleaved thinking.
+
 **Provider entry fields:**
 
 | Field | Description |

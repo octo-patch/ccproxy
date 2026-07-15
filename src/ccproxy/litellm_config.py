@@ -461,12 +461,16 @@ def load_litellm_config(path: Path, providers: dict[str, Any]) -> LiteLLMFronten
                 f"model_list[{index}].litellm_params.model={raw_model!r} has no provider prefix or resolvable alias"
             )
         has_explicit_endpoint = params.get("api_base") is not None or params.get("base_url") is not None
+        configured_provider = providers.get(source_provider) if not has_explicit_endpoint else None
         # LiteLLM's DeepSeek provider is OpenAI-compatible. ccproxy also has an
         # intentionally Anthropic-compatible native DeepSeek service; retain
         # that only when a declaration inherits the native endpoint.
-        adapter_type = (
-            "openai" if source_provider == "deepseek" and has_explicit_endpoint else _adapter_type(source_provider)
-        )
+        if source_provider == "minimax" and configured_provider is not None and configured_provider.type == "openai":
+            adapter_type = "openai"
+        else:
+            adapter_type = (
+                "openai" if source_provider == "deepseek" and has_explicit_endpoint else _adapter_type(source_provider)
+            )
         inherited = (
             None
             if has_explicit_endpoint
