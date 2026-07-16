@@ -147,6 +147,30 @@ model_list:
     assert [entry["id"] for entry in catalog["data"]] == ["local/qwen"]
 
 
+def test_refresh_supports_explicit_minimax_anthropic_provider(tmp_path: Path) -> None:
+    _configure(
+        tmp_path,
+        """
+model_list:
+  - model_name: minimax/*
+    litellm_params:
+      model: minimax/*
+      api_base: https://api.minimax.io/anthropic
+      api_key: test-key
+""",
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert str(request.url) == "https://api.minimax.io/anthropic/v1/models"
+        assert request.headers["x-api-key"] == "test-key"
+        assert request.headers["anthropic-version"] == "2023-06-01"
+        return httpx.Response(200, json={"data": [{"id": "MiniMax-M3"}]})
+
+    catalog = build_catalog(refresh=True, transport=httpx.MockTransport(handler))
+
+    assert [entry["id"] for entry in catalog["data"]] == ["minimax/MiniMax-M3"]
+
+
 def test_refresh_inverts_upstream_wildcard_and_filters_nonmatches(tmp_path: Path) -> None:
     _configure(
         tmp_path,
