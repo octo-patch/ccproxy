@@ -724,10 +724,10 @@ class TestMiniMaxProviderDefault:
                 },
             ],
             "pricing_usd_per_million_tokens": {
-                "cache_read": 0.06,
+                "cache_read": 0.12,
                 "cache_write": None,
-                "input": 0.3,
-                "output": 1.2,
+                "input": 0.6,
+                "output": 2.4,
             },
             "thinking": ["adaptive", "disabled"],
         }

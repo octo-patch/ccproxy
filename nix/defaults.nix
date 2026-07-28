@@ -424,9 +424,9 @@ in
         model_info = {
           context_window = 1000000;
           pricing_usd_per_million_tokens = {
-            input = 0.3;
-            output = 1.2;
-            cache_read = 0.06;
+            input = 0.6;
+            output = 2.4;
+            cache_read = 0.12;
             cache_write = null;
           };
           pricing_tiers_usd_per_million_tokens = [
