@@ -67,31 +67,6 @@ model_list:
     - text
     - image
     - video
-    pricing_tiers_usd_per_million_tokens:
-    - cache_read: 0.06
-      cache_write: null
-      input: 0.3
-      input_tokens_lte: 512000
-      output: 1.2
-      service_tier: standard
-    - cache_read: 0.12
-      cache_write: null
-      input: 0.6
-      input_tokens_gt: 512000
-      output: 2.4
-      service_tier: standard
-    - cache_read: 0.09
-      cache_write: null
-      input: 0.45
-      input_tokens_lte: 512000
-      output: 1.8
-      service_tier: priority
-    - cache_read: 0.18
-      cache_write: null
-      input: 0.9
-      input_tokens_gt: 512000
-      output: 3.6
-      service_tier: priority
     pricing_usd_per_million_tokens:
       cache_read: 0.12
       cache_write: null

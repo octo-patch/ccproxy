@@ -47,7 +47,12 @@ def test_packaged_minimax_entries_include_model_metadata() -> None:
 
     assert entries["MiniMax-M3"]["model_info"]["context_window"] == 1000000
     assert entries["MiniMax-M3"]["model_info"]["input_modalities"] == ["text", "image", "video"]
-    assert len(entries["MiniMax-M3"]["model_info"]["pricing_tiers_usd_per_million_tokens"]) == 4
+    assert entries["MiniMax-M3"]["model_info"]["pricing_usd_per_million_tokens"] == {
+        "cache_read": 0.12,
+        "cache_write": None,
+        "input": 0.6,
+        "output": 2.4,
+    }
     assert entries["MiniMax-M3"]["model_info"]["thinking"] == ["adaptive", "disabled"]
     assert entries["MiniMax-M2.7"]["model_info"]["context_window"] == 204800
     assert entries["MiniMax-M2.7"]["model_info"]["thinking"] == ["always_on"]
