@@ -45,17 +45,27 @@ def test_packaged_minimax_entries_include_model_metadata() -> None:
 
     entries = {entry["id"]: entry for entry in build_catalog()["data"]}
 
+    assert [name for name, entry in entries.items() if entry["owned_by"] == "minimax"] == [
+        "MiniMax-M3.1-Flash",
+        "MiniMax-M3",
+    ]
+    assert entries["MiniMax-M3.1-Flash"]["model_info"]["max_output_tokens"] == 524288
+    assert entries["MiniMax-M3.1-Flash"]["model_info"]["thinking"] == ["adaptive"]
+    assert entries["MiniMax-M3.1-Flash"]["model_info"]["pricing_usd_per_million_tokens"] == {
+        "cache_read": 0.015,
+        "cache_write": None,
+        "input": 0.15,
+        "output": 0.6,
+    }
     assert entries["MiniMax-M3"]["model_info"]["context_window"] == 1000000
     assert entries["MiniMax-M3"]["model_info"]["input_modalities"] == ["text", "image", "video"]
     assert entries["MiniMax-M3"]["model_info"]["pricing_usd_per_million_tokens"] == {
-        "cache_read": 0.12,
+        "cache_read": 0.06,
         "cache_write": None,
-        "input": 0.6,
-        "output": 2.4,
+        "input": 0.3,
+        "output": 1.2,
     }
     assert entries["MiniMax-M3"]["model_info"]["thinking"] == ["adaptive", "disabled"]
-    assert entries["MiniMax-M2.7"]["model_info"]["context_window"] == 204800
-    assert entries["MiniMax-M2.7"]["model_info"]["thinking"] == ["always_on"]
 
 
 def test_concrete_aliases_are_the_offline_catalog(tmp_path: Path) -> None:

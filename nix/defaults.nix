@@ -419,14 +419,35 @@ in
         litellm_params.model = "deepseek/deepseek-v4";
       }
       {
+        model_name = "MiniMax-M3.1-Flash";
+        litellm_params.model = "minimax/MiniMax-M3.1-Flash";
+        model_info = {
+          context_window = 1000000;
+          max_output_tokens = 524288;
+          pricing_usd_per_million_tokens = {
+            input = 0.15;
+            output = 0.6;
+            cache_read = 0.015;
+            cache_write = null;
+          };
+          input_modalities = [
+            "text"
+            "image"
+            "video"
+          ];
+          thinking = [ "adaptive" ];
+        };
+      }
+      {
         model_name = "MiniMax-M3";
         litellm_params.model = "minimax/MiniMax-M3";
         model_info = {
           context_window = 1000000;
+          # Standard pricing through 512k context; see docs/configuration.md for tiers.
           pricing_usd_per_million_tokens = {
-            input = 0.6;
-            output = 2.4;
-            cache_read = 0.12;
+            input = 0.3;
+            output = 1.2;
+            cache_read = 0.06;
             cache_write = null;
           };
           input_modalities = [
@@ -438,21 +459,6 @@ in
             "adaptive"
             "disabled"
           ];
-        };
-      }
-      {
-        model_name = "MiniMax-M2.7";
-        litellm_params.model = "minimax/MiniMax-M2.7";
-        model_info = {
-          context_window = 204800;
-          pricing_usd_per_million_tokens = {
-            input = 0.3;
-            output = 1.2;
-            cache_read = 0.06;
-            cache_write = 0.375;
-          };
-          input_modalities = [ "text" ];
-          thinking = [ "always_on" ];
         };
       }
     ] ++ perplexityModelBindings;

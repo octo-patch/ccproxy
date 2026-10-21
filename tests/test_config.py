@@ -680,31 +680,36 @@ class TestMiniMaxProviderDefault:
         config = self._load_packaged_config()
         bindings = {binding.model_name: binding for binding in config.model_bindings}
 
-        for model_id in ("MiniMax-M3", "MiniMax-M2.7"):
+        assert [name for name, binding in bindings.items() if binding.owned_by == "minimax"] == [
+            "MiniMax-M3.1-Flash",
+            "MiniMax-M3",
+        ]
+        for model_id in ("MiniMax-M3.1-Flash", "MiniMax-M3"):
             binding = bindings[model_id]
             assert binding.owned_by == "minimax"
             assert binding.upstream_model == model_id
             assert binding.provider.type == "minimax"
 
+        assert bindings["MiniMax-M3.1-Flash"].model_info == {
+            "context_window": 1000000,
+            "max_output_tokens": 524288,
+            "input_modalities": ["text", "image", "video"],
+            "pricing_usd_per_million_tokens": {
+                "cache_read": 0.015,
+                "cache_write": None,
+                "input": 0.15,
+                "output": 0.6,
+            },
+            "thinking": ["adaptive"],
+        }
         assert bindings["MiniMax-M3"].model_info == {
             "context_window": 1000000,
             "input_modalities": ["text", "image", "video"],
             "pricing_usd_per_million_tokens": {
-                "cache_read": 0.12,
-                "cache_write": None,
-                "input": 0.6,
-                "output": 2.4,
-            },
-            "thinking": ["adaptive", "disabled"],
-        }
-        assert bindings["MiniMax-M2.7"].model_info == {
-            "context_window": 204800,
-            "input_modalities": ["text"],
-            "pricing_usd_per_million_tokens": {
                 "cache_read": 0.06,
-                "cache_write": 0.375,
+                "cache_write": None,
                 "input": 0.3,
                 "output": 1.2,
             },
-            "thinking": ["always_on"],
+            "thinking": ["adaptive", "disabled"],
         }

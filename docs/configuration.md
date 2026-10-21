@@ -273,7 +273,7 @@ ccproxy:
         header: x-api-key      # send token as `x-api-key: <token>` (not `Authorization: Bearer ...`)
       base_url: https://api.minimax.io/anthropic
       path: /v1/messages
-      type: anthropic          # MiniMax-M3 and MiniMax-M2.7 via the compatible endpoint
+      type: anthropic          # MiniMax-M3.1-Flash and MiniMax-M3 via the compatible endpoint
 ```
 
 The packaged template selects the global `anthropic` endpoint. A provider has one destination, so use the
@@ -286,9 +286,23 @@ corresponding values below when selecting another MiniMax endpoint:
 | `openai` | Global | `https://api.minimax.io/v1` | `/chat/completions` | Omit to use the default Bearer header |
 | `openai` | China | `https://api.minimaxi.com/v1` | `/chat/completions` | Omit to use the default Bearer header |
 
+The packaged MiniMax catalog lists `MiniMax-M3.1-Flash` first, followed by `MiniMax-M3`.
+Existing `config.yaml` files and explicitly configured model aliases, including legacy IDs, are not migrated.
+Wildcard bindings remain an explicit opt-in to discovery from the user's configured endpoint.
+
+MiniMax-M3.1-Flash supports adaptive thinking only. Omit thinking to use the API default, or send
+`thinking: {type: adaptive}`. Its effort values are `low`, `medium`, `high`, `xhigh`, and `max` (default):
+use `output_config.effort` for the Anthropic-compatible API and `reasoning_effort` for Chat Completions.
+`disabled` thinking, `none` effort, `service_tier`, and `reasoning_split: false` are unsupported for Flash.
 MiniMax-M3 supports adaptive and disabled thinking. The Anthropic-compatible API defaults thinking off,
-while the OpenAI-compatible API defaults adaptive thinking on; set the mode explicitly for portable behavior.
-MiniMax-M2.7 always uses interleaved thinking.
+while Chat Completions defaults adaptive thinking on; M3 ignores effort. ccproxy preserves explicit
+same-format request parameters, so clients must use the parameters appropriate to their selected model.
+
+Flash has a 1,000,000-token context window and a 524,288-token maximum output. Its input/output/cache-read
+prices are USD 0.15/0.60/0.015 per million tokens. The packaged M3 prices (USD 0.30/1.20/0.06) describe
+standard service through 512k input tokens; above 512k they are USD 0.60/2.40/0.12, with a 1.5x priority multiplier.
+Cache-write pricing is unspecified. See the official [model guide](https://platform.minimax.io/docs/guides/models-intro.md)
+and [pricing](https://platform.minimax.io/docs/pricing/overview.md) for the current direct API contract.
 
 **Provider entry fields:**
 
